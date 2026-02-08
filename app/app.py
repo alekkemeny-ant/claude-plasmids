@@ -25,7 +25,7 @@ import time
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent / ".env")
+    load_dotenv(Path(__file__).parent.parent / ".env")
 except ImportError:
     pass  # dotenv not installed; rely on environment variables
 
@@ -37,12 +37,22 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from assembler import (
     assemble_construct as _assemble_construct,
+    fuse_sequences as _fuse_sequences,
     find_mcs_insertion_point,
     clean_sequence,
     validate_dna,
     format_as_fasta,
     format_as_genbank,
 )
+
+try:
+    from ncbi_integration import (
+        search_gene as _search_gene_fn,
+        fetch_gene_sequence as _fetch_gene_fn,
+    )
+    NCBI_AVAILABLE = True
+except ImportError:
+    NCBI_AVAILABLE = False
 from library import (
     get_backbone_by_id,
     get_insert_by_id,
@@ -243,6 +253,53 @@ TOOLS = [
                 "include_sequence": {"type": "boolean", "description": "Fetch and store sequence", "default": True},
             },
             "required": ["addgene_id"],
+        },
+    },
+    {
+        "name": "search_gene",
+        "description": "Search NCBI Gene database by gene symbol or name. Returns matching genes with IDs, symbols, organisms, and aliases. Use when a user mentions a gene not in the local insert library.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Gene symbol or name (e.g., 'TP53', 'MyD88')"},
+                "organism": {"type": "string", "description": "Organism filter (e.g., 'human', 'mouse')"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fetch_gene",
+        "description": "Fetch the coding DNA sequence (CDS) for a gene from NCBI RefSeq. Returns the CDS sequence, accession, organism, and metadata.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "gene_id": {"type": "string", "description": "NCBI Gene ID (e.g., '7157' for human TP53)"},
+                "gene_symbol": {"type": "string", "description": "Gene symbol (e.g., 'TP53')"},
+                "organism": {"type": "string", "description": "Organism (e.g., 'human', 'mouse')"},
+            },
+        },
+    },
+    {
+        "name": "fuse_inserts",
+        "description": "Fuse multiple coding sequences into a single CDS for protein tagging or fusion proteins. Handles start/stop codon management. Use for N-terminal tags (FLAG-GeneX), C-terminal tags (GeneX-FLAG), or fusions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "inserts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "insert_id": {"type": "string", "description": "Insert ID from library"},
+                            "sequence": {"type": "string", "description": "Raw DNA sequence"},
+                            "name": {"type": "string", "description": "Name for this sequence"},
+                        },
+                    },
+                    "description": "Ordered list of sequences to fuse (N-terminal first, C-terminal last)",
+                },
+                "linker": {"type": "string", "description": "Optional linker DNA between fusion partners"},
+            },
+            "required": ["inserts"],
         },
     },
 ]
@@ -473,6 +530,64 @@ def execute_tool(name: str, args: dict) -> str:
                 out += f", sequence: {len(bb['sequence'])} bp"
             return out
 
+        elif name == "search_gene":
+            if not NCBI_AVAILABLE:
+                return "NCBI integration not available. Install biopython: pip install biopython"
+            results = _search_gene_fn(args["query"], args.get("organism"))
+            if not results:
+                return f"No genes found matching '{args['query']}'"
+            lines = [f"NCBI Gene results for '{args['query']}':"]
+            for r in results:
+                aliases = f" (aliases: {r['aliases']})" if r.get("aliases") else ""
+                lines.append(f"- {r['symbol']} (Gene ID: {r['gene_id']}) — {r['full_name']} [{r['organism']}]{aliases}")
+            return "\n".join(lines)
+
+        elif name == "fetch_gene":
+            if not NCBI_AVAILABLE:
+                return "NCBI integration not available. Install biopython: pip install biopython"
+            result = _fetch_gene_fn(
+                gene_id=args.get("gene_id"),
+                gene_symbol=args.get("gene_symbol"),
+                organism=args.get("organism"),
+            )
+            if not result:
+                return "Could not fetch gene sequence from NCBI."
+            out = f"Gene: {result['symbol']} ({result['organism']})\n"
+            out += f"Accession: {result['accession']}\n"
+            out += f"Full name: {result['full_name']}\n"
+            out += f"CDS length: {result['length']} bp\n"
+            out += f"\nCDS Sequence ({result['length']} bp):\n{result['sequence']}"
+            return out
+
+        elif name == "fuse_inserts":
+            sequences = []
+            for item in args["inserts"]:
+                seq = item.get("sequence")
+                seq_name = item.get("name", "")
+                if not seq and item.get("insert_id"):
+                    ins = get_insert_by_id(item["insert_id"])
+                    if not ins:
+                        return f"Insert '{item['insert_id']}' not found in library."
+                    seq = ins.get("sequence")
+                    seq_name = seq_name or ins.get("name", item["insert_id"])
+                if not seq:
+                    return f"No sequence available for '{seq_name or 'unknown'}'."
+                sequences.append({"sequence": seq, "name": seq_name})
+
+            try:
+                fused = _fuse_sequences(sequences, args.get("linker"))
+            except ValueError as e:
+                return f"Fusion error: {e}"
+
+            names = [s["name"] for s in sequences]
+            out = f"Fused CDS: {'-'.join(names)}\n"
+            out += f"Length: {len(fused)} bp\n"
+            out += f"Start codon: {'Yes' if fused[:3] == 'ATG' else 'No'}\n"
+            out += f"Stop codon: {'Yes' if fused[-3:] in ('TAA', 'TAG', 'TGA') else 'No'}\n"
+            out += f"In frame: {'Yes' if len(fused) % 3 == 0 else 'No'}\n"
+            out += f"\nFused sequence ({len(fused)} bp):\n{fused}"
+            return out
+
         else:
             return f"Unknown tool: {name}"
 
@@ -485,54 +600,101 @@ def execute_tool(name: str, args: dict) -> str:
 
 _sessions: dict[str, dict] = {}
 _cancelled_sessions: set[str] = set()
+_sessions_lock = threading.Lock()
 SESSIONS_FILE = Path(__file__).parent / ".sessions.json"
 
 MODEL = "claude-opus-4-5-20251101"
 
 
 def _serialize_content(content):
-    """Convert Anthropic SDK content blocks to JSON-serializable format."""
+    """Convert Anthropic SDK content blocks to JSON-serializable format.
+
+    Filters out thinking blocks and non-API-compatible fields so the
+    serialized history can be safely replayed to the Anthropic API.
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return [
-            b.model_dump() if hasattr(b, "model_dump") else b
-            for b in content
-        ]
+        serialized = []
+        for b in content:
+            if hasattr(b, "model_dump"):
+                d = b.model_dump()
+            elif isinstance(b, dict):
+                d = b
+            else:
+                continue
+            # Skip thinking blocks — they cause Error 400 on replay
+            if isinstance(d, dict) and d.get("type") == "thinking":
+                continue
+            serialized.append(d)
+        return serialized
     return content
 
 
 def _save_sessions():
-    """Persist sessions to disk so they survive server restarts."""
-    try:
-        serializable = {}
-        for sid, data in _sessions.items():
-            s = {
-                "display_messages": data["display_messages"],
-                "created_at": data["created_at"],
-                "first_message": data["first_message"],
-                "history": [
-                    {"role": m["role"], "content": _serialize_content(m["content"])}
-                    for m in data["history"]
-                ],
-            }
-            serializable[sid] = s
-        with open(SESSIONS_FILE, "w") as f:
-            json.dump(serializable, f)
-    except Exception as e:
-        logger.debug(f"Failed to save sessions: {e}")
+    """Persist sessions to disk so they survive server restarts.
+
+    Uses atomic write (write tmp -> copy backup -> replace) to avoid
+    race conditions where the sessions file disappears mid-write.
+    Thread-safe via _sessions_lock.
+    """
+    import shutil
+
+    with _sessions_lock:
+        try:
+            serializable = {}
+            for sid, data in _sessions.items():
+                try:
+                    s = {
+                        "display_messages": data["display_messages"],
+                        "created_at": data["created_at"],
+                        "first_message": data["first_message"],
+                        "history": [
+                            {"role": m["role"], "content": _serialize_content(m["content"])}
+                            for m in data["history"]
+                        ],
+                    }
+                    json.dumps(s)
+                    serializable[sid] = s
+                except (TypeError, ValueError) as e:
+                    logger.debug(f"Skipping session {sid[:8]} (serialization error: {e})")
+                    continue
+
+            tmp_file = SESSIONS_FILE.with_suffix(".json.tmp")
+            with open(tmp_file, "w") as f:
+                json.dump(serializable, f)
+
+            if SESSIONS_FILE.exists():
+                bak_file = SESSIONS_FILE.with_suffix(".json.bak")
+                try:
+                    shutil.copy2(str(SESSIONS_FILE), str(bak_file))
+                except OSError:
+                    pass
+
+            os.replace(str(tmp_file), str(SESSIONS_FILE))
+        except Exception as e:
+            logger.debug(f"Failed to save sessions: {e}")
+            bak_file = SESSIONS_FILE.with_suffix(".json.bak")
+            if not SESSIONS_FILE.exists() and bak_file.exists():
+                try:
+                    shutil.copy2(str(bak_file), str(SESSIONS_FILE))
+                except OSError:
+                    pass
 
 
 def _load_sessions():
-    """Load sessions from disk on startup."""
+    """Load sessions from disk on startup. Falls back to .bak if main file is corrupt."""
     global _sessions
-    try:
-        if SESSIONS_FILE.exists():
-            with open(SESSIONS_FILE) as f:
-                _sessions = json.load(f)
-    except Exception as e:
-        logger.debug(f"Failed to load sessions: {e}")
-        _sessions = {}
+    for filepath in [SESSIONS_FILE, SESSIONS_FILE.with_suffix(".json.bak")]:
+        try:
+            if filepath.exists():
+                with open(filepath) as f:
+                    _sessions = json.load(f)
+                if _sessions:
+                    return
+        except Exception as e:
+            logger.debug(f"Failed to load sessions from {filepath}: {e}")
+    _sessions = {}
 
 
 # Load persisted sessions at import time
@@ -583,7 +745,7 @@ def cancel_session(session_id: str):
 # ── Agent loop ──────────────────────────────────────────────────────────
 
 
-def run_agent_turn_streaming(user_message: str, session_id: str, write_event):
+def run_agent_turn_streaming(user_message: str, session_id: str, write_event, model: str = MODEL):
     """Run one agent turn with streaming, scoped to a session."""
     _cancelled_sessions.discard(session_id)
 
@@ -613,6 +775,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event):
             disconnected = True
 
     max_iterations = 15
+    max_retries = 3
     assistant_text = ""
     assistant_blocks = []
     current_thinking_text = ""
@@ -629,108 +792,126 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event):
         tool_results = []
         stop_reason = None
 
-        try:
-            with client.messages.stream(
-                model=MODEL,
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=history,
-                thinking={"type": "enabled", "budget_tokens": 5000},
-            ) as stream:
-                for event in stream:
+        # Retry loop for rate limits
+        for retry_attempt in range(max_retries + 1):
+            try:
+                with client.messages.stream(
+                    model=model,
+                    max_tokens=16000,
+                    system=SYSTEM_PROMPT,
+                    tools=TOOLS,
+                    messages=history,
+                    thinking={"type": "enabled", "budget_tokens": 5000},
+                ) as stream:
+                    for event in stream:
+                        if is_cancelled() or disconnected:
+                            stream.close()
+                            break
+
+                        if event.type == "content_block_start":
+                            block = event.content_block
+                            if block.type == "thinking":
+                                current_block_type = "thinking"
+                                current_thinking_text = ""
+                                safe_write({"type": "thinking_start"})
+                            elif block.type == "text":
+                                current_block_type = "text"
+                                current_text_content = ""
+                                safe_write({"type": "text_start"})
+                            elif block.type == "tool_use":
+                                current_block_type = "tool_use"
+                                current_tool_name = block.name
+                                current_tool_id = block.id
+                                current_tool_input_json = ""
+                                safe_write({"type": "tool_use_start", "tool": block.name})
+
+                        elif event.type == "content_block_delta":
+                            delta = event.delta
+                            if delta.type == "thinking_delta":
+                                current_thinking_text += delta.thinking
+                                safe_write({"type": "thinking_delta", "content": delta.thinking})
+                            elif delta.type == "text_delta":
+                                assistant_text += delta.text
+                                current_text_content += delta.text
+                                safe_write({"type": "text_delta", "content": delta.text})
+                            elif delta.type == "input_json_delta":
+                                current_tool_input_json += delta.partial_json
+
+                        elif event.type == "content_block_stop":
+                            if current_block_type == "thinking":
+                                assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
+                                safe_write({"type": "thinking_end"})
+                            elif current_block_type == "text":
+                                assistant_blocks.append({"type": "text", "content": current_text_content})
+                                safe_write({"type": "text_end"})
+                            elif current_block_type == "tool_use":
+                                if is_cancelled() or disconnected:
+                                    break
+                                tool_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
+                                result_str = execute_tool(current_tool_name, tool_input)
+                                display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
+                                event_data = {
+                                    "type": "tool_result",
+                                    "tool": current_tool_name,
+                                    "input": tool_input,
+                                    "content": display_result,
+                                }
+                                # For export_construct, include full content for download
+                                if current_tool_name == "export_construct":
+                                    event_data["download_content"] = result_str
+                                    fmt = tool_input.get("output_format", "raw")
+                                    cname = tool_input.get("construct_name", "construct")
+                                    ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
+                                    event_data["download_filename"] = cname + ext
+                                safe_write(event_data)
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": current_tool_id,
+                                    "content": result_str,
+                                })
+                                assistant_blocks.append({
+                                    "type": "tool_use",
+                                    "name": current_tool_name,
+                                    "input": tool_input,
+                                    "result": display_result,
+                                    "download_content": event_data.get("download_content"),
+                                    "download_filename": event_data.get("download_filename"),
+                                })
+                            current_block_type = None
+
+                        elif event.type == "message_delta":
+                            stop_reason = event.delta.stop_reason
+
                     if is_cancelled() or disconnected:
-                        stream.close()
                         break
 
-                    if event.type == "content_block_start":
-                        block = event.content_block
-                        if block.type == "thinking":
-                            current_block_type = "thinking"
-                            current_thinking_text = ""
-                            safe_write({"type": "thinking_start"})
-                        elif block.type == "text":
-                            current_block_type = "text"
-                            current_text_content = ""
-                            safe_write({"type": "text_start"})
-                        elif block.type == "tool_use":
-                            current_block_type = "tool_use"
-                            current_tool_name = block.name
-                            current_tool_id = block.id
-                            current_tool_input_json = ""
-                            safe_write({"type": "tool_use_start", "tool": block.name})
+                    final_message = stream.get_final_message()
+                # Stream succeeded, break out of retry loop
+                break
 
-                    elif event.type == "content_block_delta":
-                        delta = event.delta
-                        if delta.type == "thinking_delta":
-                            current_thinking_text += delta.thinking
-                            safe_write({"type": "thinking_delta", "content": delta.thinking})
-                        elif delta.type == "text_delta":
-                            assistant_text += delta.text
-                            current_text_content += delta.text
-                            safe_write({"type": "text_delta", "content": delta.text})
-                        elif delta.type == "input_json_delta":
-                            current_tool_input_json += delta.partial_json
-
-                    elif event.type == "content_block_stop":
-                        if current_block_type == "thinking":
-                            assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
-                            safe_write({"type": "thinking_end"})
-                        elif current_block_type == "text":
-                            assistant_blocks.append({"type": "text", "content": current_text_content})
-                            safe_write({"type": "text_end"})
-                        elif current_block_type == "tool_use":
-                            if is_cancelled() or disconnected:
-                                break
-                            tool_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
-                            result_str = execute_tool(current_tool_name, tool_input)
-                            display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
-                            event_data = {
-                                "type": "tool_result",
-                                "tool": current_tool_name,
-                                "input": tool_input,
-                                "content": display_result,
-                            }
-                            # For export_construct, include full content for download
-                            if current_tool_name == "export_construct":
-                                event_data["download_content"] = result_str
-                                fmt = tool_input.get("output_format", "raw")
-                                cname = tool_input.get("construct_name", "construct")
-                                ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
-                                event_data["download_filename"] = cname + ext
-                            safe_write(event_data)
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": current_tool_id,
-                                "content": result_str,
-                            })
-                            assistant_blocks.append({
-                                "type": "tool_use",
-                                "name": current_tool_name,
-                                "input": tool_input,
-                                "result": display_result,
-                                "download_content": event_data.get("download_content"),
-                                "download_filename": event_data.get("download_filename"),
-                            })
-                        current_block_type = None
-
-                    elif event.type == "message_delta":
-                        stop_reason = event.delta.stop_reason
-
+            except anthropic.RateLimitError:
+                if retry_attempt < max_retries:
+                    wait_time = 2 ** retry_attempt  # 1s, 2s, 4s
+                    safe_write({"type": "text_delta", "content": f"\n[Rate limited, retrying in {wait_time}s...]\n"})
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    safe_write({"type": "error", "content": "Rate limit exceeded after retries. Please try again later."})
+                    break
+            except Exception:
                 if is_cancelled() or disconnected:
                     break
-
-                final_message = stream.get_final_message()
-
-        except Exception:
-            if is_cancelled() or disconnected:
-                break
-            raise
+                raise
 
         if is_cancelled() or disconnected:
             break
 
-        history.append({"role": "assistant", "content": final_message.content})
+        # Filter out thinking blocks to avoid Error 400 on replay
+        filtered_content = [
+            b for b in final_message.content
+            if getattr(b, 'type', None) != 'thinking'
+        ]
+        history.append({"role": "assistant", "content": filtered_content})
 
         if tool_results:
             history.append({"role": "user", "content": tool_results})
@@ -1067,6 +1248,18 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .input-wrapper textarea::placeholder { color: var(--sand-400); }
   .input-wrapper textarea:disabled { background: var(--sand-50); color: var(--sand-400); }
+  .input-meta { position: absolute; left: 12px; bottom: 12px; display: flex; align-items: center; }
+  .model-select {
+    appearance: none; -webkit-appearance: none;
+    background: var(--sand-50); border: 1px solid var(--sand-200); border-radius: 8px;
+    padding: 4px 24px 4px 8px; font-size: 11px; font-family: inherit;
+    color: var(--sand-500); cursor: pointer; outline: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23ADAAA0'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 6px center;
+    transition: border-color 0.15s;
+  }
+  .model-select:hover { border-color: var(--sand-300); }
+  .model-select:focus { border-color: var(--brand-fig); }
   .input-buttons { position: absolute; right: 12px; bottom: 12px; }
   .send-btn, .stop-btn {
     width: 36px; height: 36px; border: none; border-radius: 12px;
@@ -1182,6 +1375,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <div class="input-wrapper">
         <textarea id="input" placeholder="Describe the plasmid you want to design..." rows="1"
           oninput="autoResize(this)"></textarea>
+        <div class="input-meta">
+          <select id="model-select" class="model-select">
+            <option value="claude-opus-4-6">Opus 4.6</option>
+            <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
+            <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+          </select>
+        </div>
         <div class="input-buttons">
           <button class="send-btn" id="send-btn" onclick="sendMessage()">
             <svg fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
@@ -1220,6 +1420,7 @@ const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
 const stopBtn = document.getElementById('stop-btn');
+const modelSelect = document.getElementById('model-select');
 const sidebarEl = document.getElementById('sidebar');
 const sessionsListEl = document.getElementById('sessions-list');
 const reopenBtn = document.getElementById('sidebar-reopen-btn');
@@ -1239,6 +1440,8 @@ function autoResize(el) {
 }
 
 function scrollToBottom() {
+  // Only auto-scroll if we're viewing the session that's streaming
+  if (streamingSessionId && currentSessionId !== streamingSessionId) return;
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -1284,8 +1487,22 @@ function renderSessions() {
 }
 
 async function selectSession(sessionId) {
+  // If streaming, stop the current generation before switching
+  if (isStreaming) {
+    stopGeneration();
+    // Reset streaming UI state
+    isStreaming = false;
+    abortController = null;
+    streamingInner = null;
+    streamingSessionId = null;
+    sendBtn.style.display = 'flex';
+    stopBtn.style.display = 'none';
+    inputEl.disabled = false;
+  }
+
   saveSessionId(sessionId);
   renderSessions();
+
   try {
     const r = await fetch('/api/sessions/' + sessionId + '/messages');
     const msgs = await r.json();
@@ -1381,6 +1598,16 @@ async function deleteSessionById(sessionId) {
 }
 
 function newChat() {
+  if (isStreaming) {
+    stopGeneration();
+    isStreaming = false;
+    abortController = null;
+    streamingInner = null;
+    streamingSessionId = null;
+    sendBtn.style.display = 'flex';
+    stopBtn.style.display = 'none';
+    inputEl.disabled = false;
+  }
   saveSessionId(null);
   renderSessions();
   showWelcome();
@@ -1494,8 +1721,15 @@ let currentTextRaw = '';
 let currentThinkingId = null;
 let currentThinkingBody = null;
 let currentToolId = null;
+// Pinned reference to the .messages-inner container for the active stream.
+// Ensures streaming writes go to the correct session even if the user
+// clicks a different session in the sidebar mid-stream.
+let streamingInner = null;
+let streamingSessionId = null;
 
 function getInner() {
+  // While streaming, always write to the pinned container
+  if (streamingInner) return streamingInner;
   let inner = messagesEl.querySelector('.messages-inner');
   if (!inner) {
     inner = document.createElement('div');
@@ -1662,6 +1896,7 @@ async function sendMessage() {
   if (!text || isStreaming) return;
 
   isStreaming = true;
+  streamingSessionId = currentSessionId;
   sendBtn.style.display = 'none';
   stopBtn.style.display = 'flex';
   inputEl.value = '';
@@ -1670,6 +1905,8 @@ async function sendMessage() {
   hideWelcome();
 
   const inner = getInner();
+  // Pin this container so stream events write here even if user switches sessions
+  streamingInner = inner;
   const userDiv = document.createElement('div');
   userDiv.className = 'msg user';
   userDiv.innerHTML = '<div class="msg-bubble-user">' + escapeHtml(text) + '</div>';
@@ -1679,7 +1916,7 @@ async function sendMessage() {
   abortController = new AbortController();
 
   try {
-    const reqBody = { message: text };
+    const reqBody = { message: text, model: modelSelect.value };
     if (currentSessionId) reqBody.session_id = currentSessionId;
 
     const resp = await fetch('/api/chat', {
@@ -1745,6 +1982,8 @@ async function sendMessage() {
 
   isStreaming = false;
   abortController = null;
+  streamingInner = null;
+  streamingSessionId = null;
   sendBtn.style.display = 'flex';
   stopBtn.style.display = 'none';
   inputEl.disabled = false;
@@ -1840,6 +2079,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(content_length)) if content_length else {}
             user_message = body.get("message", "")
+            request_model = body.get("model", MODEL)
 
             if not user_message.strip():
                 self._send_json({"error": "Empty message"}, 400)
@@ -1870,7 +2110,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
             write_event({"type": "session_id", "session_id": session_id})
 
             try:
-                run_agent_turn_streaming(user_message, session_id, write_event)
+                run_agent_turn_streaming(user_message, session_id, write_event, model=request_model)
             except anthropic.AuthenticationError:
                 write_event({"type": "error", "content": "Invalid or missing ANTHROPIC_API_KEY."})
             except Exception as e:

@@ -35,23 +35,26 @@ You can get an API key at https://console.anthropic.com.
 ### 4. Start the web UI
 
 ```bash
-python app/app.py
+python app/app.py --reload
 # Open http://localhost:8000
 ```
 
-For development with auto-reload on file changes:
+The `--reload` flag watches for file changes and automatically restarts the server, so edits to source files, the system prompt, or library JSON take effect immediately.
+
+To run without auto-reload (e.g., in production):
 
 ```bash
-python app/app.py --reload
+python app/app.py
 ```
 
 ## Architecture
 
 ```
 src/
-├── assembler.py           # Deterministic sequence assembly engine
-├── library.py             # Backbone/insert library search + Addgene auto-fallback
-├── server.py              # MCP server with 15 tools (imports from library.py)
+├── assembler.py           # Deterministic sequence assembly engine + fusion support
+├── library.py             # Backbone/insert library search + Addgene/NCBI auto-fallback
+├── ncbi_integration.py    # NCBI Entrez gene search + CDS retrieval (Biopython)
+├── server.py              # MCP server with 18 tools (imports from library.py)
 ├── tools.py               # Standalone tool definitions for agent loop
 └── addgene_integration.py # Addgene web scraping, GenBank feature parsing, API client
 
@@ -62,12 +65,12 @@ app/
 
 library/
 ├── backbones.json         # Curated backbones + auto-cached Addgene fetches (grows over time)
-└── inserts.json           # 11 inserts: fluorescent proteins, reporters, epitope tags
+└── inserts.json           # Inserts: fluorescent proteins, reporters, epitope tags, NCBI genes
 
 evals/
 ├── rubric.py              # Allen Institute verification rubric (~32 weighted checks, 6 sections)
 ├── test_cases.py          # 27 benchmark cases across 3 tiers
-└── run_agent_evals.py     # End-to-end agent eval runner (24 cases, Claude Agent SDK)
+└── run_agent_evals.py     # End-to-end agent eval runner (30 cases, Claude Agent SDK)
 
 tests/
 ├── test_assembler.py      # Assembly engine tests (22 tests)
@@ -127,7 +130,7 @@ Pipeline tests (`tests/test_pipeline.py`) run the assembly engine directly again
 | 2 | 7 | Backbone/insert resolved by alias from library (name resolution) |
 | 3 | 4 | Addgene ground truth comparison (end-to-end validation) |
 
-**Agent evals** (`evals/run_agent_evals.py`): 24 cases across 5 categories — explicit requests, alias resolution, natural language, specific insert types, and multi-step workflows.
+**Agent evals** (`evals/run_agent_evals.py`): 30 cases across 7 categories — explicit requests, alias resolution, natural language, specific insert types, multi-step workflows, NCBI gene retrieval, and protein tagging/fusions.
 
 ## Verification Rubric
 
@@ -151,13 +154,41 @@ Severity weights: **Critical** = 2 pts, **Major** = 1 pt, **Minor** = 0.5 pts, *
 - **4/4** Tier 3 Addgene ground truth tests at 100%
 - Primary benchmark (pcDNA3.1(+) + EGFP): **30.0/30.0 pts** across 25 scored checks
 
+## Phased Development Roadmap
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| **Phase 1** | Single plasmid design for mammalian cells: assembly engine, validation rubric, Addgene integration, NCBI gene retrieval, protein tagging/fusions, web UI, evals | In progress |
+| **Phase 2** | Multi-plasmid systems, lentiviral packaging vectors, CRISPR guide RNA design, codon optimization | Planned |
+| **Phase 3** | Advanced workflows: restriction enzyme cloning simulation, primer design, gateway cloning, Gibson assembly | Planned |
+
+## Next Steps / Sprint Goals
+
+- **NCBI Gene Retrieval** — Users say "human TP53" and get the correct CDS sequence from NCBI RefSeq
+- **Protein Tagging / Fusions** — N-terminal/C-terminal tag fusions (e.g., FLAG-EGFP) with automatic start/stop codon management
+- **Natural Language Backbone Selection** — Enhanced clarification prompting for expression type, promoter, and organism
+- **Gene Name Disambiguation** — Handle ambiguous gene names (TRAF -> TRAF1-7), alternative names (SERPINE1 = PAI-1), species disambiguation
+
+## Sample Prompts
+
+```
+"Put EGFP into pcDNA3.1(+)"
+"Design a plasmid to express human TP53 in HEK293 cells"
+"Add an N-terminal FLAG tag to EGFP in pcDNA3.1(+)"
+"I want to express a green fluorescent protein in mammalian cells"
+"Design a vector to allow expression of MyD88 in RAW 264 cells"
+"Express a C-terminal HA-tagged mCherry in pcDNA3.1(+)"
+```
+
 ## MCP Server
 
-The MCP server (`src/server.py`) exposes 15 tools for Claude to use:
+The MCP server (`src/server.py`) exposes 18 tools for Claude to use:
 
 - `search_backbones` / `get_backbone` — search and retrieve backbone vectors
 - `search_inserts` / `get_insert` — search and retrieve insert sequences
 - `search_addgene` / `get_addgene_plasmid` / `import_addgene_to_library` — Addgene integration
+- `search_gene` / `fetch_gene` — NCBI gene search + CDS retrieval
+- `fuse_inserts` — protein tagging / fusion CDS assembly
 - `validate_sequence` — DNA validation (valid chars, GC content, codons)
 - `assemble_construct` — deterministic sequence assembly
 - `export_construct` — format as raw/FASTA/GenBank

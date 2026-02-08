@@ -36,10 +36,22 @@ except ImportError:
 
 from .assembler import (
     assemble_construct as _assemble_construct,
+    fuse_sequences as _fuse_sequences,
     find_mcs_insertion_point,
     export_construct as _export_construct,
     clean_sequence,
 )
+
+# NCBI integration (optional)
+try:
+    from .ncbi_integration import (
+        search_gene as _search_gene,
+        fetch_gene_sequence as _fetch_gene,
+    )
+    NCBI_AVAILABLE = True
+except ImportError:
+    NCBI_AVAILABLE = False
+
 from .library import (
     load_backbones,
     load_inserts,
@@ -393,6 +405,84 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["construct_sequence"]
+            }
+        ),
+        Tool(
+            name="search_gene",
+            description="Search NCBI Gene database by gene symbol or name. Returns matching genes with IDs, symbols, organisms, and aliases.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Gene symbol or name (e.g., 'TP53', 'MyD88', 'EGFP')"
+                    },
+                    "organism": {
+                        "type": "string",
+                        "description": "Organism filter (e.g., 'human', 'mouse')"
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
+        Tool(
+            name="fetch_gene",
+            description="Fetch the coding DNA sequence (CDS) for a gene from NCBI RefSeq. Returns the CDS, accession, organism, and metadata.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "gene_id": {
+                        "type": "string",
+                        "description": "NCBI Gene ID (e.g., '7157' for human TP53)"
+                    },
+                    "gene_symbol": {
+                        "type": "string",
+                        "description": "Gene symbol (e.g., 'TP53')"
+                    },
+                    "organism": {
+                        "type": "string",
+                        "description": "Organism (e.g., 'human', 'mouse')"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="fuse_inserts",
+            description=(
+                "Fuse multiple coding sequences into a single CDS for protein tagging or fusion proteins. "
+                "Handles start/stop codon management at junctions. Use for N-terminal tags (FLAG-GeneX), "
+                "C-terminal tags (GeneX-FLAG), or multi-domain fusions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "inserts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "insert_id": {
+                                    "type": "string",
+                                    "description": "Insert ID from library"
+                                },
+                                "sequence": {
+                                    "type": "string",
+                                    "description": "Raw DNA sequence"
+                                },
+                                "name": {
+                                    "type": "string",
+                                    "description": "Name for this sequence"
+                                }
+                            }
+                        },
+                        "description": "Ordered list of sequences to fuse (N-terminal first)"
+                    },
+                    "linker": {
+                        "type": "string",
+                        "description": "Optional linker DNA between fusion partners"
+                    }
+                },
+                "required": ["inserts"]
             }
         ),
     ]
@@ -888,6 +978,69 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             output += f"### Result: PASS ({score}% — {passed_count}/{total} checks passed)\n"
 
         return [TextContent(type="text", text=output)]
+
+    elif name == "search_gene":
+        if not NCBI_AVAILABLE:
+            return [TextContent(type="text", text="NCBI integration not available. Install biopython.")]
+        try:
+            results = _search_gene(arguments["query"], arguments.get("organism"))
+            if not results:
+                return [TextContent(type="text", text=f"No genes found matching '{arguments['query']}'")]
+            output = f"NCBI Gene results for '{arguments['query']}':\n\n"
+            for r in results:
+                aliases = f" (aliases: {r['aliases']})" if r.get("aliases") else ""
+                output += f"- **{r['symbol']}** (Gene ID: {r['gene_id']}) — {r['full_name']} [{r['organism']}]{aliases}\n"
+            return [TextContent(type="text", text=output)]
+        except Exception as e:
+            return [TextContent(type="text", text=f"NCBI search error: {str(e)}")]
+
+    elif name == "fetch_gene":
+        if not NCBI_AVAILABLE:
+            return [TextContent(type="text", text="NCBI integration not available. Install biopython.")]
+        try:
+            result = _fetch_gene(
+                gene_id=arguments.get("gene_id"),
+                gene_symbol=arguments.get("gene_symbol"),
+                organism=arguments.get("organism"),
+            )
+            if not result:
+                return [TextContent(type="text", text="Could not fetch gene sequence from NCBI.")]
+            output = f"## {result['symbol']} ({result['organism']})\n\n"
+            output += f"**Accession:** {result['accession']}\n"
+            output += f"**Full name:** {result['full_name']}\n"
+            output += f"**CDS length:** {result['length']} bp\n"
+            output += f"\n**CDS Sequence ({result['length']} bp):**\n```\n{result['sequence']}\n```"
+            return [TextContent(type="text", text=output)]
+        except Exception as e:
+            return [TextContent(type="text", text=f"NCBI fetch error: {str(e)}")]
+
+    elif name == "fuse_inserts":
+        try:
+            sequences = []
+            for item in arguments["inserts"]:
+                seq = item.get("sequence")
+                seq_name = item.get("name", "")
+                if not seq and item.get("insert_id"):
+                    ins = get_insert_by_id(item["insert_id"])
+                    if not ins:
+                        return [TextContent(type="text", text=f"Insert '{item['insert_id']}' not found in library.")]
+                    seq = ins.get("sequence")
+                    seq_name = seq_name or ins.get("name", item["insert_id"])
+                if not seq:
+                    return [TextContent(type="text", text=f"No sequence available for '{seq_name or 'unknown'}'.")]
+                sequences.append({"sequence": seq, "name": seq_name})
+
+            fused = _fuse_sequences(sequences, arguments.get("linker"))
+            names = [s["name"] for s in sequences]
+            output = f"## Fused CDS: {'-'.join(names)}\n\n"
+            output += f"**Length:** {len(fused)} bp\n"
+            output += f"**Start codon:** {'Yes' if fused[:3] == 'ATG' else 'No'}\n"
+            output += f"**Stop codon:** {'Yes' if fused[-3:] in ('TAA', 'TAG', 'TGA') else 'No'}\n"
+            output += f"**In frame:** {'Yes' if len(fused) % 3 == 0 else 'No'}\n"
+            output += f"\n**Fused sequence ({len(fused)} bp):**\n```\n{fused}\n```"
+            return [TextContent(type="text", text=output)]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Fusion error: {str(e)}")]
 
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]

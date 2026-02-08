@@ -24,6 +24,17 @@ try:
 except ImportError:
     ADDGENE_AVAILABLE = False
 
+# Optional NCBI integration
+try:
+    from .ncbi_integration import fetch_gene_sequence as _ncbi_fetch_gene
+    NCBI_AVAILABLE = True
+except ImportError:
+    try:
+        from ncbi_integration import fetch_gene_sequence as _ncbi_fetch_gene
+        NCBI_AVAILABLE = True
+    except ImportError:
+        NCBI_AVAILABLE = False
+
 
 def load_backbones() -> dict:
     """Load backbone library from JSON file."""
@@ -195,21 +206,64 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
 def get_insert_by_id(insert_id: str) -> Optional[dict]:
     """
     Get a specific insert by ID or alias.
-    
+
+    Checks the local library first. If not found and NCBI integration is
+    available, attempts to fetch the gene CDS from NCBI and caches the
+    result in inserts.json for future fast lookups.
+
     Args:
         insert_id: Insert identifier or alias
-    
+
     Returns:
         Insert dictionary or None if not found
     """
     data = load_inserts()
     id_normalized = normalize_name(insert_id)
-    
+
     for insert in data["inserts"]:
         names_to_check = [insert["id"]] + insert.get("aliases", [])
         if any(normalize_name(n) == id_normalized for n in names_to_check):
             return insert
-    return None
+
+    # ── NCBI fallback ──
+    if not NCBI_AVAILABLE:
+        return None
+
+    try:
+        logger.info(f"Insert '{insert_id}' not in local library, searching NCBI...")
+        result = _ncbi_fetch_gene(gene_symbol=insert_id)
+        if not result or not result.get("sequence"):
+            logger.info(f"No NCBI CDS found for '{insert_id}'")
+            return None
+
+        # Build insert dict
+        insert = {
+            "id": result["symbol"],
+            "name": result["symbol"],
+            "aliases": [insert_id] if insert_id != result["symbol"] else [],
+            "description": result.get("full_name", ""),
+            "category": "gene",
+            "size_bp": result["length"],
+            "sequence": result["sequence"],
+            "genbank_accession": result.get("accession"),
+            "organism": result.get("organism", ""),
+            "source": "NCBI",
+        }
+
+        # Cache to local library
+        data["inserts"].append(insert)
+        with open(LIBRARY_PATH / "inserts.json", "w") as f:
+            json.dump(data, f, indent=2)
+
+        logger.info(
+            f"Cached NCBI gene '{result['symbol']}' "
+            f"({result['length']} bp, {result.get('organism', '?')})"
+        )
+        return insert
+
+    except Exception as e:
+        logger.warning(f"NCBI fallback failed for '{insert_id}': {e}")
+        return None
 
 
 def validate_dna_sequence(sequence: str) -> dict:

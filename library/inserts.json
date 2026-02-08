@@ -8,7 +8,11 @@
   "inserts": [
     {
       "id": "EGFP",
-      "aliases": ["eGFP", "enhanced GFP", "enhanced green fluorescent protein"],
+      "aliases": [
+        "eGFP",
+        "enhanced GFP",
+        "enhanced green fluorescent protein"
+      ],
       "name": "Enhanced Green Fluorescent Protein (EGFP)",
       "description": "Enhanced variant of GFP with improved brightness and folding.",
       "size_bp": 720,
@@ -22,7 +26,10 @@
     },
     {
       "id": "mCherry",
-      "aliases": ["mcherry", "mCherry RFP"],
+      "aliases": [
+        "mcherry",
+        "mCherry RFP"
+      ],
       "name": "mCherry",
       "description": "Red fluorescent protein derived from DsRed. Monomeric and fast-maturing.",
       "size_bp": 711,
@@ -36,7 +43,11 @@
     },
     {
       "id": "mNeonGreen",
-      "aliases": ["mNeonGreen", "mNeon", "NeonGreen"],
+      "aliases": [
+        "mNeonGreen",
+        "mNeon",
+        "NeonGreen"
+      ],
       "name": "mNeonGreen",
       "description": "Brightest monomeric green fluorescent protein available. Excellent for live-cell imaging.",
       "size_bp": 714,
@@ -50,7 +61,10 @@
     },
     {
       "id": "tdTomato",
-      "aliases": ["tdtomato", "tandem dimer Tomato"],
+      "aliases": [
+        "tdtomato",
+        "tandem dimer Tomato"
+      ],
       "name": "tdTomato",
       "description": "Bright tandem dimer red fluorescent protein. Excellent photostability.",
       "size_bp": 1431,
@@ -64,7 +78,11 @@
     },
     {
       "id": "mTagBFP2",
-      "aliases": ["TagBFP2", "BFP2", "blue fluorescent protein"],
+      "aliases": [
+        "TagBFP2",
+        "BFP2",
+        "blue fluorescent protein"
+      ],
       "name": "mTagBFP2",
       "description": "Improved blue fluorescent protein with enhanced brightness and photostability.",
       "size_bp": 714,
@@ -78,7 +96,12 @@
     },
     {
       "id": "Firefly_Luciferase",
-      "aliases": ["FLuc", "luc2", "firefly luc", "Photinus pyralis luciferase"],
+      "aliases": [
+        "FLuc",
+        "luc2",
+        "firefly luc",
+        "Photinus pyralis luciferase"
+      ],
       "name": "Firefly Luciferase (luc2)",
       "description": "Codon-optimized firefly luciferase for bioluminescence reporter assays.",
       "size_bp": 1653,
@@ -92,7 +115,11 @@
     },
     {
       "id": "Renilla_Luciferase",
-      "aliases": ["RLuc", "hRLuc", "Renilla reniformis luciferase"],
+      "aliases": [
+        "RLuc",
+        "hRLuc",
+        "Renilla reniformis luciferase"
+      ],
       "name": "Renilla Luciferase (hRLuc)",
       "description": "Humanized Renilla luciferase for dual-reporter assays.",
       "size_bp": 936,
@@ -106,7 +133,10 @@
     },
     {
       "id": "FLAG_tag",
-      "aliases": ["FLAG", "DYKDDDDK"],
+      "aliases": [
+        "FLAG",
+        "DYKDDDDK"
+      ],
       "name": "FLAG epitope tag",
       "description": "Short epitope tag for immunodetection and affinity purification.",
       "size_bp": 24,
@@ -118,7 +148,11 @@
     },
     {
       "id": "HA_tag",
-      "aliases": ["HA", "hemagglutinin tag", "YPYDVPDYA"],
+      "aliases": [
+        "HA",
+        "hemagglutinin tag",
+        "YPYDVPDYA"
+      ],
       "name": "HA epitope tag",
       "description": "Epitope tag derived from human influenza hemagglutinin.",
       "size_bp": 27,
@@ -130,7 +164,12 @@
     },
     {
       "id": "6xHis_tag",
-      "aliases": ["His6", "His-tag", "hexahistidine", "polyhistidine"],
+      "aliases": [
+        "His6",
+        "His-tag",
+        "hexahistidine",
+        "polyhistidine"
+      ],
       "name": "6xHis epitope tag",
       "description": "Polyhistidine tag for metal affinity purification.",
       "size_bp": 18,
@@ -142,7 +181,11 @@
     },
     {
       "id": "Myc_tag",
-      "aliases": ["c-Myc", "myc", "EQKLISEEDL"],
+      "aliases": [
+        "c-Myc",
+        "myc",
+        "EQKLISEEDL"
+      ],
       "name": "Myc epitope tag",
       "description": "Epitope tag derived from c-Myc proto-oncogene.",
       "size_bp": 30,
@@ -151,6 +194,25 @@
       "category": "epitope_tag",
       "genbank_accession": null,
       "sequence": "GAACAAAAACTCATCTCAGAAGAGGATCTG"
+    },
+    {
+      "id": "sfGFP",
+      "aliases": [
+        "superfolder GFP",
+        "super folder GFP",
+        "Superfolder GFP",
+        "sf-GFP"
+      ],
+      "name": "Superfolder GFP (sfGFP)",
+      "description": "Superfolder variant of GFP with improved folding and stability. Engineered from GFP with folding-reporter mutations. Commonly used as a reporter in mammalian and bacterial expression systems.",
+      "size_bp": 717,
+      "organism_source": "Synthetic construct (P\u00e9delacq et al., 2006)",
+      "protein_size_aa": 238,
+      "excitation_nm": 485,
+      "emission_nm": 510,
+      "category": "fluorescent_protein",
+      "genbank_accession": "PX636966.1",
+      "sequence": "ATGCGTAAAGGCGAAGAGCTGTTCACTGGTGTCGTCCCTATTCTGGTGGAACTGGATGGTGATGTCAACGGTCATAAGTTTTCCGTGCGTGGCGAGGGTGAAGGTGACGCAACTAATGGTAAACTGACGCTGAAGTTCATCTGTACTACTGGTAAACTGCCGGTACCTTGGCCGACTCTGGTAACGACGCTGACTTATGGTGTTCAGTGCTTTGCTCGTTATCCGGACCATATGAAGCAGCATGACTTCTTCAAGTCCGCCATGCCGGAAGGCTATGTGCAGGAACGCACGATTTCCTTTAAGGATGACGGCACGTACAAAACGCGTGCGGAAGTGAAATTTGAAGGCGATACCCTGGTAAACCGCATTGAGCTGAAAGGCATTGACTTTAAAGAAGACGGCAATATCCTGGGCCATAAGCTGGAATACAATTTTAACAGCCACAATGTTTACATCACCGCCGATAAACAAAAAAATGGCATTAAAGCGAATTTTAAAATTCGCCACAACGTGGAGGATGGCAGCGTGCAGCTGGCTGATCACTACCAGCAAAACACTCCAATCGGTGATGGTCCTGTTCTGCTGCCAGACAATCACTATCTGAGCACGCAAAGCGTTCTGTCTAAAGATCCGAACGAGAAACGCGATCATATGGTTCTGCTGGAGTTCGTAACCGCAGCGGGCATCACGCATGGTATGGATGAACTGTACAAATAA"
     }
   ]
 }

@@ -76,6 +76,18 @@ class AgentTestCase:
     expected_insertion_position: Optional[int] = None
     expected_total_size: Optional[int] = None
     tags: list[str] = field(default_factory=list)
+    # For NCBI/fusion cases: provide the expected insert sequence directly
+    # so rubric scoring works offline without needing an NCBI call at score time.
+    expected_insert_sequence: Optional[str] = None
+    # Transcript-level assertions: strings the agent's text output should contain.
+    # Used for disambiguation evals where the agent should ASK clarifying questions
+    # (e.g., "which species", "which TRAF"). Graded from the transcript, not the
+    # assembled sequence, per the blog's conversational agent pattern.
+    transcript_assertions: list[str] = field(default_factory=list)
+    # Tool assertions: tools the agent SHOULD NOT call (negative cases).
+    # Per the blog's "balanced problem sets" principle (Step 3): test both
+    # directions to avoid one-sided optimization (e.g., agent over-triggering NCBI).
+    tools_should_not_use: list[str] = field(default_factory=list)
 
 
 AGENT_CASES = [
@@ -385,6 +397,227 @@ AGENT_CASES = [
         expected_total_size=5689,
         tags=["workflow", "bacterial", "fluorescent_protein"],
     ),
+    # ── A6: NCBI Gene Retrieval (Allen Institute sample prompts) ─────────
+    # These are the exact prompts from the Allen Institute reference doc.
+    # They test NCBI gene retrieval, species disambiguation, gene family
+    # disambiguation, variant disambiguation, and alternative name resolution.
+    # Grading note: A6 cases test LLM agent behavior (tool selection,
+    # clarification prompting, NCBI retrieval). Rubric scoring requires
+    # expected_insert_sequence since these genes are not in the local library.
+    # Disambiguation cases (A6-002 through A6-006) may ask clarifying questions
+    # rather than immediately assembling — scoring should account for this.
+    AgentTestCase(
+        id="A6-001",
+        name="Allen: sfGFP in pcDNA3.1(+)",
+        prompt=(
+            "Using pcDNA3.1(+) as a backbone, design a plasmid to express "
+            "Super Folder GFP reporter expression in HEK293 Cells"
+        ),
+        description=(
+            "Allen sample prompt #1. sfGFP is not in the local library. Agent must "
+            "use NCBI to retrieve the sfGFP CDS. Since backbone is specified, agent "
+            "should skip expression type/level questions (smart skip)."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="sfGFP",
+        tags=["ncbi", "mammalian", "fluorescent_protein", "allen_sample", "smart_skip"],
+    ),
+    AgentTestCase(
+        id="A6-002",
+        name="Allen: MyD88 species disambiguation",
+        prompt="Design a vector to allow expression of MyD88 in RAW 264 cells",
+        description=(
+            "Allen sample prompt #2. MyD88 exists in multiple species. RAW 264 cells "
+            "are mouse macrophages. Agent should prompt for: (1) which organism the "
+            "sequence should come from, (2) expression type and level. Should NOT "
+            "return a tagged version (e.g., pCMV-HA-MyD88) without user confirmation."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="Myd88",
+        tags=["ncbi", "mammalian", "species_disambiguation", "allen_sample"],
+        transcript_assertions=[
+            "species",      # agent should ask about species/organism
+            "mouse",        # agent should recognize RAW 264 = mouse
+        ],
+    ),
+    AgentTestCase(
+        id="A6-003",
+        name="Allen: TRAF gene family disambiguation",
+        prompt="Design a vector to allow transient overexpression of TRAF in Raw 264.7",
+        description=(
+            "Allen sample prompt #3. TRAF is a gene family (TRAF1-7). Agent should "
+            "prompt for: (1) which TRAF protein, (2) which organism. Since the user "
+            "specified transient overexpression, agent should pick a strong "
+            "constitutive backbone directly (smart skip)."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="Traf6",
+        tags=["ncbi", "mammalian", "gene_family_disambiguation", "allen_sample", "smart_skip"],
+        transcript_assertions=[
+            "TRAF",         # agent should mention TRAF family members
+            "which",        # agent should ask which one
+        ],
+    ),
+    AgentTestCase(
+        id="A6-004",
+        name="Allen: TRAF by full name (alternative name resolution)",
+        prompt=(
+            "Design a vector to allow transient overexpression of TNF receptor "
+            "associated factor in Raw 264.7 Cells"
+        ),
+        description=(
+            "Allen sample prompt #4. 'TNF receptor associated factor' is the full "
+            "name for TRAF. Agent should resolve this to the TRAF family and produce "
+            "the same outcome as A6-003. Must NOT retrieve TNF Receptor itself."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="Traf6",
+        tags=["ncbi", "mammalian", "alternative_name", "allen_sample", "smart_skip"],
+        transcript_assertions=[
+            "TRAF",         # agent should recognize TNF receptor associated factor = TRAF
+        ],
+    ),
+    AgentTestCase(
+        id="A6-005",
+        name="Allen: RFP variant disambiguation",
+        prompt="Design an expression vector for expression of RFP in human cells",
+        description=(
+            "Allen sample prompt #5. RFP is ambiguous — could be mCherry, tdTomato, "
+            "mScarlet, DsRed. Agent should prompt for: (1) which RFP variant, "
+            "(2) expression type, (3) expression level."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="mCherry",
+        tags=["ncbi", "mammalian", "variant_disambiguation", "allen_sample"],
+        transcript_assertions=[
+            "mCherry",      # agent should mention specific variants
+            "which",        # agent should ask which variant
+        ],
+    ),
+    AgentTestCase(
+        id="A6-006",
+        name="Allen: SERPINE1/PAI-1 alternative name",
+        prompt=(
+            "Design a plasmid to express PAI-1 in HEK293 cells using pcDNA3.1(+). "
+            "Assemble and return the sequence."
+        ),
+        description=(
+            "Allen testing requirement: alternative gene name resolution. PAI-1 is "
+            "an alternative name for SERPINE1 (also known as Planh1). Agent should "
+            "resolve PAI-1 to SERPINE1 via NCBI alias data and retrieve the CDS."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="SERPINE1",
+        tags=["ncbi", "mammalian", "alternative_name", "allen_sample"],
+    ),
+    AgentTestCase(
+        id="A6-007",
+        name="NL backbone: mammalian vector with neomycin resistance",
+        prompt=(
+            "I need a mammalian expression vector with neomycin resistance to "
+            "express EGFP. Assemble the construct and return the sequence."
+        ),
+        description=(
+            "Allen sprint goal: natural language backbone selection. Agent should "
+            "select a backbone matching the criteria (e.g., pcDNA3.1(+) has CMV "
+            "promoter and neomycin/G418 mammalian selection) rather than asking "
+            "the user to pick a specific backbone."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",
+        expected_insertion_position=895,
+        expected_total_size=6148,
+        tags=["natural_language", "mammalian", "backbone_selection", "allen_sample"],
+    ),
+    # ── A7: Protein Tagging / Fusions ─────────────────────────────────
+    AgentTestCase(
+        id="A7-001",
+        name="Fusion: N-terminal FLAG-EGFP",
+        prompt=(
+            "Add an N-terminal FLAG tag to EGFP in pcDNA3.1(+). "
+            "Assemble the construct and return the sequence."
+        ),
+        description=(
+            "Agent must fuse FLAG_tag + EGFP using fuse_inserts, then assemble "
+            "the fusion CDS into pcDNA3.1(+). Tests the fuse_inserts tool and "
+            "correct codon management (FLAG provides ATG, EGFP provides stop)."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",
+        tags=["fusion", "mammalian", "epitope_tag", "n_terminal"],
+    ),
+    AgentTestCase(
+        id="A7-002",
+        name="Fusion: C-terminal HA-mCherry",
+        prompt=(
+            "Express a C-terminal HA-tagged mCherry in pcDNA3.1(+). "
+            "Assemble the construct and return the sequence."
+        ),
+        description=(
+            "Agent must fuse mCherry + HA_tag using fuse_inserts, then assemble "
+            "into pcDNA3.1(+). Tests C-terminal fusion with correct codon management."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="mCherry",
+        tags=["fusion", "mammalian", "epitope_tag", "c_terminal"],
+    ),
+    # ── A8: Negative / balanced cases (blog Step 3) ───────────────────
+    # Per the blog: "Test both the cases where a behavior should occur and
+    # where it shouldn't. One-sided evals create one-sided optimization."
+    # These test that the agent does NOT over-trigger NCBI or fuse_inserts
+    # when the insert is already in the local library.
+    AgentTestCase(
+        id="A8-001",
+        name="Negative: EGFP should NOT trigger NCBI",
+        prompt=(
+            "Put EGFP into pcDNA3.1(+) and assemble the construct. "
+            "Return the assembled sequence."
+        ),
+        description=(
+            "EGFP is in the local library. Agent should use get_insert, NOT "
+            "search_gene/fetch_gene. Tests that NCBI is not over-triggered."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",
+        expected_insertion_position=895,
+        expected_total_size=6148,
+        tags=["negative", "balanced", "no_ncbi"],
+        tools_should_not_use=["search_gene", "fetch_gene"],
+    ),
+    AgentTestCase(
+        id="A8-002",
+        name="Negative: mCherry should NOT trigger NCBI",
+        prompt=(
+            "Assemble mCherry into pcDNA3.1(+). Return the sequence."
+        ),
+        description=(
+            "mCherry is in the local library. Agent should not call NCBI tools."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="mCherry",
+        expected_insertion_position=895,
+        expected_total_size=6139,
+        tags=["negative", "balanced", "no_ncbi"],
+        tools_should_not_use=["search_gene", "fetch_gene"],
+    ),
+    AgentTestCase(
+        id="A8-003",
+        name="Negative: simple EGFP should NOT fuse",
+        prompt=(
+            "Design an EGFP expression plasmid using pcDNA3.1(+). "
+            "Assemble and return the sequence."
+        ),
+        description=(
+            "Plain EGFP expression — no tagging requested. Agent should NOT "
+            "call fuse_inserts. Tests that fusion is not over-triggered."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",
+        expected_insertion_position=895,
+        expected_total_size=6148,
+        tags=["negative", "balanced", "no_fusion"],
+        tools_should_not_use=["fuse_inserts"],
+    ),
 ]
 
 
@@ -550,10 +783,41 @@ async def run_agent_eval_case(
             print(f"  Agent ERROR: {trace.error}")
         return None, trace
 
+    # ── Transcript assertions (conversational quality grading) ────────
+    # For disambiguation cases, check that the agent asked the right
+    # clarifying questions in its text output.
+    transcript_results = []
+    if tc.transcript_assertions:
+        for assertion in tc.transcript_assertions:
+            found = assertion.lower() in trace.assistant_text.lower()
+            transcript_results.append((assertion, found))
+            if verbose:
+                status = "FOUND" if found else "MISSING"
+                print(f"  [transcript] '{assertion}': {status}")
+
+    # ── Tool negative assertions (balanced eval grading) ──────────────
+    # Check that the agent did NOT call tools it shouldn't have.
+    tool_violation_results = []
+    if tc.tools_should_not_use:
+        tools_used = {t["tool"] for t in trace.tool_calls}
+        for forbidden_tool in tc.tools_should_not_use:
+            was_used = forbidden_tool in tools_used
+            tool_violation_results.append((forbidden_tool, was_used))
+            if verbose:
+                status = "VIOLATION — used" if was_used else "OK — not used"
+                print(f"  [tool_negative] {forbidden_tool}: {status}")
+
     if not trace.assembled_sequence:
         if verbose:
             print(f"  No assembled sequence found in agent output")
             print(f"  Tool calls made: {[t['tool'] for t in trace.tool_calls]}")
+        # For disambiguation cases, no assembled sequence is expected
+        # (agent should ask questions, not guess). Still report transcript results.
+        if tc.transcript_assertions and transcript_results:
+            passed_assertions = sum(1 for _, found in transcript_results if found)
+            total_assertions = len(transcript_results)
+            if verbose:
+                print(f"  Transcript assertions: {passed_assertions}/{total_assertions} passed")
         return None, trace
 
     if verbose:
@@ -562,20 +826,24 @@ async def run_agent_eval_case(
 
     # Resolve expected values for scoring
     backbone_data = get_backbone_by_id(tc.expected_backbone_id)
-    insert_data = get_insert_by_id(tc.expected_insert_id)
 
     if not backbone_data or not backbone_data.get("sequence"):
         if verbose:
             print(f"  SKIP: No backbone sequence for '{tc.expected_backbone_id}'")
         return None, trace
 
-    if not insert_data or not insert_data.get("sequence"):
-        if verbose:
-            print(f"  SKIP: No insert sequence for '{tc.expected_insert_id}'")
-        return None, trace
-
     backbone_seq = backbone_data["sequence"]
-    insert_seq = insert_data["sequence"]
+
+    # Resolve insert sequence: prefer inline ground truth, fall back to library
+    insert_seq = tc.expected_insert_sequence
+    insert_data = None
+    if not insert_seq:
+        insert_data = get_insert_by_id(tc.expected_insert_id)
+        if not insert_data or not insert_data.get("sequence"):
+            if verbose:
+                print(f"  SKIP: No insert sequence for '{tc.expected_insert_id}'")
+            return None, trace
+        insert_seq = insert_data["sequence"]
 
     insertion_pos = tc.expected_insertion_position
     if insertion_pos is None:
@@ -586,6 +854,9 @@ async def run_agent_eval_case(
             print(f"  SKIP: Cannot determine insertion position")
         return None, trace
 
+    insert_name = insert_data["name"] if insert_data else tc.expected_insert_id
+    insert_category = insert_data.get("category") if insert_data else None
+
     # Score with rubric
     rubric_result = score_construct(
         construct_sequence=trace.assembled_sequence,
@@ -593,10 +864,22 @@ async def run_agent_eval_case(
         expected_insert_sequence=insert_seq,
         expected_insert_position=insertion_pos,
         backbone_name=backbone_data["name"],
-        insert_name=insert_data["name"],
-        insert_category=insert_data.get("category"),
+        insert_name=insert_name,
+        insert_category=insert_category,
         backbone_features=backbone_data.get("features"),
     )
+
+    # ── Add tool violation checks to rubric (negative/balanced cases) ────
+    if tool_violation_results:
+        from evals.rubric import Check
+        for tool_name, was_used in tool_violation_results:
+            rubric_result.checks.append(Check(
+                section="Tool Routing",
+                name=f"Agent should NOT use {tool_name}",
+                severity="Major",
+                passed=not was_used,
+                detail=f"Agent {'used' if was_used else 'correctly avoided'} {tool_name}",
+            ))
 
     if verbose:
         print(f"  Result: {rubric_result.summary()}")

@@ -453,7 +453,10 @@ class AddgeneClient:
         return sequence, features, mcs_position
 
     def _fetch_genbank_content(self, addgene_id: str) -> Optional[str]:
-        """Fetch the raw GenBank file content for a plasmid."""
+        """Fetch the raw GenBank file content for a plasmid.
+
+        Tries multiple URL patterns and fallbacks to maximize success rate.
+        """
         # Visit the main plasmid page first to establish session cookies
         try:
             self._make_request(f"{self.BASE_URL}/{addgene_id}/")
@@ -464,20 +467,39 @@ class AddgeneClient:
         try:
             seq_url = f"{self.BASE_URL}/{addgene_id}/sequences/"
             html = self._make_request(seq_url)
+
+            # Broader regex to catch various GenBank link patterns
             gb_links = re.findall(
-                r'href="([^"]+(?:genbank|\.gb)[^"]*)"', html, re.IGNORECASE,
+                r'href="([^"]*(?:genbank|\.gb|\.gbk|depositor-full|addgene-full|sequence)[^"]*)"',
+                html, re.IGNORECASE,
             )
             for link in gb_links:
                 full_url = urljoin(self.BASE_URL, link)
                 try:
                     content = self._make_request(full_url)
-                    if "ORIGIN" in content:
+                    if "ORIGIN" in content and "LOCUS" in content:
                         return content
                 except Exception:
                     continue
         except Exception as e:
             logger.warning(f"Could not fetch sequences page for {addgene_id}: {e}")
 
+        # Fallback: try common direct URL patterns
+        fallback_urls = [
+            f"{self.BASE_URL}/{addgene_id}/sequences/depositor-full/",
+            f"{self.BASE_URL}/{addgene_id}/sequences/addgene-full/",
+            f"https://media.addgene.org/cms/filer_public/plasmids/{addgene_id}/{addgene_id}-sequence-{addgene_id}.gb",
+        ]
+
+        for url in fallback_urls:
+            try:
+                content = self._make_request(url)
+                if "ORIGIN" in content and "LOCUS" in content:
+                    return content
+            except Exception:
+                continue
+
+        logger.warning(f"Could not fetch GenBank content for Addgene #{addgene_id}")
         return None
     
     def search(self, query: str, limit: int = 10) -> List[Dict]:

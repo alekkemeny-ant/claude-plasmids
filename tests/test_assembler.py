@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from assembler import (
     assemble_construct,
+    fuse_sequences,
     clean_sequence,
     validate_dna,
     reverse_complement,
@@ -217,3 +218,136 @@ class TestExport:
             assert False, "Should have raised ValueError"
         except ValueError:
             pass
+
+
+# ── Fusion tests ────────────────────────────────────────────────────────
+
+
+class TestFuseSequences:
+    """Unit tests for fuse_sequences() — deterministic codon management."""
+
+    def test_basic_two_sequence_fusion(self):
+        """First keeps ATG, loses stop; last loses ATG, keeps stop."""
+        seq1 = "ATGAAACCCTAA"  # 12 bp CDS with start+stop
+        seq2 = "ATGGGGTTTGACTGA"  # 15 bp CDS with start+stop
+        result = fuse_sequences([
+            {"sequence": seq1, "name": "A"},
+            {"sequence": seq2, "name": "B"},
+        ])
+        # seq1 without stop: ATGAAACCC (9bp)
+        # seq2 without start: GGGTTTGACTGA (12bp)
+        assert result == "ATGAAACCCGGGTTTGACTGA"
+        assert result[:3] == "ATG"  # keeps first start
+        assert result[-3:] == "TGA"  # keeps last stop
+        assert len(result) == 21
+
+    def test_three_sequence_fusion(self):
+        """Middle sequence loses both start and stop."""
+        seq1 = "ATGAAATAA"   # 9 bp
+        seq2 = "ATGCCCTGA"   # 9 bp
+        seq3 = "ATGGGGTAG"   # 9 bp
+        result = fuse_sequences([
+            {"sequence": seq1, "name": "first"},
+            {"sequence": seq2, "name": "middle"},
+            {"sequence": seq3, "name": "last"},
+        ])
+        # first without stop: ATGAAA (6bp)
+        # middle without start or stop: CCC (3bp)
+        # last without start: GGGTAG (6bp)
+        assert result == "ATGAAACCCGGGTAG"
+        assert result[:3] == "ATG"
+        assert result[-3:] == "TAG"
+
+    def test_fusion_with_linker(self):
+        """Linker DNA inserted between each pair."""
+        seq1 = "ATGAAATAA"
+        seq2 = "ATGCCCTGA"
+        linker = "GGCGGC"  # encodes GG
+        result = fuse_sequences(
+            [{"sequence": seq1}, {"sequence": seq2}],
+            linker=linker,
+        )
+        # first without stop: ATGAAA
+        # linker: GGCGGC
+        # last without start: CCCTGA
+        assert result == "ATGAAAGGCGGCCCCTGA"
+
+    def test_no_stop_codon_on_first(self):
+        """If first seq lacks a stop, nothing extra removed."""
+        seq1 = "ATGAAACCC"   # no stop
+        seq2 = "ATGGGGTGA"
+        result = fuse_sequences([
+            {"sequence": seq1, "name": "A"},
+            {"sequence": seq2, "name": "B"},
+        ])
+        assert result == "ATGAAACCCGGGTGA"
+
+    def test_no_start_codon_on_last(self):
+        """If last seq lacks ATG start, nothing extra removed."""
+        seq1 = "ATGAAATAA"
+        seq2 = "CCCGGGTGA"  # no ATG start
+        result = fuse_sequences([
+            {"sequence": seq1},
+            {"sequence": seq2},
+        ])
+        assert result == "ATGAAACCCGGGTGA"
+
+    def test_fewer_than_two_raises(self):
+        """Must provide at least 2 sequences."""
+        try:
+            fuse_sequences([{"sequence": "ATGTAA"}])
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "2 sequences" in str(e)
+
+    def test_invalid_dna_raises(self):
+        """Invalid DNA in any input raises ValueError."""
+        try:
+            fuse_sequences([
+                {"sequence": "ATGXYZ", "name": "bad"},
+                {"sequence": "ATGTAA", "name": "good"},
+            ])
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "bad" in str(e)
+
+    def test_invalid_linker_raises(self):
+        try:
+            fuse_sequences(
+                [{"sequence": "ATGTAA"}, {"sequence": "ATGTGA"}],
+                linker="XYZ",
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "linker" in str(e).lower()
+
+    def test_flag_egfp_fusion(self):
+        """Integration: FLAG + EGFP from library produces valid fused CDS.
+
+        FLAG_tag is an epitope tag without its own start/stop codons.
+        EGFP has ATG start and TAA stop. In an N-terminal fusion:
+        - FLAG (first): has no stop to remove, kept as-is
+        - EGFP (last): ATG removed, stop kept
+        Result: FLAG + EGFP(no ATG) — the upstream promoter/Kozak
+        provides the translation start in the actual construct.
+        """
+        flag = get_insert_by_id("FLAG_tag")
+        egfp = get_insert_by_id("EGFP")
+        assert flag and flag.get("sequence")
+        assert egfp and egfp.get("sequence")
+
+        result = fuse_sequences([
+            {"sequence": flag["sequence"], "name": "FLAG"},
+            {"sequence": egfp["sequence"], "name": "EGFP"},
+        ])
+        flag_seq = clean_sequence(flag["sequence"])
+        egfp_seq = clean_sequence(egfp["sequence"])
+
+        # FLAG has no stop codon, so it's kept as-is (first position)
+        assert flag_seq[-3:] not in ("TAA", "TAG", "TGA")
+        # EGFP starts with ATG which gets removed (last position)
+        assert egfp_seq[:3] == "ATG"
+
+        expected = flag_seq + egfp_seq[3:]  # FLAG + EGFP without ATG
+        assert result == expected
+        assert result[-3:] in ("TAA", "TAG", "TGA")  # EGFP stop preserved

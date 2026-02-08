@@ -193,6 +193,71 @@ def assemble_construct(
     return result
 
 
+def fuse_sequences(sequences: list[dict], linker: Optional[str] = None) -> str:
+    """Fuse multiple coding sequences into a single CDS.
+
+    Handles start/stop codon management at junctions:
+    - First sequence: keep start codon (ATG), remove stop codon
+    - Middle sequences: remove start codon, remove stop codon
+    - Last sequence: remove start codon, keep stop codon
+    - Optional linker DNA between each junction
+
+    Args:
+        sequences: List of dicts, each with:
+            - sequence: DNA sequence (required)
+            - name: Name of the sequence (optional)
+            - position: 'n_terminal', 'c_terminal', or 'middle' (optional,
+              auto-determined from order if not specified)
+        linker: Optional linker DNA sequence (e.g., encoding GGGGS)
+
+    Returns:
+        Fused CDS DNA sequence.
+
+    Raises:
+        ValueError: If fewer than 2 sequences provided or invalid DNA.
+    """
+    if len(sequences) < 2:
+        raise ValueError("At least 2 sequences are required for fusion")
+
+    parts = []
+    for i, seq_dict in enumerate(sequences):
+        seq = clean_sequence(seq_dict["sequence"])
+        valid, errors = validate_dna(seq)
+        if not valid:
+            name = seq_dict.get("name", f"sequence_{i}")
+            raise ValueError(f"Invalid DNA in {name}: {'; '.join(errors)}")
+
+        is_first = (i == 0)
+        is_last = (i == len(sequences) - 1)
+
+        if is_first:
+            # Keep start codon, remove stop codon
+            if seq[-3:] in ("TAA", "TAG", "TGA"):
+                seq = seq[:-3]
+        elif is_last:
+            # Remove start codon, keep stop codon
+            if seq[:3] == "ATG":
+                seq = seq[3:]
+        else:
+            # Middle: remove both start and stop
+            if seq[:3] == "ATG":
+                seq = seq[3:]
+            if seq[-3:] in ("TAA", "TAG", "TGA"):
+                seq = seq[:-3]
+
+        parts.append(seq)
+
+    # Join with optional linker
+    if linker:
+        linker = clean_sequence(linker)
+        valid, errors = validate_dna(linker)
+        if not valid:
+            raise ValueError(f"Invalid linker DNA: {'; '.join(errors)}")
+        return linker.join(parts)
+    else:
+        return "".join(parts)
+
+
 def find_mcs_insertion_point(backbone: dict) -> Optional[int]:
     """
     Determine the best insertion point within the MCS of a backbone.

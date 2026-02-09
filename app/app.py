@@ -25,7 +25,7 @@ import time
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent.parent / ".env")
+    load_dotenv(Path(__file__).parent / ".env") 
 except ImportError:
     pass  # dotenv not installed; rely on environment variables
 

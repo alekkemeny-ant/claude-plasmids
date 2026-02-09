@@ -124,6 +124,8 @@ python -m evals.run_agent_evals --model sonnet
 
 ## Test Tiers
 
+### Pipeline tests
+
 Pipeline tests (`tests/test_pipeline.py`) run the assembly engine directly against 27 benchmark cases:
 
 | Tier | Cases | Description |
@@ -132,7 +134,20 @@ Pipeline tests (`tests/test_pipeline.py`) run the assembly engine directly again
 | 2 | 7 | Backbone/insert resolved by alias from library (name resolution) |
 | 3 | 4 | Addgene ground truth comparison (end-to-end validation) |
 
-**Agent evals** (`evals/run_agent_evals.py`): 36 cases across 9 categories — explicit requests, alias resolution, natural language, specific insert types, multi-step workflows, NCBI gene retrieval, protein tagging/fusions, and negative/balanced cases.
+### Agent evals
+
+Agent evals (`evals/run_agent_evals.py`) send natural language prompts through the full Claude agent loop and score output with the Allen Institute rubric. 36 cases across 8 categories:
+
+| Category | ID Prefix | Cases | Description |
+|----------|-----------|-------|-------------|
+| Explicit backbone + insert | A1 | 9 | Both backbone and insert named directly (e.g., "Put EGFP into pcDNA3.1(+)"). Baseline correctness across multiple backbones. |
+| Alias / name resolution | A2 | 5 | Common aliases and variant spellings (e.g., "eGFP", "GFP", "pGEX", "pcDNA3.1-"). Tests fuzzy matching. |
+| Natural language | A3 | 3 | Underspecified requests where the agent must infer backbone and insert (e.g., "I want a green fluorescent protein in mammalian cells"). May have multiple valid answers via `alternative_expected`. |
+| Specific insert types | A4 | 4 | Non-standard inserts: large reporters (luciferase, 1653 bp), small epitope tags (FLAG 24 bp, HA 27 bp), tandem dimers (tdTomato). |
+| Multi-step workflow | A5 | 3 | Full 5-step workflow: retrieve, assemble, validate, export. Agent must call multiple tools in sequence. |
+| NCBI gene retrieval | A6 | 7 | Genes not in the local library — agent must use NCBI Entrez. Includes species disambiguation, gene family disambiguation, alternative name resolution (PAI-1 → SERPINE1), and natural language backbone selection. Multi-turn cases use `user_persona` with a simulated user. |
+| Protein tagging / fusions | A7 | 2 | N-terminal and C-terminal tag fusions (FLAG-EGFP, mCherry-HA). Tests `fuse_inserts` tool and correct start/stop codon management. Uses `expected_insert_sequence` for ground truth. |
+| Negative / balanced | A8 | 3 | Tests that the agent does NOT over-trigger tools. E.g., EGFP (in local library) should not call NCBI; plain EGFP should not call `fuse_inserts`. Uses `tools_should_not_use` assertions. |
 
 ## Verification Rubric
 

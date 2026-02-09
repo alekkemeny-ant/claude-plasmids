@@ -201,7 +201,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 - A protein-coding insert should start with ATG (start codon) and end with a stop codon (TAA, TAG, or TGA).
 - Insert length should be a multiple of 3 (in reading frame).
 - Epitope tags (FLAG, HA, His, Myc) are short peptide-coding sequences that do not necessarily have their own start/stop codons — they are typically fused to another CDS. When a user asks to insert an epitope tag by itself, use `insert_id` to insert the exact library sequence as-is. Do NOT add ATG or stop codons unless the user explicitly requests it.
-- The insert must be in the correct orientation: 5' to 3' in the same direction as the promoter reads. For (+) orientation vectors like pcDNA3.1(+), the insert goes in forward. For (-) orientation vectors, the insert must be reverse-complemented.
+- The insert must be in the correct orientation: 5' to 3' in the same direction as the promoter reads. (+)/(-) orientation vectors like pcDNA3.1(+), the (+) and (-)refer to direction of the MCS, either one can be used.
 
 ### Common Pitfalls
 

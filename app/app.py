@@ -955,11 +955,18 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         if is_cancelled() or disconnected:
             break
 
-        # Filter out thinking blocks to avoid Error 400 on replay
-        filtered_content = [
-            b for b in final_message.content
-            if getattr(b, 'type', None) != 'thinking'
-        ]
+        # Convert content blocks to plain dicts to strip extra SDK fields
+        # (e.g. parsed_output) that cause 400 errors on replay
+        filtered_content = []
+        for b in final_message.content:
+            if getattr(b, 'type', None) == 'thinking':
+                continue
+            elif getattr(b, 'type', None) == 'text':
+                filtered_content.append({"type": "text", "text": b.text})
+            elif getattr(b, 'type', None) == 'tool_use':
+                filtered_content.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
+            else:
+                filtered_content.append(b)
         history.append({"role": "assistant", "content": filtered_content})
 
         if tool_results:

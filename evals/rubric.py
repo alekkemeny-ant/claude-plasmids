@@ -199,6 +199,7 @@ def score_construct(
     backbone_features: Optional[list[dict]] = None,
     output_text: Optional[str] = None,
     output_format: Optional[str] = None,
+    expect_reverse_complement: bool = False,
 ) -> RubricResult:
     """
     Score an assembled construct against the Allen Institute rubric.
@@ -224,6 +225,9 @@ def score_construct(
                            Used for biological sanity checks.
         output_text: Optional formatted output text (GenBank/FASTA string).
         output_format: Optional format identifier ("genbank", "fasta", or None).
+        expect_reverse_complement: If True, expect the insert in reverse
+                                   complement orientation. Orientation and
+                                   position checks use the RC insert.
 
     Returns:
         RubricResult with all checks populated.
@@ -232,6 +236,9 @@ def score_construct(
     construct_seq = clean_sequence(construct_sequence)
     backbone_seq = clean_sequence(expected_backbone_sequence)
     insert_seq = clean_sequence(expected_insert_sequence)
+
+    # Pre-compute RC for orientation checks
+    insert_rc = reverse_complement(insert_seq)
 
     # ── Section 1: Input Validation ─────────────────────────────────
 
@@ -315,10 +322,8 @@ def score_construct(
         detail="; ".join(con_errs) if con_errs else f"{len(construct_seq)} bp",
     ))
 
-    # 2b. Insert found in construct (forward orientation)
+    # 2b. Insert found in construct (forward or RC orientation)
     insert_found = insert_seq in construct_seq
-    # Also check reverse complement
-    insert_rc = reverse_complement(insert_seq)
     insert_found_rc = insert_rc in construct_seq
     result.checks.append(Check(
         section="Construct Assembly",
@@ -328,18 +333,36 @@ def score_construct(
         detail="reverse complement" if insert_found_rc and not insert_found else "",
     ))
 
-    # 2c. Insert in correct orientation (forward, not reverse complement)
+    # 2c. Insert in correct orientation
+    if expect_reverse_complement:
+        orientation_ok = insert_found_rc
+        orientation_detail = "" if orientation_ok else (
+            "Found in forward only" if insert_found else "Insert not found"
+        )
+        orientation_label = "Insert in correct orientation (reverse complement)"
+        # For RC inserts, use the RC sequence for position/preservation checks
+        effective_insert = insert_rc
+        effective_found = insert_found_rc
+    else:
+        orientation_ok = insert_found
+        orientation_detail = (
+            "Found as reverse complement only" if insert_found_rc and not insert_found else ""
+        )
+        orientation_label = "Insert in correct orientation (forward)"
+        effective_insert = insert_seq
+        effective_found = insert_found
+
     result.checks.append(Check(
         section="Construct Assembly",
-        name="Insert in correct orientation (forward)",
+        name=orientation_label,
         severity="Critical",
-        passed=insert_found,
-        detail="Found as reverse complement only" if insert_found_rc and not insert_found else "",
+        passed=orientation_ok,
+        detail=orientation_detail,
     ))
 
     # 2d. Insert at correct position
-    if insert_found:
-        actual_pos = construct_seq.index(insert_seq)
+    if effective_found:
+        actual_pos = construct_seq.index(effective_insert)
         pos_correct = actual_pos == expected_insert_position
         result.checks.append(Check(
             section="Construct Assembly",
@@ -354,7 +377,7 @@ def score_construct(
             name="Insert at correct position",
             severity="Critical",
             passed=False,
-            detail="Insert not found in forward orientation",
+            detail="Insert not found in expected orientation",
         ))
 
     # 2e. Backbone upstream preserved
@@ -368,7 +391,7 @@ def score_construct(
     ))
 
     # 2f. Backbone downstream preserved
-    downstream_start_construct = expected_insert_position + len(insert_seq)
+    downstream_start_construct = expected_insert_position + len(effective_insert)
     downstream_start_backbone = expected_insert_position
     downstream_ok = construct_seq[downstream_start_construct:] == backbone_seq[downstream_start_backbone:]
     result.checks.append(Check(

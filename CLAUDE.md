@@ -25,7 +25,9 @@ library/                    # JSON data (curated + auto-cached)
 evals/                      # Evaluation infrastructure
 ├── rubric.py               # Allen Institute verification rubric (~32 weighted checks)
 ├── test_cases.py           # 27 benchmark cases across 3 tiers
-└── run_agent_evals.py      # End-to-end agent eval runner (Agent SDK)
+├── run_agent_evals.py      # End-to-end agent eval runner (36 cases, Agent SDK)
+├── simulated_user.py       # Simulated user for multi-turn disambiguation evals
+└── llm_judge.py            # LLM-as-judge grading for transcript quality
 
 tests/                      # Test suite
 ├── test_assembler.py       # Assembly engine tests

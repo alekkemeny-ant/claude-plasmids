@@ -683,9 +683,22 @@ def search_addgene(query: str, limit: int = 10) -> List[Dict]:
 
 
 def get_addgene_plasmid(addgene_id: str) -> Optional[AddgenePlasmid]:
-    """Fetch a plasmid from Addgene."""
+    """Fetch a plasmid from Addgene, including its sequence."""
     client = AddgeneClient()
-    return client.get_plasmid(addgene_id)
+    plasmid = client.get_plasmid(addgene_id)
+    if not plasmid:
+        return None
+    # Also fetch sequence + features from GenBank file
+    sequence, features, mcs_position = client.get_genbank_data(addgene_id)
+    if sequence:
+        plasmid.sequence = sequence
+        plasmid.sequence_source = "addgene"
+        plasmid.size_bp = len(sequence)
+    if features:
+        plasmid.parsed_features = features
+    if mcs_position:
+        plasmid.mcs_position = mcs_position
+    return plasmid
 
 
 def get_addgene_sequence(addgene_id: str) -> Optional[str]:

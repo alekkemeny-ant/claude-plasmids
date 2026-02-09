@@ -58,6 +58,7 @@ from library import (
     get_insert_by_id,
     search_backbones,
     search_inserts,
+    search_all_sources as _search_all_sources,
     get_all_backbones,
     get_all_inserts,
     validate_dna_sequence,
@@ -253,6 +254,23 @@ TOOLS = [
                 "include_sequence": {"type": "boolean", "description": "Fetch and store sequence", "default": True},
             },
             "required": ["addgene_id"],
+        },
+    },
+    {
+        "name": "search_all",
+        "description": (
+            "Search local library, NCBI Gene, and Addgene concurrently in a single call. "
+            "Returns combined results from all sources. Use this as the first search step "
+            "when you don't know whether the query is a local insert, an NCBI gene, or an "
+            "Addgene plasmid. Faster than calling search_inserts, search_gene, and search_addgene separately."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Gene symbol, plasmid name, or search term"},
+                "organism": {"type": "string", "description": "Organism filter (e.g., 'human', 'mouse')"},
+            },
+            "required": ["query"],
         },
     },
     {
@@ -529,6 +547,37 @@ def execute_tool(name: str, args: dict) -> str:
             if bb.get("sequence"):
                 out += f", sequence: {len(bb['sequence'])} bp"
             return out
+
+        elif name == "search_all":
+            results = _search_all_sources(args["query"], args.get("organism"))
+            lines = [f"Concurrent search results for '{args['query']}':"]
+            if results["local_inserts"]:
+                lines.append(f"\n--- Local Inserts ({len(results['local_inserts'])} found) ---")
+                for ins in results["local_inserts"]:
+                    lines.append(f"  - {ins['id']} ({ins['size_bp']} bp, {ins.get('category', '?')})")
+            if results["local_backbones"]:
+                lines.append(f"\n--- Local Backbones ({len(results['local_backbones'])} found) ---")
+                for bb in results["local_backbones"]:
+                    lines.append(f"  - {bb['id']} ({bb['size_bp']} bp, {bb.get('organism', '?')}, {bb.get('promoter', '?')})")
+            if results["ncbi_genes"]:
+                lines.append(f"\n--- NCBI Gene ({len(results['ncbi_genes'])} found) ---")
+                for g in results["ncbi_genes"]:
+                    aliases = f" (aliases: {g['aliases']})" if g.get("aliases") else ""
+                    lines.append(f"  - {g['symbol']} (ID: {g['gene_id']}) — {g['full_name']} [{g['organism']}]{aliases}")
+            if results["addgene_plasmids"]:
+                lines.append(f"\n--- Addgene ({len(results['addgene_plasmids'])} found) ---")
+                for p in results["addgene_plasmids"]:
+                    lines.append(f"  - {p.get('name', '?')} (Addgene #{p.get('addgene_id', '?')})")
+            if results["errors"]:
+                lines.append(f"\n--- Errors ---")
+                for src, err in results["errors"].items():
+                    lines.append(f"  - {src}: {err}")
+            total = (len(results["local_inserts"]) + len(results["local_backbones"]) +
+                     len(results["ncbi_genes"]) + len(results["addgene_plasmids"]))
+            if total == 0:
+                lines.append("\nNo results found in any source.")
+            lines.append(f"\nSources searched: {', '.join(results['sources_searched'])}")
+            return "\n".join(lines)
 
         elif name == "search_gene":
             if not NCBI_AVAILABLE:

@@ -9,6 +9,7 @@ Can be used directly for testing or integration.
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -26,11 +27,17 @@ except ImportError:
 
 # Optional NCBI integration
 try:
-    from .ncbi_integration import fetch_gene_sequence as _ncbi_fetch_gene
+    from .ncbi_integration import (
+        fetch_gene_sequence as _ncbi_fetch_gene,
+        search_gene as _ncbi_search_gene,
+    )
     NCBI_AVAILABLE = True
 except ImportError:
     try:
-        from ncbi_integration import fetch_gene_sequence as _ncbi_fetch_gene
+        from ncbi_integration import (
+            fetch_gene_sequence as _ncbi_fetch_gene,
+            search_gene as _ncbi_search_gene,
+        )
         NCBI_AVAILABLE = True
     except ImportError:
         NCBI_AVAILABLE = False
@@ -49,42 +56,96 @@ def load_inserts() -> dict:
 
 
 def normalize_name(name: str) -> str:
-    """Normalize a plasmid/insert name for matching."""
+    """Normalize a plasmid/insert name for matching.
+
+    Preserves polarity indicators: (+)/(-) and trailing +/- are converted
+    to 'plus'/'minus' so that pcDNA3.1(+) and pcDNA3.1(-) remain distinct.
+    """
+    name = name.replace('(+)', 'plus').replace('(-)', 'minus')
+    name = re.sub(r'\+\s*$', 'plus', name)
+    name = re.sub(r'-\s*$', 'minus', name)
     return re.sub(r'[^a-z0-9]', '', name.lower())
+
+
+# Known promoter properties for natural language search
+_PROMOTER_PROPERTIES = {
+    "cmv": "strong constitutive",
+    "cag": "very strong constitutive",
+    "ef1a": "strong constitutive",
+    "pgk": "moderate constitutive",
+    "ubiquitin": "moderate constitutive",
+    "sv40": "moderate constitutive",
+    "t7": "strong inducible",
+    "tac": "strong inducible",
+    "lac": "moderate inducible",
+    "u6": "constitutive pol-iii",
+    "cbh": "strong constitutive",
+    "ltr": "moderate constitutive",
+}
+
+
+def _backbone_searchable_text(backbone: dict) -> str:
+    """Build a single lowercase string of all searchable backbone fields."""
+    parts = [
+        backbone.get("id", ""),
+        backbone.get("name", ""),
+        backbone.get("description", ""),
+        backbone.get("bacterial_resistance", ""),
+        backbone.get("mammalian_selection", ""),
+        backbone.get("promoter", ""),
+        backbone.get("organism", ""),
+        backbone.get("origin", ""),
+    ]
+    parts.extend(backbone.get("aliases", []))
+    # Add promoter property descriptors for natural language matching
+    promoter_parts = (backbone.get("promoter") or "").lower().split()
+    promoter = promoter_parts[0].rstrip(",") if promoter_parts else ""
+    if promoter in _PROMOTER_PROPERTIES:
+        parts.append(_PROMOTER_PROPERTIES[promoter])
+    # Add expression type descriptors based on vector class
+    desc_lower = (backbone.get("description") or "").lower()
+    organism = (backbone.get("organism") or "").lower()
+    if any(kw in desc_lower for kw in ("lentiv", "retrovir", "aav", "gene therapy")):
+        parts.append("stable expression")
+    if organism == "mammalian" and "lentiv" not in desc_lower and "retrovir" not in desc_lower:
+        parts.append("transient expression")
+    return " ".join(p or "" for p in parts).lower()
 
 
 def search_backbones(query: str, organism: Optional[str] = None, promoter: Optional[str] = None) -> list[dict]:
     """
     Search for backbones matching the query.
-    
+
+    Supports multi-term queries: all terms must match somewhere across the
+    searchable fields (name, aliases, description, resistance, selection,
+    promoter, organism, origin).
+
     Args:
         query: Search term (name, feature, or keyword)
         organism: Filter by organism type (mammalian, bacterial, etc.)
         promoter: Filter by promoter type (CMV, T7, etc.)
-    
+
     Returns:
         List of matching backbone dictionaries
     """
     data = load_backbones()
     results = []
-    query_normalized = normalize_name(query)
-    
+    query_terms = query.lower().split()
+
     for backbone in data["backbones"]:
-        # Check name and aliases
-        names_to_check = [backbone["id"], backbone["name"]] + backbone.get("aliases", [])
-        name_match = any(query_normalized in normalize_name(n) for n in names_to_check)
-        
-        # Check description
-        desc_match = query.lower() in backbone.get("description", "").lower()
-        
-        if name_match or desc_match:
-            # Apply filters
-            if organism and backbone.get("organism", "").lower() != organism.lower():
-                continue
-            if promoter and promoter.lower() not in backbone.get("promoter", "").lower():
-                continue
-            results.append(backbone)
-    
+        searchable = _backbone_searchable_text(backbone)
+
+        # All query terms must appear somewhere in the searchable text
+        if not all(term in searchable for term in query_terms):
+            continue
+
+        # Apply filters
+        if organism and backbone.get("organism", "").lower() != organism.lower():
+            continue
+        if promoter and promoter.lower() not in backbone.get("promoter", "").lower():
+            continue
+        results.append(backbone)
+
     return results
 
 
@@ -220,13 +281,24 @@ def get_insert_by_id(insert_id: str) -> Optional[dict]:
     data = load_inserts()
     id_normalized = normalize_name(insert_id)
 
+    # Prefer exact ID match, then fall back to alias match
+    alias_match = None
     for insert in data["inserts"]:
-        names_to_check = [insert["id"]] + insert.get("aliases", [])
-        if any(normalize_name(n) == id_normalized for n in names_to_check):
+        if normalize_name(insert["id"]) == id_normalized:
             return insert
+        if alias_match is None:
+            if any(normalize_name(a) == id_normalized for a in insert.get("aliases", [])):
+                alias_match = insert
+    if alias_match is not None:
+        return alias_match
 
     # ── NCBI fallback ──
     if not NCBI_AVAILABLE:
+        return None
+
+    # Skip NCBI fallback if the query doesn't look like a gene name
+    # (e.g., "pcDNA3.1(+)" contains parens/dots → backbone, not a gene)
+    if not re.match(r'^[A-Za-z0-9_\-]+$', insert_id.strip()):
         return None
 
     try:
@@ -236,11 +308,18 @@ def get_insert_by_id(insert_id: str) -> Optional[dict]:
             logger.info(f"No NCBI CDS found for '{insert_id}'")
             return None
 
-        # Build insert dict
+        # Build insert dict — only store the original query as an alias if
+        # it looks like a plausible gene name (letters/digits/hyphens only,
+        # no parentheses or dots that indicate backbone IDs like "pcDNA3.1(+)")
+        alias_candidate = insert_id.strip()
+        store_alias = (
+            alias_candidate != result["symbol"]
+            and re.match(r'^[A-Za-z0-9_\-]+$', alias_candidate)
+        )
         insert = {
             "id": result["symbol"],
             "name": result["symbol"],
-            "aliases": [insert_id] if insert_id != result["symbol"] else [],
+            "aliases": [alias_candidate] if store_alias else [],
             "description": result.get("full_name", ""),
             "category": "gene",
             "size_bp": result["length"],
@@ -250,10 +329,12 @@ def get_insert_by_id(insert_id: str) -> Optional[dict]:
             "source": "NCBI",
         }
 
-        # Cache to local library
-        data["inserts"].append(insert)
-        with open(LIBRARY_PATH / "inserts.json", "w") as f:
-            json.dump(data, f, indent=2)
+        # Cache to local library (skip if gene already cached)
+        existing_ids = {i["id"] for i in data["inserts"]}
+        if insert["id"] not in existing_ids:
+            data["inserts"].append(insert)
+            with open(LIBRARY_PATH / "inserts.json", "w") as f:
+                json.dump(data, f, indent=2)
 
         logger.info(
             f"Cached NCBI gene '{result['symbol']}' "
@@ -417,3 +498,79 @@ def design_construct(backbone_id: str, insert_id: str) -> dict:
         "insertion_site": backbone.get("mcs_position"),
         "insert_validation": validation,
     }
+
+
+def search_all_sources(
+    query: str,
+    organism: Optional[str] = None,
+    timeout: float = 20.0,
+) -> dict:
+    """Search local library, NCBI, and Addgene concurrently for a gene or plasmid.
+
+    Runs all available searches in parallel using a thread pool, returns
+    combined results within the timeout. Inspired by the concurrent lookup
+    pattern in the metadata-capture project.
+
+    Args:
+        query: Gene symbol, plasmid name, or search term.
+        organism: Optional organism filter for NCBI (e.g., "human", "mouse").
+        timeout: Max seconds to wait for all sources (default 20s).
+
+    Returns:
+        Dict with keys:
+        - local_inserts: list of matching inserts from the local library
+        - local_backbones: list of matching backbones from the local library
+        - ncbi_genes: list of NCBI Gene matches (if available)
+        - addgene_plasmids: list of Addgene matches (if available)
+        - sources_searched: list of source names that were queried
+        - errors: dict of source -> error message for any failures
+    """
+    results = {
+        "local_inserts": [],
+        "local_backbones": [],
+        "ncbi_genes": [],
+        "addgene_plasmids": [],
+        "sources_searched": [],
+        "errors": {},
+    }
+
+    def _search_local_inserts():
+        return search_inserts(query)
+
+    def _search_local_backbones():
+        return search_backbones(query, organism)
+
+    def _search_ncbi():
+        if not NCBI_AVAILABLE:
+            return None
+        return _ncbi_search_gene(query, organism)
+
+    def _search_addgene():
+        if not ADDGENE_AVAILABLE:
+            return None
+        client = AddgeneClient()
+        return client.search(query, limit=5)
+
+    # Map task names to callables
+    tasks = {
+        "local_inserts": _search_local_inserts,
+        "local_backbones": _search_local_backbones,
+        "ncbi_genes": _search_ncbi,
+        "addgene_plasmids": _search_addgene,
+    }
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(fn): name for name, fn in tasks.items()}
+
+        for future in as_completed(futures, timeout=timeout):
+            name = futures[future]
+            results["sources_searched"].append(name)
+            try:
+                data = future.result()
+                if data is not None:
+                    results[name] = data
+            except Exception as e:
+                results["errors"][name] = str(e)
+                logger.warning(f"Concurrent search error ({name}): {e}")
+
+    return results

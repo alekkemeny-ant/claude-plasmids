@@ -39,6 +39,8 @@ Defaults if fully unspecified:
 
 **Smart skip**: If the user specifies a backbone, skip expression type/level questions. If the user says "transient overexpression," skip expression type and pick a strong constitutive backbone.
 
+**Be decisive**: When the user explicitly asks you to "pick", "choose", or "select" a backbone or insert, make the decision yourself using the defaults above. Do NOT ask the user to choose between options — they have delegated the decision to you. Proceed directly to assembly.
+
 #### Insert selection
 - **If species not specified** → ask which species. Do NOT assume the species matches the cell type (e.g., a user might want mouse MyD88 in human HEK293 cells).
 - **If gene name is ambiguous** → present options. For example:
@@ -81,6 +83,8 @@ assemble_construct(backbone_id="pcDNA3.1(+)", insert_id="EGFP")
 ```
 The tool auto-resolves sequences from the library and uses the MCS start as the insertion position.
 
+**IMPORTANT — always prefer `insert_id` over `insert_sequence`**: When the insert is from the library, use `insert_id` to let the tool resolve the exact sequence. Do NOT manually copy/paste or reconstruct insert sequences — this is error-prone for long sequences. Only use `insert_sequence` when working with fused sequences or custom user-provided sequences.
+
 **With a fused insert (e.g., FLAG-EGFP):**
 ```
 # First fuse the sequences
@@ -88,12 +92,13 @@ fuse_inserts(inserts=[
   {"insert_id": "FLAG_tag"},
   {"insert_id": "EGFP"}
 ])
-# Then assemble with the fused sequence
+# Then assemble with the EXACT fused sequence from the tool output
 assemble_construct(
   backbone_id="pcDNA3.1(+)",
-  insert_sequence="<fused CDS from above>"
+  insert_sequence="<copy the EXACT fused_sequence from fuse_inserts output>"
 )
 ```
+**CRITICAL**: Copy the `fused_sequence` field from the `fuse_inserts` output verbatim. Never manually reconstruct or retype the sequence — long sequences will be truncated or corrupted. If the fused sequence needs modifications (e.g., adding ATG), prepend/append to the exact tool output.
 
 **Custom sequences:**
 ```
@@ -195,7 +200,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 
 - A protein-coding insert should start with ATG (start codon) and end with a stop codon (TAA, TAG, or TGA).
 - Insert length should be a multiple of 3 (in reading frame).
-- Epitope tags (FLAG, HA, His, Myc) are short peptide-coding sequences that do not necessarily have their own start/stop codons — they are typically fused to another CDS.
+- Epitope tags (FLAG, HA, His, Myc) are short peptide-coding sequences that do not necessarily have their own start/stop codons — they are typically fused to another CDS. When a user asks to insert an epitope tag by itself, use `insert_id` to insert the exact library sequence as-is. Do NOT add ATG or stop codons unless the user explicitly requests it.
 - The insert must be in the correct orientation: 5' to 3' in the same direction as the promoter reads. For (+) orientation vectors like pcDNA3.1(+), the insert goes in forward. For (-) orientation vectors, the insert must be reverse-complemented.
 
 ### Common Pitfalls

@@ -21,6 +21,7 @@ from claude_agent_sdk import tool, create_sdk_mcp_server
 from .library import (
     search_backbones as _search_backbones,
     search_inserts as _search_inserts,
+    search_all_sources as _search_all_sources,
     get_backbone_by_id,
     get_insert_by_id,
     get_all_backbones,
@@ -481,6 +482,63 @@ async def import_addgene_to_library(args):
 
 
 @tool(
+    "search_all",
+    (
+        "Search local library, NCBI Gene, and Addgene concurrently in a single call. "
+        "Returns combined results from all sources. Use this as the first search step "
+        "when you don't know whether the query is a local insert, an NCBI gene, or an "
+        "Addgene plasmid — it checks everywhere in parallel and is faster than calling "
+        "search_inserts, search_gene, and search_addgene sequentially."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Gene symbol, plasmid name, or search term"},
+            "organism": {"type": "string", "description": "Organism filter (e.g., 'human', 'mouse')"},
+        },
+        "required": ["query"],
+    },
+)
+async def search_all_tool(args):
+    results = _search_all_sources(args["query"], args.get("organism"))
+    lines = [f"Concurrent search results for '{args['query']}':"]
+
+    if results["local_inserts"]:
+        lines.append(f"\n--- Local Inserts ({len(results['local_inserts'])} found) ---")
+        for ins in results["local_inserts"]:
+            lines.append(f"  - {ins['id']} ({ins['size_bp']} bp, {ins.get('category', '?')})")
+
+    if results["local_backbones"]:
+        lines.append(f"\n--- Local Backbones ({len(results['local_backbones'])} found) ---")
+        for bb in results["local_backbones"]:
+            lines.append(f"  - {bb['id']} ({bb['size_bp']} bp, {bb.get('organism', '?')}, {bb.get('promoter', '?')})")
+
+    if results["ncbi_genes"]:
+        lines.append(f"\n--- NCBI Gene ({len(results['ncbi_genes'])} found) ---")
+        for g in results["ncbi_genes"]:
+            aliases = f" (aliases: {g['aliases']})" if g.get("aliases") else ""
+            lines.append(f"  - {g['symbol']} (ID: {g['gene_id']}) — {g['full_name']} [{g['organism']}]{aliases}")
+
+    if results["addgene_plasmids"]:
+        lines.append(f"\n--- Addgene ({len(results['addgene_plasmids'])} found) ---")
+        for p in results["addgene_plasmids"]:
+            lines.append(f"  - {p.get('name', '?')} (Addgene #{p.get('addgene_id', '?')})")
+
+    if results["errors"]:
+        lines.append(f"\n--- Errors ---")
+        for src, err in results["errors"].items():
+            lines.append(f"  - {src}: {err}")
+
+    total = (len(results["local_inserts"]) + len(results["local_backbones"]) +
+             len(results["ncbi_genes"]) + len(results["addgene_plasmids"]))
+    if total == 0:
+        lines.append("\nNo results found in any source.")
+
+    lines.append(f"\nSources searched: {', '.join(results['sources_searched'])}")
+    return _text("\n".join(lines))
+
+
+@tool(
     "search_gene",
     "Search NCBI Gene database by gene symbol or name. Returns matching genes with IDs, symbols, organisms, and aliases. Use this when a user mentions a gene not in the local library.",
     {
@@ -579,12 +637,31 @@ async def fuse_inserts_tool(args):
         return _error(f"Fusion error: {e}")
 
     names = [s["name"] for s in sequences]
+    has_atg = fused[:3] == "ATG"
+    has_stop = fused[-3:] in ("TAA", "TAG", "TGA")
+
     out = f"Fused CDS: {'-'.join(names)}\n"
     out += f"Length: {len(fused)} bp\n"
-    out += f"Start codon: {'Yes' if fused[:3] == 'ATG' else 'No'}\n"
-    out += f"Stop codon: {'Yes' if fused[-3:] in ('TAA', 'TAG', 'TGA') else 'No'}\n"
+    out += f"Start codon: {'Yes' if has_atg else 'No — MISSING'}\n"
+    out += f"Stop codon: {'Yes' if has_stop else 'No — MISSING'}\n"
     out += f"In frame: {'Yes' if len(fused) % 3 == 0 else 'No'}\n"
-    out += f"\nFused sequence ({len(fused)} bp):\n{fused}"
+
+    # Provide ready-to-use sequence with ATG/stop added if missing
+    expressible = fused
+    modifications = []
+    if not has_atg:
+        expressible = "ATG" + expressible
+        modifications.append("ATG prepended")
+    if not has_stop:
+        expressible = expressible + "TAA"
+        modifications.append("TAA stop appended")
+
+    out += f"\nfused_sequence ({len(fused)} bp):\n{fused}"
+
+    if modifications:
+        out += f"\n\nexpressible_sequence ({len(expressible)} bp, {', '.join(modifications)}):\n{expressible}"
+        out += "\n\nUse expressible_sequence for assemble_construct to ensure proper translation."
+
     return _text(out)
 
 
@@ -606,6 +683,7 @@ ALL_TOOLS = [
     search_addgene,
     get_addgene_plasmid,
     import_addgene_to_library,
+    search_all_tool,
     search_gene_tool,
     fetch_gene_tool,
     fuse_inserts_tool,

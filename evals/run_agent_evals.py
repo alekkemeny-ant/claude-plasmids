@@ -24,6 +24,7 @@ import re
 import sys
 import time
 import logging
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -53,6 +54,8 @@ from src.tools import create_plasmid_tools, ALL_TOOL_NAMES
 from src.library import get_backbone_by_id, get_insert_by_id
 from src.assembler import find_mcs_insertion_point
 from evals.rubric import score_construct, RubricResult
+from evals.simulated_user import SimulatedUser
+from evals.llm_judge import LLMJudge, JudgeResult
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,15 @@ class AgentTestCase:
     # Per the blog's "balanced problem sets" principle (Step 3): test both
     # directions to avoid one-sided optimization (e.g., agent over-triggering NCBI).
     tools_should_not_use: list[str] = field(default_factory=list)
+    # Simulated user persona for multi-turn disambiguation evals.
+    # When set, a SimulatedUser responds to the agent's clarifying questions.
+    user_persona: Optional[str] = None
+    # When True, the rubric expects the insert in reverse complement orientation.
+    expect_reverse_complement: bool = False
+    # Alternative valid backbones: list of dicts with backbone_id,
+    # insertion_position, total_size. If the primary backbone fails scoring,
+    # each alternative is tried and the best result is used.
+    alternative_expected: list[dict] = field(default_factory=list)
 
 
 AGENT_CASES = [
@@ -245,8 +257,9 @@ AGENT_CASES = [
         expected_backbone_id="pcDNA3.1(-)",
         expected_insert_id="EGFP",
         expected_insertion_position=895,
-        expected_total_size=6224,
+        expected_total_size=6148,
         tags=["alias", "name_resolution", "mammalian"],
+        expect_reverse_complement=True,
     ),
     # ── A3: Natural language / underspecified ──────────────────────────
     AgentTestCase(
@@ -282,6 +295,9 @@ AGENT_CASES = [
         expected_insertion_position=930,
         expected_total_size=6622,
         tags=["natural_language", "bacterial", "reporter"],
+        alternative_expected=[
+            {"backbone_id": "pUC19", "insertion_position": 631, "total_size": 4339},
+        ],
     ),
     AgentTestCase(
         id="A3-003",
@@ -322,6 +338,12 @@ AGENT_CASES = [
         expected_insertion_position=895,
         expected_total_size=5452,
         tags=["explicit", "mammalian", "epitope_tag"],
+        user_persona=(
+            "You want the FLAG tag inserted into the MCS by itself, exactly as "
+            "it is in the library. No fusion, no extra codons. Just the raw "
+            "FLAG tag sequence into the backbone. If the agent says it needs "
+            "ATG or stop codons, say no — just insert the tag as-is."
+        ),
     ),
     AgentTestCase(
         id="A4-003",
@@ -331,8 +353,9 @@ AGENT_CASES = [
         expected_backbone_id="pcDNA3.1(-)",
         expected_insert_id="HA_tag",
         expected_insertion_position=895,
-        expected_total_size=5531,
+        expected_total_size=5455,
         tags=["explicit", "mammalian", "epitope_tag"],
+        expect_reverse_complement=True,
     ),
     AgentTestCase(
         id="A4-004",
@@ -439,6 +462,11 @@ AGENT_CASES = [
             "species",      # agent should ask about species/organism
             "mouse",        # agent should recognize RAW 264 = mouse
         ],
+        user_persona=(
+            "You want to express mouse MyD88. When asked about species, "
+            "specify mouse. When asked about expression, say transient "
+            "high expression."
+        ),
     ),
     AgentTestCase(
         id="A6-003",
@@ -457,6 +485,10 @@ AGENT_CASES = [
             "TRAF",         # agent should mention TRAF family members
             "which",        # agent should ask which one
         ],
+        user_persona=(
+            "You want TRAF6 specifically. When asked which TRAF, say TRAF6. "
+            "The sequence should come from mouse."
+        ),
     ),
     AgentTestCase(
         id="A6-004",
@@ -476,6 +508,10 @@ AGENT_CASES = [
         transcript_assertions=[
             "TRAF",         # agent should recognize TNF receptor associated factor = TRAF
         ],
+        user_persona=(
+            "You want TRAF6 specifically. When asked which TRAF, say TRAF6. "
+            "The sequence should come from mouse."
+        ),
     ),
     AgentTestCase(
         id="A6-005",
@@ -493,6 +529,10 @@ AGENT_CASES = [
             "mCherry",      # agent should mention specific variants
             "which",        # agent should ask which variant
         ],
+        user_persona=(
+            "You want mCherry as your RFP. When asked which variant, say "
+            "mCherry. Expression: transient, high."
+        ),
     ),
     AgentTestCase(
         id="A6-006",
@@ -540,25 +580,61 @@ AGENT_CASES = [
         description=(
             "Agent must fuse FLAG_tag + EGFP using fuse_inserts, then assemble "
             "the fusion CDS into pcDNA3.1(+). Tests the fuse_inserts tool and "
-            "correct codon management (FLAG provides ATG, EGFP provides stop)."
+            "correct codon management. Agent adds ATG before FLAG (which lacks "
+            "one) and EGFP provides the stop codon."
         ),
         expected_backbone_id="pcDNA3.1(+)",
         expected_insert_id="EGFP",
+        expected_insertion_position=895,
+        expected_total_size=6172,
+        # Fused CDS: ATG + FLAG_tag (24bp) + EGFP (720bp, remove ATG, keep stop) = 744 bp
+        expected_insert_sequence=(
+            "ATGGACTACAAGGACGACGATGACAAGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTG"
+            "CCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGC"
+            "GAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCC"
+            "GTGCCCTGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCC"
+            "GACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAGCGC"
+            "ACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGAC"
+            "ACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCAAGGAGGACGGCAACATCCTGGGG"
+            "CACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAAC"
+            "GGCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGAC"
+            "CACTACCAGCAGAACACCCCCATCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTG"
+            "AGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAG"
+            "TTCGTGACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA"
+        ),
         tags=["fusion", "mammalian", "epitope_tag", "n_terminal"],
     ),
     AgentTestCase(
         id="A7-002",
-        name="Fusion: C-terminal HA-mCherry",
+        name="Fusion: C-terminal mCherry-HA",
         prompt=(
             "Express a C-terminal HA-tagged mCherry in pcDNA3.1(+). "
             "Assemble the construct and return the sequence."
         ),
         description=(
             "Agent must fuse mCherry + HA_tag using fuse_inserts, then assemble "
-            "into pcDNA3.1(+). Tests C-terminal fusion with correct codon management."
+            "into pcDNA3.1(+). Tests C-terminal fusion with correct codon management. "
+            "Agent adds stop codon after HA (which lacks one)."
         ),
         expected_backbone_id="pcDNA3.1(+)",
         expected_insert_id="mCherry",
+        expected_insertion_position=895,
+        expected_total_size=6166,
+        # Fused CDS: mCherry (711bp, remove stop) + HA_tag (27bp) + TAA stop = 738 bp
+        expected_insert_sequence=(
+            "ATGGTGAGCAAGGGCGAGGAGGATAACATGGCCATCATCAAGGAGTTCATGCGCTTCAAGGTG"
+            "CACATGGAGGGCTCCGTGAACGGCCACGAGTTCGAGATCGAGGGCGAGGGCGAGGGCCGCCCC"
+            "TACGAGGGCACCCAGACCGCCAAGCTGAAGGTGACCAAGGGTGGCCCCCTGCCCTTCGCCTGG"
+            "GACATCCTGTCCCCTCAGTTCATGTACGGCTCCAAGGCCTACGTGAAGCACCCCGCCGACATC"
+            "CCCGACTACTTGAAGCTGTCCTTCCCCGAGGGCTTCAAGTGGGAGCGCGTGATGAACTTCGAG"
+            "GACGGCGGCGTGGTGACCGTGACCCAGGACTCCTCCCTGCAGGACGGCGAGTTCATCTACAAG"
+            "GTGAAGCTGCGCGGCACCAACTTCCCCTCCGACGGCCCCGTAATGCAGAAGAAGACCATGGGC"
+            "TGGGAGGCCTCCTCCGAGCGGATGTACCCCGAGGACGGCGCCCTGAAGGGCGAGATCAAGCAG"
+            "AGGCTGAAGCTGAAGGACGGCGGCCACTACGACGCTGAGGTCAAGACCACCTACAAGGCCAAG"
+            "AAGCCCGTGCAGCTGCCCGGCGCCTACAACGTCAACATCAAGTTGGACATCACCTCCCACAAC"
+            "GAGGACTACACCATCGTGGAACAGTACGAACGCGCCGAGGGCCGCCACTCCACCGGCGGCATG"
+            "GACGAGCTGTACAAGTACCCATACGATGTTCCAGATTACGCTTAA"
+        ),
         tags=["fusion", "mammalian", "epitope_tag", "c_terminal"],
     ),
     # ── A8: Negative / balanced cases (blog Step 3) ───────────────────
@@ -674,6 +750,8 @@ class AgentTrace:
     total_turns: int = 0
     error: Optional[str] = None
     cost_usd: Optional[float] = None
+    simulated_user_exchanges: list[dict] = field(default_factory=list)
+    judge_result: Optional[JudgeResult] = None
 
 
 async def _auto_approve(tool_name, tool_input, context):
@@ -681,13 +759,46 @@ async def _auto_approve(tool_name, tool_input, context):
     return PermissionResultAllow()
 
 
+def _has_tool_call(message) -> bool:
+    """Check if an AssistantMessage contains any actionable tool use blocks.
+
+    Excludes AskUserQuestion since that tool IS a clarifying question and
+    should trigger the simulated user path, not short-circuit it.
+    """
+    if not isinstance(message, AssistantMessage):
+        return False
+    return any(
+        isinstance(block, ToolUseBlock) and block.name != "AskUserQuestion"
+        for block in message.content
+    )
+
+
+def _get_assistant_text(message) -> str:
+    """Extract text content from an AssistantMessage."""
+    if not isinstance(message, AssistantMessage):
+        return ""
+    parts = []
+    for block in message.content:
+        if isinstance(block, TextBlock):
+            parts.append(block.text)
+    return "\n".join(parts)
+
+
 async def run_agent(
     prompt: str,
     model: str = "claude-opus-4-5-20251101",
     max_turns: int = 15,
     verbose: bool = False,
+    simulated_user: Optional[SimulatedUser] = None,
+    max_user_exchanges: int = 3,
 ) -> AgentTrace:
-    """Run the plasmid design agent on a single prompt using the Agent SDK."""
+    """Run the plasmid design agent on a single prompt using the Agent SDK.
+
+    If a SimulatedUser is provided, the agent loop supports multi-turn
+    conversation: when the agent responds with text only (no tool calls),
+    it's treated as a clarifying question. The simulated user generates a
+    response, which is fed back to the agent via client.query().
+    """
     trace = AgentTrace(prompt=prompt)
     server_config = create_plasmid_tools()
 
@@ -703,60 +814,127 @@ async def run_agent(
     )
 
     all_text_parts = []
+    user_exchanges = 0
+    # Track conversation history for simulated user context.
+    # Seed with the original user prompt so the simulated user has context.
+    sim_conversation: list[dict] = [{"role": "user", "content": prompt}]
 
     try:
         async with ClaudeSDKClient(options=options) as client:
             await client.query(prompt)
-            async for message in client.receive_response():
-                if isinstance(message, AssistantMessage):
-                    trace.total_turns += 1
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            all_text_parts.append(block.text)
-                            if verbose:
-                                preview = block.text[:200]
-                                print(f"    [text] {preview}{'...' if len(block.text) > 200 else ''}")
-                        elif isinstance(block, ToolUseBlock):
-                            trace.tool_calls.append({
-                                "tool": block.name,
-                                "input": block.input,
-                            })
-                            if verbose:
-                                input_preview = json.dumps(block.input)
-                                if len(input_preview) > 200:
-                                    input_preview = input_preview[:200] + "..."
-                                print(f"    [tool] {block.name}({input_preview})")
-                        elif isinstance(block, ToolResultBlock):
-                            content_str = str(block.content) if block.content else ""
-                            all_text_parts.append(content_str)
-                            if verbose:
-                                preview = content_str[:200]
-                                print(f"    [result] {preview}...")
-                elif isinstance(message, UserMessage):
-                    # Tool results come as UserMessage with ToolResultBlock items
-                    if isinstance(message.content, list):
+
+            while True:
+                last_assistant_msg = None
+                got_result = False
+
+                async for message in client.receive_response():
+                    if isinstance(message, AssistantMessage):
+                        trace.total_turns += 1
+                        last_assistant_msg = message
                         for block in message.content:
-                            if isinstance(block, ToolResultBlock) and isinstance(block.content, list):
-                                for item in block.content:
-                                    if isinstance(item, dict) and item.get("type") == "text":
-                                        all_text_parts.append(item["text"])
-                            elif isinstance(block, ToolResultBlock) and isinstance(block.content, str):
-                                all_text_parts.append(block.content)
-                elif isinstance(message, ResultMessage):
-                    trace.cost_usd = message.total_cost_usd
+                            if isinstance(block, TextBlock):
+                                all_text_parts.append(block.text)
+                                if verbose:
+                                    preview = block.text[:200]
+                                    print(f"    [text] {preview}{'...' if len(block.text) > 200 else ''}")
+                            elif isinstance(block, ToolUseBlock):
+                                trace.tool_calls.append({
+                                    "tool": block.name,
+                                    "input": block.input,
+                                })
+                                if verbose:
+                                    input_preview = json.dumps(block.input)
+                                    if len(input_preview) > 200:
+                                        input_preview = input_preview[:200] + "..."
+                                    print(f"    [tool] {block.name}({input_preview})")
+                            elif isinstance(block, ToolResultBlock):
+                                content_str = str(block.content) if block.content else ""
+                                all_text_parts.append(content_str)
+                                if verbose:
+                                    preview = content_str[:200]
+                                    print(f"    [result] {preview}...")
+                    elif isinstance(message, UserMessage):
+                        # Tool results come as UserMessage with ToolResultBlock items
+                        if isinstance(message.content, list):
+                            for block in message.content:
+                                if isinstance(block, ToolResultBlock) and isinstance(block.content, list):
+                                    for item in block.content:
+                                        if isinstance(item, dict) and item.get("type") == "text":
+                                            all_text_parts.append(item["text"])
+                                elif isinstance(block, ToolResultBlock) and isinstance(block.content, str):
+                                    all_text_parts.append(block.content)
+                    elif isinstance(message, ResultMessage):
+                        trace.cost_usd = message.total_cost_usd
+                        got_result = True
+                        break
+
+                # Check if the agent asked a question (text-only, no tool calls)
+                # and we have a simulated user available.
+                # This must be checked BEFORE the ResultMessage exit, because the
+                # SDK sends a ResultMessage when the agent ends with text-only
+                # (no tool calls), which would otherwise cause early exit.
+                if (
+                    last_assistant_msg is not None
+                    and simulated_user
+                    and not _has_tool_call(last_assistant_msg)
+                    and user_exchanges < max_user_exchanges
+                ):
+                    agent_text = _get_assistant_text(last_assistant_msg)
+                    if agent_text.strip():
+                        if verbose:
+                            print(f"    [simulated_user] Agent asked a question, generating response...")
+
+                        # Build conversation history for context
+                        sim_conversation.append({
+                            "role": "assistant",
+                            "content": agent_text,
+                        })
+
+                        user_response = simulated_user.respond(
+                            agent_message=agent_text,
+                            conversation_history=sim_conversation[:-1] if len(sim_conversation) > 1 else None,
+                        )
+
+                        sim_conversation.append({
+                            "role": "user",
+                            "content": user_response,
+                        })
+
+                        trace.simulated_user_exchanges.append({
+                            "agent_question": agent_text[:500],
+                            "user_response": user_response,
+                        })
+                        user_exchanges += 1
+
+                        if verbose:
+                            print(f"    [simulated_user] Response: {user_response[:200]}")
+
+                        # Feed the simulated user's response back to the agent
+                        await client.query(user_response)
+                        continue  # Continue the outer loop to process the next response
+
+                # If we got a ResultMessage or no assistant message, we're done
+                if got_result or last_assistant_msg is None:
                     break
+
+                # No simulated user interaction needed — we're done
+                break
+
     except Exception as e:
         trace.error = str(e)
+        traceback.print_exc()
 
     trace.assistant_text = "\n".join(all_text_parts)
 
-    # Extract assembled sequence from all collected text
-    longest = None
+    # Extract assembled sequence from all collected text.
+    # Use the LAST valid sequence found, since the agent may reassemble
+    # after corrections (e.g., removing ATG/stop codons per user request).
+    last_seq = None
     for part in all_text_parts:
         seq = _find_dna_sequence_in_text(part)
-        if seq and (longest is None or len(seq) > len(longest)):
-            longest = seq
-    trace.assembled_sequence = longest
+        if seq:
+            last_seq = seq
+    trace.assembled_sequence = last_seq
 
     return trace
 
@@ -768,15 +946,34 @@ async def run_agent_eval_case(
     tc: AgentTestCase,
     model: str = "claude-opus-4-5-20251101",
     verbose: bool = False,
+    use_judge: bool = False,
+    judge_model: str = "claude-sonnet-4-5-20250929",
 ) -> tuple[Optional[RubricResult], AgentTrace]:
     """Run a single agent eval case."""
     if verbose:
         print(f"\n{'='*60}")
         print(f"Case: {tc.id} — {tc.name}")
         print(f"Prompt: {tc.prompt[:100]}...")
+        if tc.user_persona:
+            print(f"  Simulated user persona: {tc.user_persona[:80]}...")
         print(f"  Running agent...")
 
-    trace = await run_agent(prompt=tc.prompt, model=model, verbose=verbose)
+    # Create simulated user if the case has a persona
+    sim_user = SimulatedUser(persona=tc.user_persona) if tc.user_persona else None
+
+    trace = await run_agent(
+        prompt=tc.prompt,
+        model=model,
+        verbose=verbose,
+        simulated_user=sim_user,
+    )
+
+    if verbose and trace.simulated_user_exchanges:
+        print(f"  Simulated user exchanges: {len(trace.simulated_user_exchanges)}")
+        for i, ex in enumerate(trace.simulated_user_exchanges):
+            print(f"    Exchange {i+1}:")
+            print(f"      Agent: {ex['agent_question'][:100]}...")
+            print(f"      User:  {ex['user_response'][:100]}")
 
     if trace.error:
         if verbose:
@@ -818,6 +1015,27 @@ async def run_agent_eval_case(
             total_assertions = len(transcript_results)
             if verbose:
                 print(f"  Transcript assertions: {passed_assertions}/{total_assertions} passed")
+
+        # Still run judge on cases without assembled sequence (e.g., disambiguation)
+        if use_judge and trace.assistant_text.strip():
+            if verbose:
+                print(f"  Running LLM judge ({judge_model})...")
+            judge = LLMJudge(model=judge_model)
+            judge_result = judge.evaluate(
+                case_id=tc.id,
+                case_name=tc.name,
+                case_description=tc.description,
+                case_prompt=tc.prompt,
+                expected_backbone=tc.expected_backbone_id,
+                expected_insert=tc.expected_insert_id,
+                transcript=trace.assistant_text,
+                tool_calls=trace.tool_calls,
+                transcript_assertions=tc.transcript_assertions or None,
+            )
+            trace.judge_result = judge_result
+            if verbose:
+                print(f"  {judge_result.summary()}")
+
         return None, trace
 
     if verbose:
@@ -834,7 +1052,10 @@ async def run_agent_eval_case(
 
     backbone_seq = backbone_data["sequence"]
 
-    # Resolve insert sequence: prefer inline ground truth, fall back to library
+    # Resolve insert sequence: prefer inline ground truth, fall back to library.
+    # For NCBI cases, the library may have a cached version that differs from
+    # what the agent retrieves. If the library insert isn't found in the
+    # construct, extract the actual insert from the construct.
     insert_seq = tc.expected_insert_sequence
     insert_data = None
     if not insert_seq:
@@ -844,6 +1065,22 @@ async def run_agent_eval_case(
                 print(f"  SKIP: No insert sequence for '{tc.expected_insert_id}'")
             return None, trace
         insert_seq = insert_data["sequence"]
+
+    # For NCBI cases: if the library insert isn't found in the construct,
+    # extract the actual insert from the construct using the backbone.
+    if (
+        "ncbi" in tc.tags
+        and trace.assembled_sequence
+        and insert_seq not in trace.assembled_sequence
+    ):
+        ins_pos = tc.expected_insertion_position or find_mcs_insertion_point(backbone_data)
+        if ins_pos is not None:
+            insert_len = len(trace.assembled_sequence) - len(backbone_seq)
+            if insert_len > 0:
+                extracted = trace.assembled_sequence[ins_pos:ins_pos + insert_len]
+                if verbose:
+                    print(f"  NCBI case: library insert not found, extracted {insert_len} bp from construct")
+                insert_seq = extracted
 
     insertion_pos = tc.expected_insertion_position
     if insertion_pos is None:
@@ -867,7 +1104,37 @@ async def run_agent_eval_case(
         insert_name=insert_name,
         insert_category=insert_category,
         backbone_features=backbone_data.get("features"),
+        expect_reverse_complement=tc.expect_reverse_complement,
     )
+
+    # ── Try alternative backbones if primary scoring fails ────────────
+    if not rubric_result.overall_pass and tc.alternative_expected:
+        for alt in tc.alternative_expected:
+            alt_backbone_data = get_backbone_by_id(alt["backbone_id"])
+            if not alt_backbone_data or not alt_backbone_data.get("sequence"):
+                continue
+            alt_insertion_pos = alt.get("insertion_position")
+            if alt_insertion_pos is None:
+                alt_insertion_pos = find_mcs_insertion_point(alt_backbone_data)
+            if alt_insertion_pos is None:
+                continue
+            alt_result = score_construct(
+                construct_sequence=trace.assembled_sequence,
+                expected_backbone_sequence=alt_backbone_data["sequence"],
+                expected_insert_sequence=insert_seq,
+                expected_insert_position=alt_insertion_pos,
+                backbone_name=alt_backbone_data["name"],
+                insert_name=insert_name,
+                insert_category=insert_category,
+                backbone_features=alt_backbone_data.get("features"),
+                expect_reverse_complement=tc.expect_reverse_complement,
+            )
+            if alt_result.score_pct > rubric_result.score_pct:
+                rubric_result = alt_result
+                if verbose:
+                    print(f"  Alternative backbone '{alt['backbone_id']}' scored better: {alt_result.summary()}")
+                if rubric_result.overall_pass:
+                    break
 
     # ── Add tool violation checks to rubric (negative/balanced cases) ────
     if tool_violation_results:
@@ -886,6 +1153,29 @@ async def run_agent_eval_case(
         print()
         print(rubric_result.report())
 
+    # ── LLM Judge grading ────────────────────────────────────────────
+    if use_judge:
+        if verbose:
+            print(f"  Running LLM judge ({judge_model})...")
+        judge = LLMJudge(model=judge_model)
+        judge_result = judge.evaluate(
+            case_id=tc.id,
+            case_name=tc.name,
+            case_description=tc.description,
+            case_prompt=tc.prompt,
+            expected_backbone=tc.expected_backbone_id,
+            expected_insert=tc.expected_insert_id,
+            transcript=trace.assistant_text,
+            tool_calls=trace.tool_calls,
+            transcript_assertions=tc.transcript_assertions or None,
+            rubric_result=rubric_result,
+        )
+        trace.judge_result = judge_result
+        if verbose:
+            print(f"  {judge_result.summary()}")
+            for s in judge_result.scores:
+                print(f"    {s.dimension}: {s.score}/5 — {s.explanation[:80]}")
+
     return rubric_result, trace
 
 
@@ -893,6 +1183,8 @@ async def run_agent_eval_suite(
     cases: list[AgentTestCase],
     model: str = "claude-opus-4-5-20251101",
     verbose: bool = False,
+    use_judge: bool = False,
+    judge_model: str = "claude-sonnet-4-5-20250929",
 ) -> dict:
     """Run a suite of agent eval cases."""
     results = []
@@ -902,8 +1194,16 @@ async def run_agent_eval_suite(
 
     for tc in cases:
         start_time = time.time()
-        rubric, trace = await run_agent_eval_case(tc, model=model, verbose=verbose)
+        rubric, trace = await run_agent_eval_case(
+            tc, model=model, verbose=verbose,
+            use_judge=use_judge, judge_model=judge_model,
+        )
         elapsed = time.time() - start_time
+
+        # Common fields for judge results
+        judge_score = None
+        if trace.judge_result and trace.judge_result.scores:
+            judge_score = round(trace.judge_result.overall_score, 1)
 
         if rubric is None:
             errored += 1
@@ -917,6 +1217,7 @@ async def run_agent_eval_suite(
                 "turns": trace.total_turns,
                 "elapsed_s": round(elapsed, 1),
                 "cost_usd": trace.cost_usd,
+                "judge_score": judge_score,
             })
         elif rubric.overall_pass:
             passed += 1
@@ -930,6 +1231,7 @@ async def run_agent_eval_suite(
                 "turns": trace.total_turns,
                 "elapsed_s": round(elapsed, 1),
                 "cost_usd": trace.cost_usd,
+                "judge_score": judge_score,
             })
         else:
             failed += 1
@@ -944,6 +1246,7 @@ async def run_agent_eval_suite(
                 "turns": trace.total_turns,
                 "elapsed_s": round(elapsed, 1),
                 "cost_usd": trace.cost_usd,
+                "judge_score": judge_score,
             })
 
     summary = {
@@ -963,18 +1266,30 @@ def print_agent_summary_table(eval_output: dict):
     results = eval_output["results"]
     summary = eval_output["summary"]
 
-    print(f"\n{'='*80}")
+    # Detect if any results have judge scores
+    has_judge = any(r.get("judge_score") is not None for r in results)
+
+    width = 88 if has_judge else 80
+    print(f"\n{'='*width}")
     print(f"AGENT EVALUATION RESULTS (model: {summary['model']})")
-    print(f"{'='*80}")
-    print(f"{'ID':<8} {'Name':<35} {'Status':>6} {'Score':>7} {'Tools':>5} {'Time':>6}")
-    print(f"{'-'*80}")
+    print(f"{'='*width}")
+
+    if has_judge:
+        print(f"{'ID':<8} {'Name':<35} {'Status':>6} {'Score':>7} {'Judge':>7} {'Tools':>5} {'Time':>6}")
+    else:
+        print(f"{'ID':<8} {'Name':<35} {'Status':>6} {'Score':>7} {'Tools':>5} {'Time':>6}")
+    print(f"{'-'*width}")
 
     for r in results:
         score_str = f"{r['score']}%" if r['score'] is not None else "—"
         time_str = f"{r['elapsed_s']}s"
-        print(f"{r['id']:<8} {r['name']:<35} {r['status']:>6} {score_str:>7} {r['tool_calls']:>5} {time_str:>6}")
+        if has_judge:
+            judge_str = f"{r['judge_score']}/5" if r.get('judge_score') is not None else "—"
+            print(f"{r['id']:<8} {r['name']:<35} {r['status']:>6} {score_str:>7} {judge_str:>7} {r['tool_calls']:>5} {time_str:>6}")
+        else:
+            print(f"{r['id']:<8} {r['name']:<35} {r['status']:>6} {score_str:>7} {r['tool_calls']:>5} {time_str:>6}")
 
-    print(f"{'-'*80}")
+    print(f"{'-'*width}")
     print(
         f"Total: {summary['total']}  |  "
         f"Passed: {summary['passed']}  |  "
@@ -982,7 +1297,7 @@ def print_agent_summary_table(eval_output: dict):
         f"Errors: {summary['errored']}  |  "
         f"Pass Rate: {summary['pass_rate']}%"
     )
-    print(f"{'='*80}")
+    print(f"{'='*width}")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────
@@ -996,7 +1311,15 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output results as JSON")
     parser.add_argument(
         "--model", type=str, default="claude-opus-4-5-20251101",
-        help="Model to use (default: sonnet)",
+        help="Model to use (default: opus)",
+    )
+    parser.add_argument(
+        "--judge", action="store_true",
+        help="Enable LLM-as-judge grading (off by default to save cost)",
+    )
+    parser.add_argument(
+        "--judge-model", type=str, default="claude-sonnet-4-5-20250929",
+        help="Model for LLM judge (default: sonnet)",
     )
     args = parser.parse_args()
 
@@ -1022,9 +1345,13 @@ def main():
         print("No test cases matched the filter.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Running {len(cases)} agent eval case(s) with model {args.model}...")
+    judge_info = f", judge={args.judge_model}" if args.judge else ""
+    print(f"Running {len(cases)} agent eval case(s) with model {args.model}{judge_info}...")
 
-    eval_output = asyncio.run(run_agent_eval_suite(cases, model=args.model, verbose=args.verbose))
+    eval_output = asyncio.run(run_agent_eval_suite(
+        cases, model=args.model, verbose=args.verbose,
+        use_judge=args.judge, judge_model=args.judge_model,
+    ))
 
     if args.json:
         print(json.dumps(eval_output, indent=2))

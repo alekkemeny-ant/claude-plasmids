@@ -70,7 +70,9 @@ library/
 evals/
 ├── rubric.py              # Allen Institute verification rubric (~32 weighted checks, 6 sections)
 ├── test_cases.py          # 27 benchmark cases across 3 tiers
-└── run_agent_evals.py     # End-to-end agent eval runner (30 cases, Claude Agent SDK)
+├── simulated_user.py      # Simulated user for multi-turn disambiguation evals
+├── llm_judge.py           # LLM-as-judge grading for transcript quality
+└── run_agent_evals.py     # End-to-end agent eval runner (36 cases, Claude Agent SDK)
 
 tests/
 ├── test_assembler.py      # Assembly engine tests (22 tests)
@@ -130,7 +132,7 @@ Pipeline tests (`tests/test_pipeline.py`) run the assembly engine directly again
 | 2 | 7 | Backbone/insert resolved by alias from library (name resolution) |
 | 3 | 4 | Addgene ground truth comparison (end-to-end validation) |
 
-**Agent evals** (`evals/run_agent_evals.py`): 30 cases across 7 categories — explicit requests, alias resolution, natural language, specific insert types, multi-step workflows, NCBI gene retrieval, and protein tagging/fusions.
+**Agent evals** (`evals/run_agent_evals.py`): 36 cases across 9 categories — explicit requests, alias resolution, natural language, specific insert types, multi-step workflows, NCBI gene retrieval, protein tagging/fusions, and negative/balanced cases.
 
 ## Verification Rubric
 
@@ -149,7 +151,7 @@ Severity weights: **Critical** = 2 pts, **Major** = 1 pt, **Minor** = 0.5 pts, *
 
 ## Current Results
 
-- **55 tests passing** (29 unit/integration + 26 pipeline), 1 skipped (pET-28a has no sequence)
+- **64 tests passing** (31 unit/integration + 33 pipeline), 1 skipped (pET-28a has no sequence)
 - **22/22** Tier 1+2 pipeline tests at 100%
 - **4/4** Tier 3 Addgene ground truth tests at 100%
 - Primary benchmark (pcDNA3.1(+) + EGFP): **30.0/30.0 pts** across 25 scored checks
@@ -162,12 +164,13 @@ Severity weights: **Critical** = 2 pts, **Major** = 1 pt, **Minor** = 0.5 pts, *
 | **Phase 2** | Multi-plasmid systems, lentiviral packaging vectors, CRISPR guide RNA design, codon optimization | Planned |
 | **Phase 3** | Advanced workflows: restriction enzyme cloning simulation, primer design, gateway cloning, Gibson assembly | Planned |
 
-## Next Steps / Sprint Goals
+## Completed Sprint Goals
 
 - **NCBI Gene Retrieval** — Users say "human TP53" and get the correct CDS sequence from NCBI RefSeq
 - **Protein Tagging / Fusions** — N-terminal/C-terminal tag fusions (e.g., FLAG-EGFP) with automatic start/stop codon management
-- **Natural Language Backbone Selection** — Enhanced clarification prompting for expression type, promoter, and organism
-- **Gene Name Disambiguation** — Handle ambiguous gene names (TRAF -> TRAF1-7), alternative names (SERPINE1 = PAI-1), species disambiguation
+- **Natural Language Backbone Selection** — Autonomous backbone selection based on expression context (organism, promoter, selection)
+- **Gene Name Disambiguation** — Ambiguous gene names (TRAF -> TRAF1-7), alternative names (SERPINE1 = PAI-1), species disambiguation
+- **Multi-turn Disambiguation Evals** — Simulated user for testing agent clarification workflows
 
 ## Sample Prompts
 
@@ -204,4 +207,4 @@ python -m src.server
 
 ## Backbone Library
 
-17 curated backbones including pcDNA3.1(+/-), pUC19, pEGFP-N1, pGEX-4T-1, pBABE-puro, pAAV-CMV, pLKO.1-puro, pCDNA3, and more. When a backbone isn't found locally, it is automatically fetched from Addgene — the GenBank file is parsed for sequence, feature annotations (promoters, resistance genes, origins, polyA signals, MCS), and cached in `backbones.json` for future fast lookups. Backbones with feature annotations get full biological sanity checks in the rubric.
+21 curated backbones including pcDNA3.1(+/-), pUC19, pEGFP-N1, pGEX-4T-1, pBABE-puro, pAAV-CMV, pLKO.1-puro, pCDNA3, and more. When a backbone isn't found locally, it is automatically fetched from Addgene — the GenBank file is parsed for sequence, feature annotations (promoters, resistance genes, origins, polyA signals, MCS), and cached in `backbones.json` for future fast lookups. Backbones with feature annotations get full biological sanity checks in the rubric.

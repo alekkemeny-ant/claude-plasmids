@@ -1555,9 +1555,12 @@ async function selectSession(sessionId) {
   try {
     const r = await fetch('/api/sessions/' + sessionId + '/messages');
     const msgs = await r.json();
+    // Guard: if user switched to another session while fetch was in flight, discard
+    if (currentSessionId !== sessionId) return;
     renderStoredMessages(msgs);
   } catch {
-    renderStoredMessages([]);
+    // Don't clear messages on fetch failure (e.g., during server reload)
+    // — leave the current display intact rather than showing empty state
   }
 }
 

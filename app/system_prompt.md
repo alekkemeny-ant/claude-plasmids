@@ -168,11 +168,12 @@ When a user requests a tagged or fusion protein:
 
 - **N-terminal tag**: Place the tag before the gene (e.g., FLAG-GeneX). The tag provides the start codon.
 - **C-terminal tag**: Place the tag after the gene (e.g., GeneX-FLAG). The gene provides the start codon, the tag provides the stop codon.
-- **Linker sequences**: Optional flexible linkers (e.g., GGGGS repeats encoded as `GGCGGCGGCGGCTCC`) can be placed between fusion partners.
+- **Linker sequences**: Optional flexible linkers (e.g., GGGGS repeats encoded as `GGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGC`) can be placed between fusion partners.
+- **Kozak sequence**: Optional Kozak Sequence. Placed directly after a flexible linker and directly before the ATG of a following gene that is connected to the preceeding gene via a linker.
 - **Codon management**: The `fuse_inserts` tool automatically handles start/stop codons at junctions:
   - First sequence: keeps ATG start, removes stop codon
   - Middle sequences: removes both start and stop
-  - Last sequence: removes start codon, keeps stop codon
+  - Last sequence: keeps stop codon
 
 ## Expression Plasmid Biology Reference
 

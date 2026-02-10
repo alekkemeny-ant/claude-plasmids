@@ -637,6 +637,29 @@ AGENT_CASES = [
         ),
         tags=["fusion", "mammalian", "epitope_tag", "c_terminal"],
     ),
+    AgentTestCase(
+        id="A7-003",
+        name="Fusion: H2B-EGFP (NCBI + fusion)",
+        prompt=(
+            "Create a mammalian expression plasmid for a fusion of H2B to eGFP, "
+            "where eGFP is on the C-terminal end of H2B."
+        ),
+        description=(
+            "Agent must retrieve H2B CDS from NCBI, then fuse H2B + EGFP using "
+            "fuse_inserts (H2B on N-terminal, EGFP on C-terminal), and assemble "
+            "into a mammalian backbone. First eval combining NCBI retrieval with "
+            "protein fusion. H2B is not in the local library."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="H2B",
+        expected_insertion_position=895,
+        tags=["fusion", "ncbi", "mammalian", "c_terminal"],
+        user_persona=(
+            "You want human H2B (HIST1H2BJ or any common H2B variant is fine). "
+            "When asked about species, say human. The backbone should be for "
+            "mammalian expression — pcDNA3.1(+) is fine."
+        ),
+    ),
     # ── A8: Negative / balanced cases (blog Step 3) ───────────────────
     # Per the blog: "Test both the cases where a behavior should occur and
     # where it shouldn't. One-sided evals create one-sided optimization."

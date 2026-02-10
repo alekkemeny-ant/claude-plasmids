@@ -224,6 +224,9 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = DEFAULT_FUSION
     Raises:
         ValueError: If fewer than 2 sequences provided or invalid DNA.
     """
+    if linker is None:
+        linker = DEFAULT_FUSION_LINKER
+
     if len(sequences) < 2:
         raise ValueError("At least 2 sequences are required for fusion")
 

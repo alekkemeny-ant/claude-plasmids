@@ -288,6 +288,17 @@ class TestFuseSequences:
         expected = "ATGAAA" + DEFAULT_FUSION_LINKER + KOZAK + "ATGCCCTGA"
         assert result == expected
 
+    def test_none_linker_uses_default(self):
+        """Passing linker=None explicitly should use the default linker (not direct concat)."""
+        seq1 = "ATGAAATAA"
+        seq2 = "ATGCCCTGA"
+        result = fuse_sequences([
+            {"sequence": seq1},
+            {"sequence": seq2},
+        ], linker=None)
+        expected = "ATGAAA" + DEFAULT_FUSION_LINKER + KOZAK + "ATGCCCTGA"
+        assert result == expected
+
     def test_kozak_between_linker_and_second_gene(self):
         """GCCACC appears right after the linker and before the second gene."""
         seq1 = "ATGAAATAA"

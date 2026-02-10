@@ -85,11 +85,25 @@ The tool auto-resolves sequences from the library and uses the MCS start as the 
 
 **IMPORTANT — always prefer `insert_id` over `insert_sequence`**: When the insert is from the library, use `insert_id` to let the tool resolve the exact sequence. Do NOT manually copy/paste or reconstruct insert sequences — this is error-prone for long sequences. Only use `insert_sequence` when working with fused sequences or custom user-provided sequences.
 
-**With a fused insert (e.g., FLAG-EGFP):**
+**With a tag fusion (e.g., FLAG-EGFP) — use `linker=""`:**
 ```
-# First fuse the sequences
+# Tag fusions: pass linker="" for direct concatenation (no linker, no Kozak)
 fuse_inserts(inserts=[
   {"insert_id": "FLAG_tag"},
+  {"insert_id": "EGFP"}
+], linker="")
+# Then assemble with the EXACT fused sequence from the tool output
+assemble_construct(
+  backbone_id="pcDNA3.1(+)",
+  insert_sequence="<copy the EXACT fused_sequence from fuse_inserts output>"
+)
+```
+
+**With a protein-protein fusion (e.g., H2B-EGFP) — use default linker:**
+```
+# Protein fusions: omit linker to use default (GGGGS)x4 + Kozak
+fuse_inserts(inserts=[
+  {"insert_id": "H2B"},
   {"insert_id": "EGFP"}
 ])
 # Then assemble with the EXACT fused sequence from the tool output
@@ -164,16 +178,29 @@ Present the user with:
 
 ## Protein Tagging & Fusions
 
-When a user requests a tagged or fusion protein:
+When a user requests a tagged or fusion protein, first determine whether it is a **tag fusion** or a **protein-protein fusion**:
+
+### Tag fusions (epitope tag + protein) → `linker=""`
+Use `linker=""` when fusing a short epitope tag (FLAG, HA, His6, Myc, V5) to a protein. Tags are small peptides designed to be directly adjacent to the protein.
 
 - **N-terminal tag**: Place the tag before the gene (e.g., FLAG-GeneX). The tag provides the start codon.
 - **C-terminal tag**: Place the tag after the gene (e.g., GeneX-FLAG). The gene provides the start codon, the tag provides the stop codon.
-- **Linker sequences**: Optional flexible linkers (e.g., GGGGS repeats encoded as `GGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGC`) can be placed between fusion partners.
-- **Kozak sequence**: Optional Kozak Sequence. Placed directly after a flexible linker and directly before the ATG of a following gene that is connected to the preceeding gene via a linker.
-- **Codon management**: The `fuse_inserts` tool automatically handles start/stop codons at junctions:
-  - First sequence: keeps ATG start, removes stop codon
-  - Middle sequences: removes both start and stop
-  - Last sequence: keeps stop codon
+
+Example: `fuse_inserts(inserts=[{"insert_id": "FLAG_tag"}, {"insert_id": "EGFP"}], linker="")`
+
+### Protein-protein fusions (two proteins) → default linker
+When fusing two proteins (e.g., H2B-EGFP, GeneX-mCherry), omit the `linker` parameter to use the default `(GGGGS)x4` flexible linker. This linker prevents steric interference between the two folded protein domains.
+
+- The default linker is `GGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGC` (60 bp)
+- A Kozak sequence (`GCCACC`) is automatically appended after the linker, before the next gene's ATG
+
+Example: `fuse_inserts(inserts=[{"insert_id": "H2B"}, {"insert_id": "EGFP"}])`
+
+### Codon management (both cases)
+The `fuse_inserts` tool automatically handles codons at junctions:
+  - Non-last sequences: stop codon removed
+  - Last sequence: kept intact (ATG and stop codon preserved)
+  - ATG is never removed from any sequence
 
 ## Expression Plasmid Biology Reference
 

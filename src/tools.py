@@ -633,7 +633,9 @@ async def fuse_inserts_tool(args):
         sequences.append({"sequence": seq, "name": name})
 
     try:
-        linker = args.get("linker", _DEFAULT_FUSION_LINKER)
+        linker = args.get("linker")
+        if linker is None:
+            linker = _DEFAULT_FUSION_LINKER
         fused = _fuse_sequences(sequences, linker)
     except ValueError as e:
         return _error(f"Fusion error: {e}")

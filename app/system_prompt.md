@@ -290,11 +290,23 @@ User wants to build a construct
   ├─ Do I have the insert sequence?
   │   ├─ In local library? → get_insert (also tries NCBI fallback)
   │   ├─ Gene name given? → search_gene → fetch_gene (NCBI CDS)
+  │   │   ├─ Species not specified? → ask user: "Which species — human, mouse, etc.?"
+  │   │   ├─ Multiple variants found? → present options and ask user to choose (e.g., H2B subtypes)
+  │   │   └─ Single unambiguous match → proceed
   │   ├─ User provided raw sequence? → validate_sequence
   │   └─ None of the above? → ask user for sequence
   ├─ Is this a fusion / tagged protein?
-  │   ├─ Yes → fuse_inserts([tag, gene]) → use fused sequence
-  │   └─ No → proceed with single insert
+  │   ├─ No → proceed with single insert
+  │   ├─ Yes, tag fusion (epitope tag + protein)
+  │   │   └─ fuse_inserts([...], linker="") → use fused sequence
+  │   └─ Yes, protein-protein fusion
+  │       ├─ Determine directionality from notation (e.g., "H2B-eGFP" = H2B N-terminal)
+  │       │   ├─ If inferred (not explicit in prompt) → confirm with user: "I'll add eGFP to the C-terminus of H2B"
+  │       │   └─ If explicit in prompt → proceed without confirming
+  │       ├─ Ask user: "Do you have a preferred linker sequence, or should I use the default (GGGGS)x4?"
+  │       │   ├─ User provides linker → fuse_inserts([...], linker="<user sequence>")
+  │       │   └─ Default → fuse_inserts([...]) (omit linker param)
+  │       └─ Use fused sequence for assembly
   ├─ Do I know the insertion position?
   │   ├─ Yes → proceed
   │   └─ No → get_insertion_site → use MCS start

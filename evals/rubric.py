@@ -796,6 +796,33 @@ def score_construct(
                 ),
             ))
 
+        # Check 3: Kozak (GCCACC) present upstream of second protein ATG in fusion (Major)
+        if has_protein_protein_junction:
+            # Look for GCCACCATG in the insert — this is the Kozak + ATG
+            # that fuse_sequences places between the linker and the second gene
+            kozak_atg = "GCCACCATG"
+            kozak_found = kozak_atg in insert_seq
+            if kozak_found:
+                kozak_pos = insert_seq.index(kozak_atg)
+                kozak_detail = f"GCCACC+ATG found at position {kozak_pos} in fused insert"
+            else:
+                kozak_detail = "GCCACCATG not found in fused insert — Kozak missing upstream of second protein"
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="Kozak sequence at fusion junction",
+                severity="Critical",
+                passed=kozak_found,
+                detail=kozak_detail,
+            ))
+        else:
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="Kozak sequence at fusion junction",
+                severity="Info",
+                passed=True,
+                detail="Skipped — tag-protein junction, no internal Kozak expected",
+            ))
+
     # ── Section 5: Output Verification ──────────────────────────────
 
     if output_text and output_format:

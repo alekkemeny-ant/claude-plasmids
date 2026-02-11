@@ -652,6 +652,58 @@ AGENT_CASES = [
     ),
     AgentTestCase(
         id="A7-004",
+        name="Fusion: H2B-EGFP with user-specified custom linker",
+        prompt=(
+            "Create a mammalian expression plasmid for H2B-eGFP. "
+            "I want to use GATCCACCGGTC as the linker sequence between H2B and eGFP. "
+            "Assemble the construct and return the sequence."
+        ),
+        description=(
+            "Agent must retrieve H2B CDS from NCBI, use the user-provided custom linker "
+            "(GATCCACCGGTC, 12 bp) instead of the default (GGGGS)x4, then fuse H2B + linker + EGFP "
+            "using fuse_inserts and assemble into a mammalian backbone. Tests that the agent "
+            "respects a non-default linker and that Kozak (GCCACC) is still appended after it."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="H2B",
+        expected_insertion_position=895,
+        expected_insert_sequence=(
+            "ATGCCAGAGCCAGCGAAGTCTGCTCCCGCCCCGAAAAAGGGCTCCAAGAAGGCGGTGACTAAGG"
+            "CGCAGAAGAAAGGCGGCAAGAAGCGCAAGCGCAGCCGCAAGGAGAGCTATTCCATCTATGTGTA"
+            "CAAGGTTCTGAAGCAGGTCCACCCTGACACCGGCATTTCGTCCAAGGCCATGGGCATCATGAAT"
+            "TCGTTTGTGAACGACATTTTCGAGCGCATCGCAGGTGAGGCTTCCCGCCTGGCGCATTACAACA"
+            "AGCGCTCGACCATCACCTCCAGGGAGATCCAGACGGCCGTGCGCCTGCTGCTGCCTGGGGAGTT"
+            "GGCCAAGCACGCCGTGTCCGAGGGTACTAAGGCCATCACCAAGTACACCAGCGCTAAG"
+            "GATCCACCGGTCGCCACC"
+            "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGC"
+            "GAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACC"
+            "CTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAG"
+            "CGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGC"
+            "ATCGACTTCAAGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAACG"
+            "GCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCATCGGCGACGGCCC"
+            "CGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTG"
+            "ACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA"
+        ),
+        fusion_parts=[
+            {"name": "H2B", "sequence": "atgccagagccagcgaagtctgctcccgccccgaaaaagggctccaagaaggcggtgactaagg"
+            "cgcagaagaaaggcggcaagaagcgcaagcgcagccgcaaggagagctattccatctatgtgta"
+            "caaggttctgaagcaggtccaccctgacaccggcatttcgtccaaggccatgggcatcatgaat"
+            "tcgtttgtgaacgacattttcgagcgcatcgcaggtgaggcttcccgcctggcgcattacaaca"
+            "agcgctcgaccatcacctccagggagatccagacggccgtgcgcctgctgctgcctggggagtt"
+            "ggccaagcacgccgtgtccgagggtactaaggccatcaccaagtacaccagcgctaag", "type": "protein"},
+            {"name": "custom_linker", "sequence": "GATCCACCGGTC", "type": "linker"},
+            {"name": "EGFP", "sequence": "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCAAGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCATCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA", "type": "protein"},
+        ],
+        tags=["fusion", "ncbi", "mammalian", "c_terminal", "custom_linker"],
+        expected_total_size=6544,
+        user_persona=(
+            "You want human H2B (H2B1B). There are many Histone H2B variants — make sure to get this one. "
+            "When asked about species, say human. The backbone should be for "
+            "mammalian expression — pcDNA3.1(+) is fine."
+        ),
+    ),
+    AgentTestCase(
+        id="A7-005",
         name="Fusion: H2B-EGFP (NCBI + fusion), relaxed natural language",
         prompt=(
             "Create a mammalian expression plasmid for H2B-eGFP, "

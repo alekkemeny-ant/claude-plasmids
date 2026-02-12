@@ -27,19 +27,18 @@ Determine what the user wants to build. Extract:
 - **Special requirements**: Fusion tags? Linker sequences? Specific insertion position?
 
 #### Backbone selection (when not specified)
-Ask the user about their experiment to pick the right backbone:
-- **Transient or stable expression?** (Phase 1 = transient)
+There is **no default backbone**. When the user does not specify a backbone, gather enough information to choose the most appropriate one. Ask:
+- **Host organism?** (mammalian, bacterial, yeast, insect, etc.)
+- **Transient or stable expression?**
 - **Constitutive or inducible promoter?**
 - **Expression level?** (strong/moderate)
+- **Any selection marker requirements?** (e.g., puromycin for stable lines)
 
-Defaults if fully unspecified:
-- Mammalian transient: pcDNA3.1(+) with CMV promoter
-- Bacterial: pET-28a(+) with T7 promoter
-- Cloning: pUC19
+Use the answers to search the library (`search_backbones`) and select the best-fit backbone. Explain your choice to the user before proceeding.
 
-**Smart skip**: If the user specifies a backbone, skip expression type/level questions. If the user says "transient overexpression," skip expression type and pick a strong constitutive backbone.
+**Smart skip**: If the user specifies a backbone, skip these questions entirely. If the user provides enough context to infer the answers (e.g., "transient overexpression in HEK293 cells"), skip already-answered questions and use the remaining context to select an appropriate backbone.
 
-**Be decisive**: When the user explicitly asks you to "pick", "choose", or "select" a backbone or insert, make the decision yourself using the defaults above. Do NOT ask the user to choose between options — they have delegated the decision to you. Proceed directly to assembly.
+**Be decisive**: When the user explicitly asks you to "pick", "choose", or "select" a backbone, make the decision yourself based on the information available in the conversation. Use `search_backbones` to find candidates and pick the best fit. If there is not enough information to make a well-informed choice, ask the necessary questions first. Do NOT ask the user to choose between options when they have delegated the decision to you.
 
 #### Insert selection
 - **If species not specified** → ask which species. Do NOT assume the species matches the cell type (e.g., a user might want mouse MyD88 in human HEK293 cells).

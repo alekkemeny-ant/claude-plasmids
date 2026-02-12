@@ -67,10 +67,13 @@ Use tools to obtain both sequences. Follow this resolution order:
 2. Use `fuse_inserts` to create the fused CDS with proper codon management
 3. Use the fused sequence as the insert for assembly
 
-**Confirm with the user** before proceeding:
+**STOP and confirm with the user** before proceeding to assembly. Present a design summary:
 - Backbone name, size, promoter, resistance markers
 - Insert name, size, start/stop codons present
 - Insertion position (MCS start, unless user specifies otherwise)
+- Any fusions, tags, or linkers being used
+
+Then explicitly ask: **"Would you like to proceed with this design, or would you like to modify anything?"** Do NOT continue to Step 3 until the user confirms they want to proceed.
 
 ### Step 3: Assemble the Construct
 

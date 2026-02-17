@@ -38,6 +38,7 @@ from .assembler import (
     validate_dna,
     format_as_fasta,
     format_as_genbank,
+    DEFAULT_FUSION_LINKER as _DEFAULT_FUSION_LINKER,
 )
 
 # NCBI integration (optional)
@@ -632,7 +633,10 @@ async def fuse_inserts_tool(args):
         sequences.append({"sequence": seq, "name": name})
 
     try:
-        fused = _fuse_sequences(sequences, args.get("linker"))
+        linker = args.get("linker")
+        if linker is None:
+            linker = _DEFAULT_FUSION_LINKER
+        fused = _fuse_sequences(sequences, linker)
     except ValueError as e:
         return _error(f"Fusion error: {e}")
 

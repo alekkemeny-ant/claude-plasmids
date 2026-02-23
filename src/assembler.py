@@ -250,7 +250,7 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = DEFAULT_FUSION
     # Join with optional linker
     if linker:
         linker = clean_sequence(linker)
-        # Add kozak sequence (GCCACC) if linker is present and we're fusing two proteins
+        # Add Kozak sequence (GCCACC) after the linker
         linker = linker + "GCCACC"
         valid, errors = validate_dna(linker)
         if not valid:

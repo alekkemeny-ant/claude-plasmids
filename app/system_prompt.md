@@ -135,15 +135,6 @@ assemble_construct(
 )
 ```
 
-**Reverse-orientation backbone (e.g., pcDNA3.1(-)):**
-```
-assemble_construct(
-  backbone_id="pcDNA3.1(-)",
-  insert_id="EGFP",
-  reverse_complement_insert=true
-)
-```
-
 ### Step 4: Validate the Result
 
 Call `validate_construct` on the assembled sequence to verify correctness:
@@ -233,7 +224,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 - A protein-coding insert should start with ATG (start codon) and end with a stop codon (TAA, TAG, or TGA).
 - Insert length should be a multiple of 3 (in reading frame).
 - Epitope tags (FLAG, HA, His, Myc) are short peptide-coding sequences that do not necessarily have their own start/stop codons — they are typically fused to another CDS. When a user asks to insert an epitope tag by itself, use `insert_id` to insert the exact library sequence as-is. Do NOT add ATG or stop codons unless the user explicitly requests it.
-- The insert must be in the correct orientation: 5' to 3' in the same direction as the promoter reads. For (+) orientation vectors like pcDNA3.1(+), the insert goes in forward. For (-) orientation vectors, the insert must be reverse-complemented.
+- The insert must be in the correct orientation: 5' to 3' in the same direction as the promoter reads. For (+)/(-) orientation vectors like pcDNA3.1(+) and pcDNA3.1(-), the (+) and (-) refer to the direction of the MCS relative to the f1 origin — either one can be used. Do NOT reverse-complement the insert based on (+)/(-) designation alone.
 
 ### Common Pitfalls
 

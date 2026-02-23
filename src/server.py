@@ -40,6 +40,7 @@ from .assembler import (
     find_mcs_insertion_point,
     export_construct as _export_construct,
     clean_sequence,
+    DEFAULT_FUSION_LINKER,
 )
 
 # NCBI integration (optional)
@@ -1030,7 +1031,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     return [TextContent(type="text", text=f"No sequence available for '{seq_name or 'unknown'}'.")]
                 sequences.append({"sequence": seq, "name": seq_name})
 
-            fused = _fuse_sequences(sequences, arguments.get("linker"))
+            linker = arguments.get("linker")
+            if linker is None:
+                linker = DEFAULT_FUSION_LINKER
+            fused = _fuse_sequences(sequences, linker)
             names = [s["name"] for s in sequences]
             output = f"## Fused CDS: {'-'.join(names)}\n\n"
             output += f"**Length:** {len(fused)} bp\n"

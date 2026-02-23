@@ -27,19 +27,18 @@ Determine what the user wants to build. Extract:
 - **Special requirements**: Fusion tags? Linker sequences? Specific insertion position?
 
 #### Backbone selection (when not specified)
-Ask the user about their experiment to pick the right backbone:
-- **Transient or stable expression?** (Phase 1 = transient)
+There is **no default backbone**. When the user does not specify a backbone, gather enough information to choose the most appropriate one. Ask:
+- **Host organism?** (mammalian, bacterial, yeast, insect, etc.)
+- **Transient or stable expression?**
 - **Constitutive or inducible promoter?**
 - **Expression level?** (strong/moderate)
+- **Any selection marker requirements?** (e.g., puromycin for stable lines)
 
-Defaults if fully unspecified:
-- Mammalian transient: pcDNA3.1(+) with CMV promoter
-- Bacterial: pET-28a(+) with T7 promoter
-- Cloning: pUC19
+Use the answers to search the library (`search_backbones`) and select the best-fit backbone. Explain your choice to the user before proceeding.
 
-**Smart skip**: If the user specifies a backbone, skip expression type/level questions. If the user says "transient overexpression," skip expression type and pick a strong constitutive backbone.
+**Smart skip**: If the user specifies a backbone, skip these questions entirely. If the user provides enough context to infer the answers (e.g., "transient overexpression in HEK293 cells"), skip already-answered questions and use the remaining context to select an appropriate backbone.
 
-**Be decisive**: When the user explicitly asks you to "pick", "choose", or "select" a backbone or insert, make the decision yourself using the defaults above. Do NOT ask the user to choose between options — they have delegated the decision to you. Proceed directly to assembly.
+**Be decisive**: When the user explicitly asks you to "pick", "choose", or "select" a backbone, make the decision yourself based on the information available in the conversation. Use `search_backbones` to find candidates and pick the best fit. If there is not enough information to make a well-informed choice, ask the necessary questions first. Do NOT ask the user to choose between options when they have delegated the decision to you.
 
 #### Insert selection
 - **If species not specified** → ask which species. Do NOT assume the species matches the cell type (e.g., a user might want mouse MyD88 in human HEK293 cells).
@@ -68,10 +67,13 @@ Use tools to obtain both sequences. Follow this resolution order:
 2. Use `fuse_inserts` to create the fused CDS with proper codon management
 3. Use the fused sequence as the insert for assembly
 
-**Confirm with the user** before proceeding:
+**STOP and confirm with the user** before proceeding to assembly. Present a design summary:
 - Backbone name, size, promoter, resistance markers
 - Insert name, size, start/stop codons present
 - Insertion position (MCS start, unless user specifies otherwise)
+- Any fusions, tags, or linkers being used
+
+Then explicitly ask: **"Would you like to proceed with this design, or would you like to modify anything?"** Do NOT continue to Step 3 until the user confirms they want to proceed.
 
 ### Step 3: Assemble the Construct
 
@@ -85,11 +87,25 @@ The tool auto-resolves sequences from the library and uses the MCS start as the 
 
 **IMPORTANT — always prefer `insert_id` over `insert_sequence`**: When the insert is from the library, use `insert_id` to let the tool resolve the exact sequence. Do NOT manually copy/paste or reconstruct insert sequences — this is error-prone for long sequences. Only use `insert_sequence` when working with fused sequences or custom user-provided sequences.
 
-**With a fused insert (e.g., FLAG-EGFP):**
+**With a tag fusion (e.g., FLAG-EGFP) — use `linker=""`:**
 ```
-# First fuse the sequences
+# Tag fusions: pass linker="" for direct concatenation (no linker, no Kozak)
 fuse_inserts(inserts=[
   {"insert_id": "FLAG_tag"},
+  {"insert_id": "EGFP"}
+], linker="")
+# Then assemble with the EXACT fused sequence from the tool output
+assemble_construct(
+  backbone_id="pcDNA3.1(+)",
+  insert_sequence="<copy the EXACT fused_sequence from fuse_inserts output>"
+)
+```
+
+**With a protein-protein fusion (e.g., H2B-EGFP) — use default linker:**
+```
+# Protein fusions: omit linker to use default (GGGGS)x4 + Kozak
+fuse_inserts(inserts=[
+  {"insert_id": "H2B"},
   {"insert_id": "EGFP"}
 ])
 # Then assemble with the EXACT fused sequence from the tool output
@@ -155,15 +171,31 @@ Present the user with:
 
 ## Protein Tagging & Fusions
 
-When a user requests a tagged or fusion protein:
+When a user requests a tagged or fusion protein, first determine whether it is a **tag fusion** or a **protein-protein fusion**:
+
+### Tag fusions (epitope tag + protein) → `linker=""`
+Use `linker=""` when fusing a short epitope tag (FLAG, HA, His6, Myc, V5) to a protein. Tags are small peptides designed to be directly adjacent to the protein.
 
 - **N-terminal tag**: Place the tag before the gene (e.g., FLAG-GeneX). The tag provides the start codon.
 - **C-terminal tag**: Place the tag after the gene (e.g., GeneX-FLAG). The gene provides the start codon, the tag provides the stop codon.
-- **Linker sequences**: Optional flexible linkers (e.g., GGGGS repeats encoded as `GGCGGCGGCGGCTCC`) can be placed between fusion partners.
-- **Codon management**: The `fuse_inserts` tool automatically handles start/stop codons at junctions:
-  - First sequence: keeps ATG start, removes stop codon
-  - Middle sequences: removes both start and stop
-  - Last sequence: removes start codon, keeps stop codon
+
+Example: `fuse_inserts(inserts=[{"insert_id": "FLAG_tag"}, {"insert_id": "EGFP"}], linker="")`
+
+### Protein-protein fusions (two proteins) → default linker
+When fusing two proteins (e.g., H2B-EGFP, GeneX-mCherry), omit the `linker` parameter to use the default `(GGGGS)x4` flexible linker. This linker prevents steric interference between the two folded protein domains.
+
+- **Fusion notation**: N-to-C order — "H2B-eGFP" means H2B is N-terminal, eGFP is C-terminal.
+
+- The default linker is `GGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGC` (60 bp)
+- A Kozak sequence (`GCCACC`) is automatically appended after the linker, before the next gene's ATG
+
+Example: `fuse_inserts(inserts=[{"insert_id": "H2B"}, {"insert_id": "EGFP"}])`
+
+### Codon management (both cases)
+The `fuse_inserts` tool automatically handles codons at junctions:
+  - Non-last sequences: stop codon removed
+  - Last sequence: kept intact (ATG and stop codon preserved)
+  - ATG is never removed from any sequence
 
 ## Expression Plasmid Biology Reference
 
@@ -202,6 +234,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 - **Hallucinated sequence**: The backbone or insert sequence was generated by an LLM instead of retrieved from a verified source. This produces non-functional constructs. Always use the tools.
 - **Wrong backbone retrieved**: When a user says "pcDNA3" they might mean pcDNA3.0, pcDNA3.1(+), or pcDNA3.1(-). Clarify if ambiguous.
 - **Wrong species**: A user expressing a gene in HEK293 (human) cells might want the mouse or rat ortholog. Always confirm the species.
+- **Wrong gene variant**: Many genes have multiple variants or family members (e.g., H2B has >20 subtypes with distinct expression patterns). Confirm the specific variant with the user when their request is ambiguous.
 
 ## Tool Reference
 
@@ -250,11 +283,23 @@ User wants to build a construct
   ├─ Do I have the insert sequence?
   │   ├─ In local library? → get_insert (also tries NCBI fallback)
   │   ├─ Gene name given? → search_gene → fetch_gene (NCBI CDS)
+  │   │   ├─ Species not specified? → ask user: "Which species — human, mouse, etc.?"
+  │   │   ├─ Multiple variants found? → present options and ask user to choose (e.g., H2B subtypes)
+  │   │   └─ Single unambiguous match → proceed
   │   ├─ User provided raw sequence? → validate_sequence
   │   └─ None of the above? → ask user for sequence
   ├─ Is this a fusion / tagged protein?
-  │   ├─ Yes → fuse_inserts([tag, gene]) → use fused sequence
-  │   └─ No → proceed with single insert
+  │   ├─ No → proceed with single insert
+  │   ├─ Yes, tag fusion (epitope tag + protein)
+  │   │   └─ fuse_inserts([...], linker="") → use fused sequence
+  │   └─ Yes, protein-protein fusion
+  │       ├─ Determine directionality from notation (e.g., "H2B-eGFP" = H2B N-terminal)
+  │       │   ├─ If inferred (not explicit in prompt) → confirm with user: "I'll add eGFP to the C-terminus of H2B"
+  │       │   └─ If explicit in prompt → proceed without confirming
+  │       ├─ Ask user: "Do you have a preferred linker sequence, or should I use the default (GGGGS)x4?"
+  │       │   ├─ User provides linker → fuse_inserts([...], linker="<user sequence>")
+  │       │   └─ Default → fuse_inserts([...]) (omit linker param)
+  │       └─ Use fused sequence for assembly
   ├─ Do I know the insertion position?
   │   ├─ Yes → proceed
   │   └─ No → get_insertion_site → use MCS start

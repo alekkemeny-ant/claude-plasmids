@@ -200,6 +200,7 @@ def score_construct(
     output_text: Optional[str] = None,
     output_format: Optional[str] = None,
     expect_reverse_complement: bool = False,
+    fusion_parts: Optional[list[dict]] = None,
 ) -> RubricResult:
     """
     Score an assembled construct against the Allen Institute rubric.
@@ -228,6 +229,10 @@ def score_construct(
         expect_reverse_complement: If True, expect the insert in reverse
                                    complement orientation. Orientation and
                                    position checks use the RC insert.
+        fusion_parts: Optional list of fusion part dicts, ordered N-terminal
+                      to C-terminal. Each dict has keys: name (str),
+                      sequence (str), type ("protein" or "tag"). Used for
+                      fusion linker checks.
 
     Returns:
         RubricResult with all checks populated.
@@ -687,6 +692,136 @@ def score_construct(
             passed=True,
             detail=kozak_detail,
         ))
+
+    # 4g. Fusion linker checks (only when fusion_parts provided)
+    if fusion_parts and len(fusion_parts) >= 2:
+        part_seqs = [clean_sequence(p["sequence"]) for p in fusion_parts]
+        part_types = [p["type"] for p in fusion_parts]
+
+        # Identify protein-protein junctions (these need linkers).
+        # Linker-type parts are transparent: [protein, linker, protein] counts
+        # as a protein-protein junction (with a linker already provided).
+        non_linker_types = [t for t in part_types if t != "linker"]
+        has_protein_protein_junction = False
+        has_explicit_linker = "linker" in part_types
+        for i in range(len(non_linker_types) - 1):
+            if non_linker_types[i] == "protein" and non_linker_types[i + 1] == "protein":
+                has_protein_protein_junction = True
+                break
+
+        # Compute expected fusion length: sum of all part sequences after
+        # codon management (remove stop from non-terminal proteins). Linker parts included at full length.
+        # Also accounts for stop codon added by fuse_inserts when missing.
+        # Start codons are NOT managed here — parts are taken as-is.
+        expected_fusion_len = 0
+        for i, seq in enumerate(part_seqs):
+            if part_types[i] == "linker":
+                # Linkers included at full length, no codon management
+                expected_fusion_len += len(seq)
+                continue
+            seq_len = len(seq)
+            # Remove stop codon from non-terminal parts
+            if i < len(part_seqs) - 1:
+                if seq[-3:] in ("TAA", "TAG", "TGA"):
+                    seq_len -= 3
+            expected_fusion_len += seq_len
+        # If the last part lacks a stop codon, fuse_inserts adds one (3 bp)
+        if part_seqs[-1][-3:] not in ("TAA", "TAG", "TGA"):
+            expected_fusion_len += 3
+
+        # Add expected length of the Kozak sequence (GCCACC, 6 bp) when an
+        # explicit linker separates two proteins. The Kozak is placed between
+        # the linker and the following protein to ensure translation initiation.
+        if has_explicit_linker and has_protein_protein_junction:
+            expected_fusion_len += 6
+
+        # Compute proteins-only length (excluding linker parts)
+        linker_total_len = sum(
+            len(seq) for seq, t in zip(part_seqs, part_types) if t == "linker"
+        )
+        proteins_only_len = expected_fusion_len - linker_total_len
+
+        # Check 1: Fusion linker present between proteins (Critical, 2 pts)
+        if has_protein_protein_junction:
+            # Verify insert is longer than proteins-only (linker adds length)
+            linker_present = len(insert_seq) > proteins_only_len
+            linker_len = len(insert_seq) - proteins_only_len
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="Fusion linker present between proteins",
+                severity="Critical",
+                passed=linker_present,
+                detail=(
+                    f"Linker adds {linker_len} bp (insert {len(insert_seq)} bp vs proteins-only {proteins_only_len} bp)"
+                    if linker_present
+                    else f"No linker detected: insert {len(insert_seq)} bp == proteins-only {proteins_only_len} bp"
+                ),
+            ))
+        else:
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="Fusion linker present between proteins",
+                severity="Info",
+                passed=True,
+                detail="Skipped — tag-protein junction, no linker expected",
+            ))
+
+        # Check 2: Fusion insert size accounts for all parts (Major, 1 pt)
+        if has_protein_protein_junction:
+            # Insert should match expected fusion length (proteins + linker + codon mgmt)
+            size_ok = len(insert_seq) == expected_fusion_len
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="Fusion insert size accounts for all parts",
+                severity="Major",
+                passed=size_ok,
+                detail=(
+                    f"Insert {len(insert_seq)} bp matches expected {expected_fusion_len} bp"
+                    if size_ok
+                    else f"Insert {len(insert_seq)} bp != expected {expected_fusion_len} bp (delta: {len(insert_seq) - expected_fusion_len:+d} bp)"
+                ),
+            ))
+        else:
+            # For tag-protein: insert should equal expected (no linker)
+            size_ok = len(insert_seq) == expected_fusion_len
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="Fusion insert size accounts for all parts",
+                severity="Major",
+                passed=size_ok,
+                detail=(
+                    f"Insert {len(insert_seq)} bp matches expected {expected_fusion_len} bp (no linker, correct for tag)"
+                    if size_ok
+                    else f"Insert {len(insert_seq)} bp != expected {expected_fusion_len} bp (unexpected for tag fusion)"
+                ),
+            ))
+
+        # Check 3: Kozak (GCCACC) present upstream of second protein ATG in fusion (Major)
+        if has_protein_protein_junction:
+            # Look for GCCACCATG in the insert — this is the Kozak + ATG
+            # that fuse_sequences places between the linker and the second gene
+            kozak_atg = "GCCACCATG"
+            kozak_found = kozak_atg in insert_seq
+            if kozak_found:
+                kozak_pos = insert_seq.index(kozak_atg)
+                kozak_detail = f"GCCACC+ATG found at position {kozak_pos} in fused insert"
+            else:
+                kozak_detail = "GCCACCATG not found in fused insert — Kozak missing upstream of second protein"
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="Kozak sequence at fusion junction",
+                severity="Critical",
+                passed=kozak_found,
+                detail=kozak_detail,
+            ))
+        else:
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="Kozak sequence at fusion junction",
+                severity="Info",
+                passed=True,
+                detail="Skipped — tag-protein junction, no internal Kozak expected",
+            ))
 
     # ── Section 5: Output Verification ──────────────────────────────
 

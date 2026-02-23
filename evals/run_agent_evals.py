@@ -100,6 +100,11 @@ class AgentTestCase:
     # insertion_position, total_size. If the primary backbone fails scoring,
     # each alternative is tried and the best result is used.
     alternative_expected: list[dict] = field(default_factory=list)
+    # Fusion parts for linker checks: list of dicts ordered N-terminal to
+    # C-terminal. Each dict: {"name": str, "sequence": str, "type": "protein" | "tag"}.
+    # When provided, rubric runs fusion linker checks (tag junctions skip linker
+    # requirement, protein-protein junctions require a linker).
+    fusion_parts: list[dict] = field(default_factory=list)
 
 
 AGENT_CASES = [
@@ -601,6 +606,10 @@ AGENT_CASES = [
             "TTCGTGACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA"
         ),
         tags=["fusion", "mammalian", "epitope_tag", "n_terminal"],
+        fusion_parts=[
+            {"name": "FLAG_tag", "sequence": "GACTACAAGGACGACGATGACAAG", "type": "tag"},
+            {"name": "EGFP", "sequence": "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCAAGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCATCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA", "type": "protein"},
+        ],
     ),
     AgentTestCase(
         id="A7-002",
@@ -634,6 +643,136 @@ AGENT_CASES = [
             "GACGAGCTGTACAAGTACCCATACGATGTTCCAGATTACGCTTAA"
         ),
         tags=["fusion", "mammalian", "epitope_tag", "c_terminal"],
+        fusion_parts=[
+            {"name": "mCherry", "sequence": "ATGGTGAGCAAGGGCGAGGAGGATAACATGGCCATCATCAAGGAGTTCATGCGCTTCAAGGTGCACATGGAGGGCTCCGTGAACGGCCACGAGTTCGAGATCGAGGGCGAGGGCGAGGGCCGCCCCTACGAGGGCACCCAGACCGCCAAGCTGAAGGTGACCAAGGGTGGCCCCCTGCCCTTCGCCTGGGACATCCTGTCCCCTCAGTTCATGTACGGCTCCAAGGCCTACGTGAAGCACCCCGCCGACATCCCCGACTACTTGAAGCTGTCCTTCCCCGAGGGCTTCAAGTGGGAGCGCGTGATGAACTTCGAGGACGGCGGCGTGGTGACCGTGACCCAGGACTCCTCCCTGCAGGACGGCGAGTTCATCTACAAGGTGAAGCTGCGCGGCACCAACTTCCCCTCCGACGGCCCCGTAATGCAGAAGAAGACCATGGGCTGGGAGGCCTCCTCCGAGCGGATGTACCCCGAGGACGGCGCCCTGAAGGGCGAGATCAAGCAGAGGCTGAAGCTGAAGGACGGCGGCCACTACGACGCTGAGGTCAAGACCACCTACAAGGCCAAGAAGCCCGTGCAGCTGCCCGGCGCCTACAACGTCAACATCAAGTTGGACATCACCTCCCACAACGAGGACTACACCATCGTGGAACAGTACGAACGCGCCGAGGGCCGCCACTCCACCGGCGGCATGGACGAGCTGTACAAGTAA", "type": "protein"},
+            {"name": "HA_tag", "sequence": "TACCCATACGATGTTCCAGATTACGCT", "type": "tag"},
+        ],
+    ),
+    AgentTestCase(
+        id="A7-003",
+        name="Fusion: H2B-EGFP (NCBI + fusion)",
+        prompt=(
+            "Create a mammalian expression plasmid for a fusion of H2B to eGFP, "
+            "where eGFP is on the C-terminal end of H2B. Assemble the construct and return the sequence."
+        ),
+        description=(
+            "Agent must retrieve H2B CDS from NCBI, and an appropriate linker sequence, then fuse H2B + linker + EGFP using "
+            "fuse_inserts (H2B on N-terminal, EGFP on C-terminal), and assemble "
+            "into a mammalian backbone. First eval combining NCBI retrieval with "
+            "protein fusion. H2B is not in the local library."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="H2B",
+        expected_insertion_position=895,
+        expected_insert_sequence=(
+            "atgccagagccagcgaagtctgctcccgccccgaaaaagggctccaagaaggcggtgactaaggcgcagaagaaaggcggcaagaagcgcaagcgcagccgcaaggagagctattccatctatgtgtacaaggttctgaagcaggtccaccctgacaccggcatttcgtccaaggccatgggcatcatgaattcgtttgtgaacgacattttcgagcgcatcgcaggtgaggcttcccgcctggcgcattacaacaagcgctcgaccatcacctccagggagatccagacggccgtgcgcctgctgctgcctggggagttggccaagcacgccgtgtccgagggtactaaggccatcaccaagtacaccagcgctaagGGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGCGCCACCATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCAAGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCATCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA"
+        ),
+        fusion_parts=[
+            {"name": "H2B", "sequence": "atgccagagccagcgaagtctgctcccgccccgaaaaagggctccaagaaggcggtgactaagg"
+            "cgcagaagaaaggcggcaagaagcgcaagcgcagccgcaaggagagctattccatctatgtgta"
+            "caaggttctgaagcaggtccaccctgacaccggcatttcgtccaaggccatgggcatcatgaat"
+            "tcgtttgtgaacgacattttcgagcgcatcgcaggtgaggcttcccgcctggcgcattacaaca"
+            "agcgctcgaccatcacctccagggagatccagacggccgtgcgcctgctgctgcctggggagtt"
+            "ggccaagcacgccgtgtccgagggtactaaggccatcaccaagtacaccagcgctaag", "type": "protein"},
+            {"name": "Gly4Ser20_Flexible_linker", "sequence": "GGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGC", "type": "linker"},
+            {"name": "EGFP", "sequence": "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCAAGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCATCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA", "type": "protein"}],
+        tags=["fusion", "ncbi", "mammalian", "c_terminal"],
+        expected_total_size=6592,
+        user_persona=(
+            "You want human H2B (H2B1B). There are many Histone H2B variants — make sure to get this one. "
+            "You can use a common Glycine4 Serine flexible linker (e.g., GGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGC) between H2B and EGFP. "
+            "When asked about species, say human. The backbone should be for "
+            "mammalian expression — pcDNA3.1(+) is fine."
+        ),
+    ),
+    AgentTestCase(
+        id="A7-004",
+        name="Fusion: H2B-EGFP with user-specified custom linker",
+        prompt=(
+            "Create a mammalian expression plasmid for H2B-eGFP. "
+            "I want to use GATCCACCGGTC as the linker sequence between H2B and eGFP. "
+            "Assemble the construct and return the sequence."
+        ),
+        description=(
+            "Agent must retrieve H2B CDS from NCBI, use the user-provided custom linker "
+            "(GATCCACCGGTC, 12 bp) instead of the default (GGGGS)x4, then fuse H2B + linker + EGFP "
+            "using fuse_inserts and assemble into a mammalian backbone. Tests that the agent "
+            "respects a non-default linker and that Kozak (GCCACC) is still appended after it."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="H2B",
+        expected_insertion_position=895,
+        expected_insert_sequence=(
+            "ATGCCAGAGCCAGCGAAGTCTGCTCCCGCCCCGAAAAAGGGCTCCAAGAAGGCGGTGACTAAGG"
+            "CGCAGAAGAAAGGCGGCAAGAAGCGCAAGCGCAGCCGCAAGGAGAGCTATTCCATCTATGTGTA"
+            "CAAGGTTCTGAAGCAGGTCCACCCTGACACCGGCATTTCGTCCAAGGCCATGGGCATCATGAAT"
+            "TCGTTTGTGAACGACATTTTCGAGCGCATCGCAGGTGAGGCTTCCCGCCTGGCGCATTACAACA"
+            "AGCGCTCGACCATCACCTCCAGGGAGATCCAGACGGCCGTGCGCCTGCTGCTGCCTGGGGAGTT"
+            "GGCCAAGCACGCCGTGTCCGAGGGTACTAAGGCCATCACCAAGTACACCAGCGCTAAG"
+            "GATCCACCGGTCGCCACC"
+            "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGC"
+            "GAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACC"
+            "CTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAG"
+            "CGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGC"
+            "ATCGACTTCAAGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAACG"
+            "GCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCATCGGCGACGGCCC"
+            "CGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTG"
+            "ACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA"
+        ),
+        fusion_parts=[
+            {"name": "H2B", "sequence": "atgccagagccagcgaagtctgctcccgccccgaaaaagggctccaagaaggcggtgactaagg"
+            "cgcagaagaaaggcggcaagaagcgcaagcgcagccgcaaggagagctattccatctatgtgta"
+            "caaggttctgaagcaggtccaccctgacaccggcatttcgtccaaggccatgggcatcatgaat"
+            "tcgtttgtgaacgacattttcgagcgcatcgcaggtgaggcttcccgcctggcgcattacaaca"
+            "agcgctcgaccatcacctccagggagatccagacggccgtgcgcctgctgctgcctggggagtt"
+            "ggccaagcacgccgtgtccgagggtactaaggccatcaccaagtacaccagcgctaag", "type": "protein"},
+            {"name": "custom_linker", "sequence": "GATCCACCGGTC", "type": "linker"},
+            {"name": "EGFP", "sequence": "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCAAGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCATCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA", "type": "protein"},
+        ],
+        tags=["fusion", "ncbi", "mammalian", "c_terminal", "custom_linker"],
+        expected_total_size=6544,
+        user_persona=(
+            "You want human H2B (H2B1B). There are many Histone H2B variants — make sure to get this one. "
+            "When asked about species, say human. The backbone should be for "
+            "mammalian expression — pcDNA3.1(+) is fine."
+        ),
+    ),
+    AgentTestCase(
+        id="A7-005",
+        name="Fusion: H2B-EGFP (NCBI + fusion), relaxed natural language",
+        prompt=(
+            "Create a mammalian expression plasmid for H2B-eGFP, "
+            "Assemble the construct and return the sequence."
+        ),
+        description=(
+            "Agent must retrieve H2B CDS from NCBI, and an appropriate linker sequence, then fuse H2B + linker + EGFP using "
+            "fuse_inserts (H2B on N-terminal, EGFP on C-terminal), and assemble "
+            "into a mammalian backbone. First eval combining NCBI retrieval with "
+            "protein fusion. H2B is not in the local library."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="H2B",
+        expected_insertion_position=895,
+        expected_insert_sequence=(
+            "atgccagagccagcgaagtctgctcccgccccgaaaaagggctccaagaaggcggtgactaaggcgcagaagaaaggcggcaagaagcgcaagcgcagccgcaaggagagctattccatctatgtgtacaaggttctgaagcaggtccaccctgacaccggcatttcgtccaaggccatgggcatcatgaattcgtttgtgaacgacattttcgagcgcatcgcaggtgaggcttcccgcctggcgcattacaacaagcgctcgaccatcacctccagggagatccagacggccgtgcgcctgctgctgcctggggagttggccaagcacgccgtgtccgagggtactaaggccatcaccaagtacaccagcgctaagGGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGCGCCACCATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCAAGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCATCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA"
+        ),
+        fusion_parts=[
+            {"name": "H2B", "sequence": "atgccagagccagcgaagtctgctcccgccccgaaaaagggctccaagaaggcggtgactaagg"
+            "cgcagaagaaaggcggcaagaagcgcaagcgcagccgcaaggagagctattccatctatgtgta"
+            "caaggttctgaagcaggtccaccctgacaccggcatttcgtccaaggccatgggcatcatgaat"
+            "tcgtttgtgaacgacattttcgagcgcatcgcaggtgaggcttcccgcctggcgcattacaaca"
+            "agcgctcgaccatcacctccagggagatccagacggccgtgcgcctgctgctgcctggggagtt"
+            "ggccaagcacgccgtgtccgagggtactaaggccatcaccaagtacaccagcgctaag", "type": "protein"},
+            {"name": "Gly4Ser20_Flexible_linker", "sequence": "GGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGC", "type": "linker"},
+            {"name": "EGFP", "sequence": "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAGTGCTTCAGCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACGTCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCAAGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACGTCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCATCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCCTGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCGCCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA", "type": "protein"}],
+        tags=["fusion", "ncbi", "mammalian", "c_terminal"],
+        expected_total_size=6592,
+        user_persona=(
+            "You want human H2B (H2B1B). There are many Histone H2B variants — make sure to get this one. "
+            "You can use a common Glycine4 Serine flexible linker (e.g., GGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGC) between H2B and EGFP. "
+            "When asked about species, say human. The backbone should be for "
+            "mammalian expression — pcDNA3.1(+) is fine."
+        ),
     ),
     # ── A8: Negative / balanced cases (blog Step 3) ───────────────────
     # Per the blog: "Test both the cases where a behavior should occur and
@@ -1103,6 +1242,7 @@ async def run_agent_eval_case(
         insert_category=insert_category,
         backbone_features=backbone_data.get("features"),
         expect_reverse_complement=tc.expect_reverse_complement,
+        fusion_parts=tc.fusion_parts or None,
     )
 
     # ── Try alternative backbones if primary scoring fails ────────────

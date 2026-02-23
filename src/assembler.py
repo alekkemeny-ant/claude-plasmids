@@ -11,6 +11,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+# (GGGGS)x4 linker — default for protein-protein fusions
+DEFAULT_FUSION_LINKER = "GGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGC"
+KOZAK = "GCCACC"
+
 
 @dataclass
 class AssemblyResult:
@@ -193,14 +197,17 @@ def assemble_construct(
     return result
 
 
-def fuse_sequences(sequences: list[dict], linker: Optional[str] = None) -> str:
+def fuse_sequences(sequences: list[dict], linker: Optional[str] = DEFAULT_FUSION_LINKER) -> str:
     """Fuse multiple coding sequences into a single CDS.
 
     Handles start/stop codon management at junctions:
     - First sequence: keep start codon (ATG), remove stop codon
-    - Middle sequences: remove start codon, remove stop codon
-    - Last sequence: remove start codon, keep stop codon
-    - Optional linker DNA between each junction
+    - Middle sequences: remove stop codon
+    - Last sequence: keep stop codon
+    - Linker DNA + Kozak (GCCACC) inserted between each junction by default
+
+    The default linker is (GGGGS)x4 for protein-protein fusions. Pass
+    linker="" for direct concatenation (e.g., epitope tag fusions).
 
     Args:
         sequences: List of dicts, each with:
@@ -208,7 +215,8 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = None) -> str:
             - name: Name of the sequence (optional)
             - position: 'n_terminal', 'c_terminal', or 'middle' (optional,
               auto-determined from order if not specified)
-        linker: Optional linker DNA sequence (e.g., encoding GGGGS)
+        linker: Linker DNA sequence. Defaults to (GGGGS)x4. Pass "" for
+                direct concatenation (tag fusions).
 
     Returns:
         Fused CDS DNA sequence.
@@ -216,6 +224,9 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = None) -> str:
     Raises:
         ValueError: If fewer than 2 sequences provided or invalid DNA.
     """
+    if linker is None:
+        linker = DEFAULT_FUSION_LINKER
+
     if len(sequences) < 2:
         raise ValueError("At least 2 sequences are required for fusion")
 
@@ -227,21 +238,10 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = None) -> str:
             name = seq_dict.get("name", f"sequence_{i}")
             raise ValueError(f"Invalid DNA in {name}: {'; '.join(errors)}")
 
-        is_first = (i == 0)
         is_last = (i == len(sequences) - 1)
 
-        if is_first:
-            # Keep start codon, remove stop codon
-            if seq[-3:] in ("TAA", "TAG", "TGA"):
-                seq = seq[:-3]
-        elif is_last:
-            # Remove start codon, keep stop codon
-            if seq[:3] == "ATG":
-                seq = seq[3:]
-        else:
-            # Middle: remove both start and stop
-            if seq[:3] == "ATG":
-                seq = seq[3:]
+        # Remove stop codon from all but the last sequence
+        if not is_last:
             if seq[-3:] in ("TAA", "TAG", "TGA"):
                 seq = seq[:-3]
 
@@ -250,6 +250,8 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = None) -> str:
     # Join with optional linker
     if linker:
         linker = clean_sequence(linker)
+        # Add Kozak sequence (GCCACC) after the linker
+        linker = linker + "GCCACC"
         valid, errors = validate_dna(linker)
         if not valid:
             raise ValueError(f"Invalid linker DNA: {'; '.join(errors)}")

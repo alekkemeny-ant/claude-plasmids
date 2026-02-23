@@ -67,10 +67,13 @@ Use tools to obtain both sequences. Follow this resolution order:
 2. Use `fuse_inserts` to create the fused CDS with proper codon management
 3. Use the fused sequence as the insert for assembly
 
-**Confirm with the user** before proceeding:
+**STOP and confirm with the user** before proceeding to assembly. Present a design summary:
 - Backbone name, size, promoter, resistance markers
 - Insert name, size, start/stop codons present
 - Insertion position (MCS start, unless user specifies otherwise)
+- Any fusions, tags, or linkers being used
+
+Then explicitly ask: **"Would you like to proceed with this design, or would you like to modify anything?"** Do NOT continue to Step 3 until the user confirms they want to proceed.
 
 ### Step 3: Assemble the Construct
 
@@ -129,15 +132,6 @@ assemble_construct(
   insert_id="mCherry",
   insertion_position=895,
   replace_region_end=1615
-)
-```
-
-**Reverse-orientation backbone (e.g., pcDNA3.1(-)):**
-```
-assemble_construct(
-  backbone_id="pcDNA3.1(-)",
-  insert_id="EGFP",
-  reverse_complement_insert=true
 )
 ```
 
@@ -230,7 +224,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 - A protein-coding insert should start with ATG (start codon) and end with a stop codon (TAA, TAG, or TGA).
 - Insert length should be a multiple of 3 (in reading frame).
 - Epitope tags (FLAG, HA, His, Myc) are short peptide-coding sequences that do not necessarily have their own start/stop codons — they are typically fused to another CDS. When a user asks to insert an epitope tag by itself, use `insert_id` to insert the exact library sequence as-is. Do NOT add ATG or stop codons unless the user explicitly requests it.
-- The insert must be in the correct orientation: 5' to 3' in the same direction as the promoter reads. For (+) orientation vectors like pcDNA3.1(+), the insert goes in forward. For (-) orientation vectors, the insert must be reverse-complemented.
+- The insert must be in the correct orientation: 5' to 3' in the same direction as the promoter reads. For (+)/(-) orientation vectors like pcDNA3.1(+) and pcDNA3.1(-), the (+) and (-) refer to the direction of the MCS relative to the f1 origin — either one can be used. Do NOT reverse-complement the insert based on (+)/(-) designation alone.
 
 ### Common Pitfalls
 

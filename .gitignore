@@ -30,5 +30,8 @@ env/
 .DS_Store
 Thumbs.db
 
+# Library data (auto-cached from Addgene)
+library/backbones.json
+
 # pytest
 .pytest_cache/

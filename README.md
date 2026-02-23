@@ -72,7 +72,7 @@ evals/
 ├── test_cases.py          # 27 benchmark cases across 3 tiers
 ├── simulated_user.py      # Simulated user for multi-turn disambiguation evals
 ├── llm_judge.py           # LLM-as-judge grading for transcript quality
-└── run_agent_evals.py     # End-to-end agent eval runner (36 cases, Claude Agent SDK)
+└── run_agent_evals.py     # End-to-end agent eval runner (39 cases, Claude Agent SDK)
 
 tests/
 ├── test_assembler.py      # Assembly engine tests (22 tests)
@@ -136,7 +136,7 @@ Pipeline tests (`tests/test_pipeline.py`) run the assembly engine directly again
 
 ### Agent evals
 
-Agent evals (`evals/run_agent_evals.py`) send natural language prompts through the full Claude agent loop and score output with the Allen Institute rubric. 36 cases across 8 categories:
+Agent evals (`evals/run_agent_evals.py`) send natural language prompts through the full Claude agent loop and score output with the Allen Institute rubric. 39 cases across 8 categories:
 
 | Category | ID Prefix | Cases | Description |
 |----------|-----------|-------|-------------|
@@ -146,7 +146,7 @@ Agent evals (`evals/run_agent_evals.py`) send natural language prompts through t
 | Specific insert types | A4 | 4 | Non-standard inserts: large reporters (luciferase, 1653 bp), small epitope tags (FLAG 24 bp, HA 27 bp), tandem dimers (tdTomato). |
 | Multi-step workflow | A5 | 3 | Full 5-step workflow: retrieve, assemble, validate, export. Agent must call multiple tools in sequence. |
 | NCBI gene retrieval | A6 | 7 | Genes not in the local library — agent must use NCBI Entrez. Includes species disambiguation, gene family disambiguation, alternative name resolution (PAI-1 → SERPINE1), and natural language backbone selection. Multi-turn cases use `user_persona` with a simulated user. |
-| Protein tagging / fusions | A7 | 2 | N-terminal and C-terminal tag fusions (FLAG-EGFP, mCherry-HA). Tests `fuse_inserts` tool and correct start/stop codon management. Uses `expected_insert_sequence` for ground truth. |
+| Protein tagging / fusions | A7 | 5 | N-terminal and C-terminal tag fusions (FLAG-EGFP, mCherry-HA), NCBI + fusion (H2B-EGFP with default and custom linkers). Tests `fuse_inserts` tool, start/stop codon management, and Kozak sequence handling. Uses `expected_insert_sequence` for ground truth. |
 | Negative / balanced | A8 | 3 | Tests that the agent does NOT over-trigger tools. E.g., EGFP (in local library) should not call NCBI; plain EGFP should not call `fuse_inserts`. Uses `tools_should_not_use` assertions. |
 
 ## Verification Rubric

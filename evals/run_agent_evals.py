@@ -259,7 +259,6 @@ AGENT_CASES = [
         expected_insertion_position=895,
         expected_total_size=6148,
         tags=["alias", "name_resolution", "mammalian"],
-        expect_reverse_complement=True,
     ),
     # ── A3: Natural language / underspecified ──────────────────────────
     AgentTestCase(
@@ -349,13 +348,12 @@ AGENT_CASES = [
         id="A4-003",
         name="HA tag in pcDNA3.1(-)",
         prompt="Clone an HA tag into pcDNA3.1(-) and assemble the construct. Give me the sequence.",
-        description="Short epitope tag in the reverse-orientation backbone.",
+        description="Short epitope tag in pcDNA3.1(-) backbone. (+)/(-) refers to MCS direction, not insert orientation.",
         expected_backbone_id="pcDNA3.1(-)",
         expected_insert_id="HA_tag",
         expected_insertion_position=895,
         expected_total_size=5455,
         tags=["explicit", "mammalian", "epitope_tag"],
-        expect_reverse_complement=True,
     ),
     AgentTestCase(
         id="A4-004",

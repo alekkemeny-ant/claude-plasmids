@@ -35,7 +35,8 @@ from claude_agent_sdk import (
     ToolResultBlock,
     PermissionResultAllow,
 )
-from src.tools import create_plasmid_tools, ALL_TOOL_NAMES
+from src.tools import create_plasmid_tools, ALL_TOOL_NAMES, set_tracker, get_tracker
+from src.references import ReferenceTracker
 
 # Load system prompt
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "system_prompt.md"
@@ -54,6 +55,8 @@ async def run_plasmid_agent(
     verbose: bool = False,
 ):
     """Run the plasmid design agent on a single prompt."""
+    tracker = ReferenceTracker()
+    set_tracker(tracker)
     server_config = create_plasmid_tools()
 
     options = ClaudeAgentOptions(
@@ -83,6 +86,10 @@ async def run_plasmid_agent(
                 if verbose:
                     print(f"\n\nDone. Cost: ${message.total_cost_usd:.4f}")
                 break
+
+    refs = tracker.format_references()
+    if refs:
+        print(f"\n\n{refs}")
 
 
 async def main():

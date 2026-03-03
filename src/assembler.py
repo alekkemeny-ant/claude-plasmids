@@ -348,19 +348,31 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = DEFAULT_FUSION
 
     Handles start/stop codon management at junctions:
     - First sequence: keep start codon (ATG), remove stop codon
-    - Middle sequences: remove stop codon
-    - Last sequence: keep stop codon
-    - Linker DNA + Kozak (GCCACC) inserted between each junction by default
+    - Middle sequences (type="protein"): remove start codon AND stop codon
+    - Last sequence (type="protein"): remove start codon, keep stop codon
+    - Middle/last sequences (type="tag"): keep start codon (if any), manage stop only
+    - Linker DNA inserted between each junction by default
+
+    Start codons are removed from non-first sequences when their type is "protein"
+    (the default). This is biologically required: in a fusion protein the ribosome
+    translates from the first ATG only, so internal ATGs in subsequent CDS parts
+    must be removed to keep the reading frame correct.
+
+    Set type="tag" to preserve ATG (used for small epitope tags such as HA or Myc
+    that may lack their own start codon, or fluorescent-protein tags appended
+    C-terminally where you want to preserve the initiator Met context).
+    Kozak (GCCACC) is inserted before the linker junction only when the following
+    sequence is a "tag" that carries an ATG.
 
     The default linker is (GGGGS)x4 for protein-protein fusions. Pass
-    linker="" for direct concatenation (e.g., epitope tag fusions).
+    linker="" for direct concatenation (e.g., short epitope tag fusions).
 
     Args:
         sequences: List of dicts, each with:
             - sequence: DNA sequence (required)
             - name: Name of the sequence (optional)
-            - position: 'n_terminal', 'c_terminal', or 'middle' (optional,
-              auto-determined from order if not specified)
+            - type: "protein" (default) or "tag". Non-first "protein" sequences
+                    have their ATG removed. "tag" sequences are left as-is.
         linker: Linker DNA sequence. Defaults to (GGGGS)x4. Pass "" for
                 direct concatenation (tag fusions).
 
@@ -376,7 +388,8 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = DEFAULT_FUSION
     if len(sequences) < 2:
         raise ValueError("At least 2 sequences are required for fusion")
 
-    parts = []
+    parts_seqs = []
+    parts_types = []
     for i, seq_dict in enumerate(sequences):
         seq = clean_sequence(seq_dict["sequence"])
         valid, errors = validate_dna(seq)
@@ -384,6 +397,8 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = DEFAULT_FUSION
             name = seq_dict.get("name", f"sequence_{i}")
             raise ValueError(f"Invalid DNA in {name}: {'; '.join(errors)}")
 
+        seq_type = seq_dict.get("type", "protein")
+        is_first = (i == 0)
         is_last = (i == len(sequences) - 1)
 
         # Remove stop codon from all but the last sequence
@@ -391,19 +406,35 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = DEFAULT_FUSION
             if seq[-3:] in ("TAA", "TAG", "TGA"):
                 seq = seq[:-3]
 
-        parts.append(seq)
+        # Remove start codon from non-first protein sequences.
+        # Tags are left unchanged — they either lack ATG or intentionally keep it.
+        if not is_first and seq_type == "protein" and seq[:3] == "ATG":
+            seq = seq[3:]
+
+        parts_seqs.append(seq)
+        parts_types.append(seq_type)
 
     # Join with optional linker
     if linker:
-        linker = clean_sequence(linker)
-        # Add Kozak sequence (GCCACC) after the linker
-        linker = linker + "GCCACC"
-        valid, errors = validate_dna(linker)
+        cleaned_linker = clean_sequence(linker)
+        valid, errors = validate_dna(cleaned_linker)
         if not valid:
             raise ValueError(f"Invalid linker DNA: {'; '.join(errors)}")
-        return linker.join(parts)
+
+        # Build the result part by part.
+        # Kozak (GCCACC) is inserted only when the next sequence is a tag that
+        # keeps its ATG — protein parts had their ATG removed, so no Kozak needed.
+        result = parts_seqs[0]
+        for i in range(1, len(parts_seqs)):
+            seq_str = parts_seqs[i]
+            seq_type = parts_types[i]
+            if seq_type == "tag" and seq_str[:3] == "ATG":
+                result += cleaned_linker + KOZAK + seq_str
+            else:
+                result += cleaned_linker + seq_str
+        return result
     else:
-        return "".join(parts)
+        return "".join(parts_seqs)
 
 
 def resolve_insertion_point(

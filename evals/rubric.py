@@ -710,9 +710,10 @@ def score_construct(
                 break
 
         # Compute expected fusion length: sum of all part sequences after
-        # codon management (remove stop from non-terminal proteins). Linker parts included at full length.
+        # codon management. Linker parts included at full length.
         # Also accounts for stop codon added by fuse_inserts when missing.
-        # Start codons are NOT managed here — parts are taken as-is.
+        # Start codon (ATG) is removed from non-first protein parts.
+        # Kozak is NOT added at protein-protein junctions (ATG is removed instead).
         expected_fusion_len = 0
         for i, seq in enumerate(part_seqs):
             if part_types[i] == "linker":
@@ -724,16 +725,13 @@ def score_construct(
             if i < len(part_seqs) - 1:
                 if seq[-3:] in ("TAA", "TAG", "TGA"):
                     seq_len -= 3
+            # Remove start codon from non-first protein parts
+            if i > 0 and part_types[i] == "protein" and seq[:3] == "ATG":
+                seq_len -= 3
             expected_fusion_len += seq_len
         # If the last part lacks a stop codon, fuse_inserts adds one (3 bp)
         if part_seqs[-1][-3:] not in ("TAA", "TAG", "TGA"):
             expected_fusion_len += 3
-
-        # Add expected length of the Kozak sequence (GCCACC, 6 bp) when an
-        # explicit linker separates two proteins. The Kozak is placed between
-        # the linker and the following protein to ensure translation initiation.
-        if has_explicit_linker and has_protein_protein_junction:
-            expected_fusion_len += 6
 
         # Compute proteins-only length (excluding linker parts)
         linker_total_len = sum(
@@ -796,31 +794,40 @@ def score_construct(
                 ),
             ))
 
-        # Check 3: Kozak (GCCACC) present upstream of second protein ATG in fusion (Major)
+        # Check 3: ATG correctly removed from non-N-terminal protein parts (Major)
+        # For protein-protein fusions, each non-first protein must have its
+        # initiator ATG stripped so the ribosome reads one continuous ORF.
         if has_protein_protein_junction:
-            # Look for GCCACCATG in the insert — this is the Kozak + ATG
-            # that fuse_sequences places between the linker and the second gene
-            kozak_atg = "GCCACCATG"
-            kozak_found = kozak_atg in insert_seq
-            if kozak_found:
-                kozak_pos = insert_seq.index(kozak_atg)
-                kozak_detail = f"GCCACC+ATG found at position {kozak_pos} in fused insert"
-            else:
-                kozak_detail = "GCCACCATG not found in fused insert — Kozak missing upstream of second protein"
+            atg_removed_ok = True
+            atg_removed_detail = []
+            for i in range(1, len(part_seqs)):
+                if part_types[i] == "protein" and part_seqs[i][:3] == "ATG":
+                    # The first ~18 bp of the original sequence (with ATG) should
+                    # NOT appear verbatim in the fused insert — that would mean
+                    # the ATG was not removed.
+                    original_start = clean_sequence(part_seqs[i])[:18]
+                    if original_start in clean_sequence(insert_seq):
+                        atg_removed_ok = False
+                        name = fusion_parts[i].get("name", f"part_{i}")
+                        atg_removed_detail.append(f"ATG not removed from '{name}'")
             result.checks.append(Check(
                 section="Biological Sanity",
-                name="Kozak sequence at fusion junction",
-                severity="Critical",
-                passed=kozak_found,
-                detail=kozak_detail,
+                name="ATG removed from non-N-terminal protein(s) at junction",
+                severity="Major",
+                passed=atg_removed_ok,
+                detail=(
+                    "; ".join(atg_removed_detail)
+                    if not atg_removed_ok
+                    else "Start codon correctly removed from non-terminal protein(s)"
+                ),
             ))
         else:
             result.checks.append(Check(
                 section="Biological Sanity",
-                name="Kozak sequence at fusion junction",
+                name="ATG removed from non-N-terminal protein(s) at junction",
                 severity="Info",
                 passed=True,
-                detail="Skipped — tag-protein junction, no internal Kozak expected",
+                detail="Skipped — tag-protein junction, no ATG removal expected",
             ))
 
     # ── Section 5: Output Verification ──────────────────────────────

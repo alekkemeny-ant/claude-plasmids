@@ -613,9 +613,11 @@ def execute_tool(name: str, args: dict) -> str:
 
         elif name == "fuse_inserts":
             sequences = []
-            for item in args["inserts"]:
+            atg_removals = []
+            for i, item in enumerate(args["inserts"]):
                 seq = item.get("sequence")
                 seq_name = item.get("name", "")
+                seq_type = item.get("type", "protein")
                 if not seq and item.get("insert_id"):
                     ins = get_insert_by_id(item["insert_id"])
                     if not ins:
@@ -624,7 +626,11 @@ def execute_tool(name: str, args: dict) -> str:
                     seq_name = seq_name or ins.get("name", item["insert_id"])
                 if not seq:
                     return f"No sequence available for '{seq_name or 'unknown'}'."
-                sequences.append({"sequence": seq, "name": seq_name})
+                sequences.append({"sequence": seq, "name": seq_name, "type": seq_type})
+                if i > 0 and seq_type == "protein":
+                    from assembler import clean_sequence as _clean_seq
+                    if _clean_seq(seq)[:3] == "ATG":
+                        atg_removals.append(seq_name or f"sequence_{i}")
 
             try:
                 fused = _fuse_sequences(sequences, args.get("linker"))
@@ -637,6 +643,9 @@ def execute_tool(name: str, args: dict) -> str:
             out += f"Start codon: {'Yes' if fused[:3] == 'ATG' else 'No'}\n"
             out += f"Stop codon: {'Yes' if fused[-3:] in ('TAA', 'TAG', 'TGA') else 'No'}\n"
             out += f"In frame: {'Yes' if len(fused) % 3 == 0 else 'No'}\n"
+            if atg_removals:
+                out += f"\nNote: Start codon (ATG) removed from: {', '.join(atg_removals)}\n"
+                out += "This is correct for a protein fusion — translation initiates from the first ATG only.\n"
             out += f"\nFused sequence ({len(fused)} bp):\n{fused}"
             return out
 

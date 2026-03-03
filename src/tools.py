@@ -599,7 +599,7 @@ async def fetch_gene_tool(args):
 
 @tool(
     "fuse_inserts",
-    "Fuse multiple coding sequences into a single CDS for protein tagging or fusion proteins. Handles start/stop codon management at junctions. Use for N-terminal tags (FLAG-GeneX), C-terminal tags (GeneX-FLAG), or multi-domain fusions.",
+    "Fuse multiple coding sequences into a single CDS for protein tagging or fusion proteins. Handles start/stop codon management at junctions. For protein fusions (EGFP-mCherry), the ATG is automatically removed from non-first protein sequences — set type='tag' to preserve ATG for small epitope tags (FLAG, HA, Myc). Use for N-terminal tags (FLAG-GeneX), C-terminal tags (GeneX-FLAG), or multi-domain fusions.",
     {
         "type": "object",
         "properties": {
@@ -611,6 +611,11 @@ async def fetch_gene_tool(args):
                         "insert_id": {"type": "string", "description": "Insert ID from library (e.g., 'FLAG_tag', 'EGFP')"},
                         "sequence": {"type": "string", "description": "Raw DNA sequence (if not using library ID)"},
                         "name": {"type": "string", "description": "Name for this sequence"},
+                        "type": {
+                            "type": "string",
+                            "enum": ["protein", "tag"],
+                            "description": "Sequence type: 'protein' (default) removes ATG from non-first positions to keep the reading frame in a fusion; 'tag' preserves ATG for small epitope tags (FLAG, HA, Myc, His) that either lack ATG or need it kept intact.",
+                        },
                     },
                 },
                 "description": "Ordered list of sequences to fuse (N-terminal first, C-terminal last)",
@@ -622,9 +627,11 @@ async def fetch_gene_tool(args):
 )
 async def fuse_inserts_tool(args):
     sequences = []
-    for item in args["inserts"]:
+    atg_removals = []  # names of sequences whose ATG will be stripped
+    for i, item in enumerate(args["inserts"]):
         seq = item.get("sequence")
         name = item.get("name", "")
+        seq_type = item.get("type", "protein")
         if not seq and item.get("insert_id"):
             ins = get_insert_by_id(item["insert_id"])
             if not ins:
@@ -633,7 +640,12 @@ async def fuse_inserts_tool(args):
             name = name or ins.get("name", item["insert_id"])
         if not seq:
             return _error(f"No sequence available for '{name or 'unknown'}'.")
-        sequences.append({"sequence": seq, "name": name})
+        sequences.append({"sequence": seq, "name": name, "type": seq_type})
+        # Track which non-first protein sequences have an ATG to be removed
+        if i > 0 and seq_type == "protein":
+            from .assembler import clean_sequence as _clean_seq
+            if _clean_seq(seq)[:3] == "ATG":
+                atg_removals.append(name or f"sequence_{i}")
 
     try:
         linker = args.get("linker")
@@ -652,6 +664,10 @@ async def fuse_inserts_tool(args):
     out += f"Start codon: {'Yes' if has_atg else 'No — MISSING'}\n"
     out += f"Stop codon: {'Yes' if has_stop else 'No — MISSING'}\n"
     out += f"In frame: {'Yes' if len(fused) % 3 == 0 else 'No'}\n"
+
+    if atg_removals:
+        out += f"\nNote: Start codon (ATG) removed from: {', '.join(atg_removals)}\n"
+        out += "This is correct for a protein fusion — translation initiates from the first ATG only.\n"
 
     # Provide ready-to-use sequence with ATG/stop added if missing
     expressible = fused

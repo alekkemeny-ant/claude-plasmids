@@ -452,3 +452,90 @@ class TestFuseSequences:
         # EGFP ATG preserved because type="tag"
         expected = flag_seq + egfp_seq
         assert result == expected
+
+    # ── remove_internal_atg=False tests ─────────────────────────────────
+
+    def test_remove_internal_atg_false_preserves_atg(self):
+        """remove_internal_atg=False: non-first protein sequences keep their ATG."""
+        seq1 = "ATGAAATAA"
+        seq2 = "ATGCCCTGA"
+        result = fuse_sequences(
+            [{"sequence": seq1}, {"sequence": seq2}],
+            linker="",
+            remove_internal_atg=False,
+        )
+        # seq1: remove stop → ATGAAA
+        # seq2 (protein, remove_internal_atg=False): keep ATG, keep stop → ATGCCCTGA
+        assert result == "ATGAAA" + "ATGCCCTGA"
+        assert result[:3] == "ATG"
+        assert result[-3:] == "TGA"
+
+    def test_remove_internal_atg_false_adds_kozak_with_linker(self):
+        """remove_internal_atg=False + linker: Kozak is inserted before retained ATG."""
+        seq1 = "ATGAAATAA"
+        seq2 = "ATGCCCTGA"
+        linker = "GGCGGC"
+        result = fuse_sequences(
+            [{"sequence": seq1}, {"sequence": seq2}],
+            linker=linker,
+            remove_internal_atg=False,
+        )
+        # seq1: remove stop → ATGAAA
+        # seq2 (protein, ATG retained): Kozak added before it
+        assert result == "ATGAAA" + linker + KOZAK + "ATGCCCTGA"
+
+    def test_remove_internal_atg_false_three_sequences(self):
+        """remove_internal_atg=False with three proteins: all middle/last ATGs kept."""
+        seq1 = "ATGAAATAA"
+        seq2 = "ATGCCCTGA"
+        seq3 = "ATGGGGTAG"
+        result = fuse_sequences(
+            [
+                {"sequence": seq1, "name": "first"},
+                {"sequence": seq2, "name": "middle"},
+                {"sequence": seq3, "name": "last"},
+            ],
+            linker="",
+            remove_internal_atg=False,
+        )
+        # first: remove stop → ATGAAA
+        # middle (protein, ATG kept, no linker so no Kozak): remove stop → ATGCCC
+        # last (protein, ATG kept, no linker so no Kozak): keep stop → ATGGGGTAG
+        assert result == "ATGAAA" + "ATGCCC" + "ATGGGGTAG"
+        assert result[:3] == "ATG"
+        assert result[-3:] == "TAG"
+
+    def test_remove_internal_atg_true_is_default(self):
+        """Default behavior (remove_internal_atg=True) unchanged: ATG stripped."""
+        seq1 = "ATGAAATAA"
+        seq2 = "ATGCCCTGA"
+        explicit_true = fuse_sequences(
+            [{"sequence": seq1}, {"sequence": seq2}],
+            linker="",
+            remove_internal_atg=True,
+        )
+        default = fuse_sequences(
+            [{"sequence": seq1}, {"sequence": seq2}],
+            linker="",
+        )
+        assert explicit_true == default
+        # ATG removed from seq2
+        assert explicit_true == "ATGAAA" + "CCCTGA"
+
+    def test_remove_internal_atg_false_no_effect_on_tags(self):
+        """remove_internal_atg=False does not change tag behaviour (tags always keep ATG)."""
+        seq1 = "ATGAAATAA"
+        seq2 = "ATGCCC"
+        result_false = fuse_sequences(
+            [{"sequence": seq1, "type": "protein"}, {"sequence": seq2, "type": "tag"}],
+            linker="",
+            remove_internal_atg=False,
+        )
+        result_true = fuse_sequences(
+            [{"sequence": seq1, "type": "protein"}, {"sequence": seq2, "type": "tag"}],
+            linker="",
+            remove_internal_atg=True,
+        )
+        # Both should produce the same result — tag ATG is never removed
+        assert result_false == result_true
+        assert result_false == "ATGAAA" + "ATGCCC"

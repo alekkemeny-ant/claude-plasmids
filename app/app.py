@@ -612,6 +612,7 @@ def execute_tool(name: str, args: dict) -> str:
             return out
 
         elif name == "fuse_inserts":
+            remove_internal_atg = args.get("remove_internal_atg", True)
             sequences = []
             atg_removals = []
             for i, item in enumerate(args["inserts"]):
@@ -627,13 +628,13 @@ def execute_tool(name: str, args: dict) -> str:
                 if not seq:
                     return f"No sequence available for '{seq_name or 'unknown'}'."
                 sequences.append({"sequence": seq, "name": seq_name, "type": seq_type})
-                if i > 0 and seq_type == "protein":
+                if i > 0 and seq_type == "protein" and remove_internal_atg:
                     from assembler import clean_sequence as _clean_seq
                     if _clean_seq(seq)[:3] == "ATG":
                         atg_removals.append(seq_name or f"sequence_{i}")
 
             try:
-                fused = _fuse_sequences(sequences, args.get("linker"))
+                fused = _fuse_sequences(sequences, args.get("linker"), remove_internal_atg=remove_internal_atg)
             except ValueError as e:
                 return f"Fusion error: {e}"
 
@@ -646,6 +647,8 @@ def execute_tool(name: str, args: dict) -> str:
             if atg_removals:
                 out += f"\nNote: Start codon (ATG) removed from: {', '.join(atg_removals)}\n"
                 out += "This is correct for a protein fusion — translation initiates from the first ATG only.\n"
+            elif not remove_internal_atg:
+                out += "\nNote: ATG removal is disabled (remove_internal_atg=false). Internal ATGs are preserved and Kozak sequences are inserted before each.\n"
             out += f"\nFused sequence ({len(fused)} bp):\n{fused}"
             return out
 

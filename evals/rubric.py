@@ -183,6 +183,61 @@ def _extract_sequence_from_output(output_text: str, output_format: str) -> Optio
     return None
 
 
+# ── Insert-search helper ────────────────────────────────────────────────
+
+
+def _resolve_insert(
+    insert_seq: str,
+    construct_seq: str,
+) -> tuple[Optional[str], bool, str]:
+    """Find the insert (or a codon-trimmed variant) in the construct.
+
+    Tries, in order:
+    - Original sequence (forward)
+    - Reverse complement
+    - ATG removed (forward / RC)
+    - Stop removed (forward / RC)
+    - ATG and stop removed (forward / RC)
+
+    Requires at least 9 bp to avoid spurious matches.
+
+    Returns (found_seq, is_rc, modification_label) where:
+    - found_seq  : the variant that matched, or None if nothing found
+    - is_rc      : True if the RC orientation was matched
+    - modification_label: human-readable description of codon changes applied
+    """
+    _STOP_CODONS = ("TAA", "TAG", "TGA")
+    has_atg = insert_seq[:3] == "ATG"
+    has_stop = insert_seq[-3:] in _STOP_CODONS
+    MIN_LEN = 9
+
+    candidates: list[tuple[str, bool, str]] = []
+
+    def _add(seq: str, is_rc: bool, mod: str) -> None:
+        if len(seq) >= MIN_LEN:
+            candidates.append((seq, is_rc, mod))
+
+    _add(insert_seq, False, "")
+    _add(reverse_complement(insert_seq), True, "")
+    if has_atg:
+        no_atg = insert_seq[3:]
+        _add(no_atg, False, "ATG removed")
+        _add(reverse_complement(no_atg), True, "ATG removed")
+    if has_stop:
+        no_stop = insert_seq[:-3]
+        _add(no_stop, False, "stop removed")
+        _add(reverse_complement(no_stop), True, "stop removed")
+    if has_atg and has_stop:
+        no_both = insert_seq[3:-3]
+        _add(no_both, False, "ATG and stop removed")
+        _add(reverse_complement(no_both), True, "ATG and stop removed")
+
+    for seq, is_rc, mod in candidates:
+        if seq in construct_seq:
+            return seq, is_rc, mod
+    return None, False, "not found"
+
+
 # ── Scoring function ────────────────────────────────────────────────────
 
 
@@ -242,8 +297,18 @@ def score_construct(
     backbone_seq = clean_sequence(expected_backbone_sequence)
     insert_seq = clean_sequence(expected_insert_sequence)
 
-    # Pre-compute RC for orientation checks
+    # Pre-compute RC and resolve the effective insert variant present in
+    # the construct.  This handles: forward/RC orientation, ATG removal
+    # (non-N-terminal fusion parts), and stop codon removal (non-C-terminal
+    # fusion parts).  All downstream checks use effective_insert / _eff_insert_len
+    # so they remain correct regardless of which variant was assembled.
     insert_rc = reverse_complement(insert_seq)
+    _eff_seq, _eff_is_rc, _eff_mod = _resolve_insert(insert_seq, construct_seq)
+    effective_insert = _eff_seq if _eff_seq is not None else (
+        insert_rc if expect_reverse_complement else insert_seq
+    )
+    effective_found = _eff_seq is not None
+    _eff_insert_len = len(effective_insert)
 
     # ── Section 1: Input Validation ─────────────────────────────────
 
@@ -327,35 +392,36 @@ def score_construct(
         detail="; ".join(con_errs) if con_errs else f"{len(construct_seq)} bp",
     ))
 
-    # 2b. Insert found in construct (forward or RC orientation)
-    insert_found = insert_seq in construct_seq
-    insert_found_rc = insert_rc in construct_seq
+    # 2b. Insert found in construct (any variant: forward/RC, with/without ATG or stop)
+    _found_parts = []
+    if _eff_is_rc:
+        _found_parts.append("reverse complement")
+    if _eff_mod:
+        _found_parts.append(_eff_mod)
+    _found_detail = ", ".join(_found_parts)
     result.checks.append(Check(
         section="Construct Assembly",
         name="Insert sequence present in construct",
         severity="Critical",
-        passed=insert_found or insert_found_rc,
-        detail="reverse complement" if insert_found_rc and not insert_found else "",
+        passed=effective_found,
+        detail=_found_detail,
     ))
 
     # 2c. Insert in correct orientation
     if expect_reverse_complement:
-        orientation_ok = insert_found_rc
+        orientation_ok = _eff_is_rc
         orientation_detail = "" if orientation_ok else (
-            "Found in forward only" if insert_found else "Insert not found"
+            "Found in forward orientation only" if (effective_found and not _eff_is_rc)
+            else "Insert not found"
         )
         orientation_label = "Insert in correct orientation (reverse complement)"
-        # For RC inserts, use the RC sequence for position/preservation checks
-        effective_insert = insert_rc
-        effective_found = insert_found_rc
     else:
-        orientation_ok = insert_found
+        orientation_ok = not _eff_is_rc if effective_found else False
         orientation_detail = (
-            "Found as reverse complement only" if insert_found_rc and not insert_found else ""
+            "Found as reverse complement only" if _eff_is_rc else
+            ("Insert not found" if not effective_found else "")
         )
         orientation_label = "Insert in correct orientation (forward)"
-        effective_insert = insert_seq
-        effective_found = insert_found
 
     result.checks.append(Check(
         section="Construct Assembly",
@@ -419,8 +485,9 @@ def score_construct(
         detail=f"Construct {len(construct_seq)} bp > backbone {len(backbone_seq)} bp" if full_length else f"Construct {len(construct_seq)} bp <= backbone {len(backbone_seq)} bp",
     ))
 
-    # 3b. Total size correct
-    expected_size = len(backbone_seq) + len(insert_seq)
+    # 3b. Total size correct (use effective insert length — may differ from
+    # the original insert_seq length when ATG or stop was trimmed for fusion)
+    expected_size = len(backbone_seq) + _eff_insert_len
     size_ok = len(construct_seq) == expected_size
     result.checks.append(Check(
         section="Construct Integrity",
@@ -440,7 +507,7 @@ def score_construct(
             for feat in key_features:
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, feat,
-                    len(insert_seq), expected_insert_position,
+                    _eff_insert_len, expected_insert_position,
                 )
                 if not preserved:
                     all_preserved = False
@@ -544,9 +611,9 @@ def score_construct(
                         downstream_polya = pf
             if downstream_polya:
                 # Check that the polyA is downstream of the insert end
-                insert_end = expected_insert_position + len(insert_seq)
+                insert_end = expected_insert_position + _eff_insert_len
                 # In the construct, the polyA is shifted by insert length
-                polya_construct_start = downstream_polya["start"] + len(insert_seq)
+                polya_construct_start = downstream_polya["start"] + _eff_insert_len
                 polya_downstream = polya_construct_start >= insert_end
                 result.checks.append(Check(
                     section="Biological Sanity",
@@ -559,7 +626,7 @@ def score_construct(
                 # 4c-2. PolyA signal sequence preserved
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, downstream_polya,
-                    len(insert_seq), expected_insert_position,
+                    _eff_insert_len, expected_insert_position,
                 )
                 result.checks.append(Check(
                     section="Biological Sanity",
@@ -602,7 +669,7 @@ def score_construct(
             for feat in cds_features:
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, feat,
-                    len(insert_seq), expected_insert_position,
+                    _eff_insert_len, expected_insert_position,
                 )
                 if not preserved:
                     all_markers_ok = False
@@ -640,7 +707,7 @@ def score_construct(
             for feat in origin_features:
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, feat,
-                    len(insert_seq), expected_insert_position,
+                    _eff_insert_len, expected_insert_position,
                 )
                 if not preserved:
                     all_origins_ok = False

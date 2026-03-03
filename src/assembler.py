@@ -28,12 +28,17 @@ class AssemblyResult:
     insert_position: Optional[int] = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    # Validation details
+    # Structural checks (sequence-level)
     backbone_preserved: bool = False
     insert_preserved: bool = False
+    # Expressed-sequence biology (always on the sense strand, regardless of RC)
     insert_has_start_codon: bool = False
     insert_has_stop_codon: bool = False
     insert_length_valid: bool = False
+    # Positional / orientation checks (require backbone context)
+    insertion_in_mcs: Optional[bool] = None        # None = could not determine
+    insertion_disrupts_feature: Optional[str] = None  # name of disrupted feature, or None
+    orientation_correct: Optional[bool] = None     # None = could not determine
 
 
 def clean_sequence(sequence: str) -> str:
@@ -62,12 +67,114 @@ def reverse_complement(sequence: str) -> str:
     return ''.join(complement[base] for base in reversed(sequence))
 
 
+def _check_insertion_in_mcs(
+    insertion_position: int,
+    backbone: dict,
+    backbone_seq: str,
+) -> tuple[Optional[bool], Optional[str]]:
+    """Return (in_mcs, error_message). in_mcs=None means inconclusive."""
+    mcs = backbone.get("mcs_position")
+    if mcs:
+        start, end = mcs["start"], mcs["end"]
+        if start <= insertion_position <= end:
+            return True, None
+        return False, (
+            f"Insertion at position {insertion_position} is outside the MCS "
+            f"({start}–{end}). The insert will not be in the expression cassette "
+            f"and will not be transcribed from the intended promoter."
+        )
+    bounds = MCSHandler.find_mcs_boundaries(backbone_seq)
+    if bounds:
+        start, end = bounds
+        if start <= insertion_position <= end:
+            return True, None
+        return False, (
+            f"Insertion at position {insertion_position} is outside the detected "
+            f"MCS cluster ({start}–{end}). The insert may not be expressed."
+        )
+    return None, None  # can't determine
+
+
+# Feature types that must not be disrupted by an insert
+_PROTECTED_FEATURE_TYPES = {"CDS", "rep_origin"}
+
+
+def _check_feature_disruption(
+    insertion_position: int,
+    backbone: dict,
+    backbone_len: int,
+) -> tuple[Optional[str], Optional[str]]:
+    """Return (disrupted_feature_name, error_message) or (None, None) if clean.
+
+    Features whose span covers more than 60 % of the backbone are skipped —
+    these are malformed whole-plasmid annotations sometimes produced by
+    Addgene's GenBank parser (e.g. rep_origin 0..N spanning the full sequence).
+    """
+    for feat in backbone.get("features") or []:
+        if feat.get("type") not in _PROTECTED_FEATURE_TYPES:
+            continue
+        span = feat["end"] - feat["start"]
+        if span > backbone_len * 0.6:
+            continue  # malformed whole-plasmid annotation — skip
+        # Strictly inside (not at boundary) — boundary insertions are fine
+        if feat["start"] < insertion_position < feat["end"]:
+            name = feat.get("name", "unknown")
+            ftype = feat.get("type", "feature")
+            return name, (
+                f"Insertion at {insertion_position} disrupts '{name}' "
+                f"({ftype}, {feat['start']}–{feat['end']}). "
+                f"This will inactivate a critical plasmid element."
+            )
+    return None, None
+
+
+def _check_orientation(
+    insertion_position: int,
+    reverse_complement_insert: bool,
+    backbone: dict,
+    backbone_seq: str,
+) -> tuple[Optional[bool], Optional[str]]:
+    """Check that the insert is oriented consistently with the MCS transcription direction.
+
+    Compares the auto-detected MCS direction against what was actually done
+    (reverse_complement_insert). A mismatch means the gene is pointing away
+    from the promoter and will not be expressed.
+    Returns (orientation_correct, error_message). None = could not determine.
+    """
+    features = backbone.get("features")
+    mcs = backbone.get("mcs_position")
+    mcs_bounds = (mcs["start"], mcs["end"]) if mcs else MCSHandler.find_mcs_boundaries(backbone_seq)
+    if not mcs_bounds or not features:
+        return None, None
+
+    expected_direction = MCSHandler.detect_mcs_direction(mcs_bounds, features)
+    expected_rc = (expected_direction == "reverse")
+
+    if expected_rc == reverse_complement_insert:
+        return True, None
+
+    if expected_rc and not reverse_complement_insert:
+        return False, (
+            f"Orientation mismatch: the MCS is in reverse orientation "
+            f"(promoter is downstream of position {insertion_position}), "
+            f"but the insert was NOT reverse-complemented. "
+            f"The gene will be transcribed antisense and will not be expressed."
+        )
+    # expected forward but RC was applied
+    return False, (
+        f"Orientation mismatch: the MCS is in forward orientation, "
+        f"but the insert was reverse-complemented. "
+        f"Verify this is intentional."
+    )
+
+
 def assemble_construct(
     backbone_seq: str,
     insert_seq: str,
     insertion_position: int,
     replace_region_end: Optional[int] = None,
     reverse_complement_insert: bool = False,
+    backbone: Optional[dict] = None,
 ) -> AssemblyResult:
     """
     Assemble an expression construct by inserting a sequence into a backbone.
@@ -78,13 +185,18 @@ def assemble_construct(
 
     Args:
         backbone_seq: Complete backbone DNA sequence.
-        insert_seq: Insert DNA sequence (e.g., EGFP CDS).
+        insert_seq: Insert DNA sequence (e.g., EGFP CDS) in expressed orientation.
         insertion_position: 0-based position in backbone to insert at.
         replace_region_end: If set, backbone[insertion_position:replace_region_end]
                            is replaced by the insert. Use this when replacing the
                            full MCS or an existing insert.
         reverse_complement_insert: If True, reverse-complement the insert before
                                    insertion (for reverse-orientation backbones).
+        backbone: Optional backbone dict from the library. When provided, enables
+                  three additional biological checks:
+                  - Insertion is within the MCS bounds
+                  - Insertion does not disrupt a CDS or origin of replication
+                  - Insert orientation matches the MCS transcription direction
 
     Returns:
         AssemblyResult with the assembled sequence and validation details.
@@ -128,6 +240,9 @@ def assemble_construct(
             return result
 
     # --- Optionally reverse-complement the insert ---
+    # Keep the original (expressed-orientation) sequence for biology checks below.
+    expressed_seq = insert_seq
+
     if reverse_complement_insert:
         insert_seq = reverse_complement(insert_seq)
 
@@ -172,10 +287,11 @@ def assemble_construct(
         result.errors.append("Insert sequence was not preserved during assembly")
         return result
 
-    # Check insert biology
-    result.insert_has_start_codon = insert_seq[:3] == "ATG"
-    result.insert_has_stop_codon = insert_seq[-3:] in ("TAA", "TAG", "TGA")
-    result.insert_length_valid = len(insert_seq) % 3 == 0
+    # Check insert biology on the expressed (sense) orientation, not the
+    # potentially RC'd sequence that was spliced in.
+    result.insert_has_start_codon = expressed_seq[:3] == "ATG"
+    result.insert_has_stop_codon = expressed_seq[-3:] in ("TAA", "TAG", "TGA")
+    result.insert_length_valid = len(expressed_seq) % 3 == 0
 
     if not result.insert_has_start_codon:
         result.warnings.append("Insert does not start with ATG (start codon)")
@@ -183,9 +299,36 @@ def assemble_construct(
         result.warnings.append("Insert does not end with a stop codon (TAA/TAG/TGA)")
     if not result.insert_length_valid:
         result.warnings.append(
-            f"Insert length ({len(insert_seq)} bp) is not a multiple of 3 — "
+            f"Insert length ({len(expressed_seq)} bp) is not a multiple of 3 — "
             f"may be out of reading frame"
         )
+
+    # --- Biological context checks (require backbone dict) ---
+    if backbone:
+        # Check 1: insertion is within the MCS
+        in_mcs, mcs_msg = _check_insertion_in_mcs(insertion_position, backbone, backbone_seq)
+        result.insertion_in_mcs = in_mcs
+        if in_mcs is False:
+            result.errors.append(mcs_msg)
+
+        # Check 2: insertion does not disrupt a protected feature
+        disrupted, feat_msg = _check_feature_disruption(insertion_position, backbone, len(backbone_seq))
+        result.insertion_disrupts_feature = disrupted
+        if disrupted:
+            result.errors.append(feat_msg)
+
+        # Check 3: insert orientation matches MCS transcription direction
+        orient_ok, orient_msg = _check_orientation(
+            insertion_position, reverse_complement_insert, backbone, backbone_seq
+        )
+
+        result.orientation_correct = orient_ok
+        if orient_ok is False:
+            result.errors.append(orient_msg)
+
+        if any(e for e in result.errors if result.errors):
+            result.success = False
+            return result
 
     # Expected size check
     expected_size = expected_backbone_len + len(insert_seq)
@@ -261,6 +404,33 @@ def fuse_sequences(sequences: list[dict], linker: Optional[str] = DEFAULT_FUSION
         return linker.join(parts)
     else:
         return "".join(parts)
+
+
+def resolve_insertion_point(
+    backbone: dict,
+    backbone_seq: str,
+) -> tuple[Optional[int], bool]:
+    """Return (insertion_position, reverse_complement_insert).
+
+    First tries the pre-stored mcs_position in the backbone dict.
+    If that is absent, runs MCSHandler on the raw sequence to detect
+    the MCS cluster and promoter direction automatically.
+    Returns (None, False) if no position can be determined.
+    """
+    pos = find_mcs_insertion_point(backbone)
+    if pos is not None:
+        return pos, False
+
+    bounds = MCSHandler.find_mcs_boundaries(backbone_seq)
+    if bounds is None:
+        return None, False
+
+    features = backbone.get("features")
+    direction = MCSHandler.detect_mcs_direction(bounds, features)
+    if direction == "reverse":
+        return bounds[1], True  # end of MCS cluster, RC insert
+    else:
+        return bounds[0], False  # start of MCS cluster, no RC
 
 
 def find_mcs_insertion_point(backbone: dict) -> Optional[int]:
@@ -497,6 +667,9 @@ class MCSHandler:
         # Insert the gene
         if insertion_point < 0 or insertion_point > len(backbone_seq):
             insertion_point = len(backbone_seq)
+
+        if direction == "reverse":
+            gene_seq = reverse_complement(gene_seq)
 
         final_sequence = backbone_seq[:insertion_point] + gene_seq + backbone_seq[insertion_point:]
 

@@ -39,6 +39,7 @@ from assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
     find_mcs_insertion_point,
+    resolve_insertion_point,
     clean_sequence,
     validate_dna,
     format_as_fasta,
@@ -409,8 +410,9 @@ def execute_tool(name: str, args: dict) -> str:
 
             # Resolve position
             pos = args.get("insertion_position")
+            auto_rc = False
             if pos is None and backbone_data:
-                pos = find_mcs_insertion_point(backbone_data)
+                pos, auto_rc = resolve_insertion_point(backbone_data, backbone_seq)
             if pos is None:
                 return "Error: No insertion position. Provide insertion_position or use a backbone with MCS data."
 
@@ -419,7 +421,8 @@ def execute_tool(name: str, args: dict) -> str:
                 insert_seq=insert_seq,
                 insertion_position=pos,
                 replace_region_end=args.get("replace_region_end"),
-                reverse_complement_insert=args.get("reverse_complement_insert", False),
+                reverse_complement_insert=args.get("reverse_complement_insert", False) or auto_rc,
+                backbone=backbone_data,
             )
 
             if not result.success:

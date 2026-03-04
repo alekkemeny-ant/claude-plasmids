@@ -38,6 +38,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
+    reverse_complement,
     find_mcs_insertion_point,
     resolve_insertion_point,
     clean_sequence,
@@ -470,9 +471,12 @@ def execute_tool(name: str, args: dict) -> str:
             construct_seq = clean_sequence(args["construct_sequence"])
             backbone_seq = args.get("backbone_sequence")
             if not backbone_seq and args.get("backbone_id"):
-                bb = get_backbone_by_id(args["backbone_id"])
-                if bb:
-                    backbone_seq = bb.get("sequence")
+                backbone_data = get_backbone_by_id(args["backbone_id"])
+                if backbone_data:
+                    backbone_seq = backbone_data.get("sequence")
+
+            _, auto_rc = resolve_insertion_point(backbone_data, backbone_seq)
+
             insert_seq = args.get("insert_sequence")
             if not insert_seq and args.get("insert_id"):
                 ins = get_insert_by_id(args["insert_id"])
@@ -481,13 +485,17 @@ def execute_tool(name: str, args: dict) -> str:
 
             checks = []
             # Valid DNA
+            
             ok, errs = validate_dna(construct_seq)
             checks.append(f"Valid DNA: {'PASS' if ok else 'FAIL'}")
             checks.append(f"Size: {len(construct_seq)} bp")
 
             if insert_seq:
                 insert_seq = clean_sequence(insert_seq)
-                found = insert_seq in construct_seq
+                if auto_rc:
+                  found = reverse_complement(insert_seq) in construct_seq
+                else:
+                  found = insert_seq in construct_seq
                 checks.append(f"Insert found in construct: {'PASS' if found else 'FAIL (CRITICAL)'}")
                 if found:
                     pos = construct_seq.index(insert_seq)

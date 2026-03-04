@@ -235,6 +235,7 @@ def _resolve_insert(
     for seq, is_rc, mod in candidates:
         if seq in construct_seq:
             return seq, is_rc, mod
+    breakpoint()
     return None, False, "not found"
 
 
@@ -302,18 +303,18 @@ def score_construct(
     backbone_seq = clean_sequence(expected_backbone_sequence)
     insert_seq = clean_sequence(expected_insert_sequence)
 
-    # Pre-compute RC and resolve the effective insert variant present in
+    # Pre-compute RC and resolve the insert variant present in
     # the construct.  This handles: forward/RC orientation, ATG removal
     # (non-N-terminal fusion parts), and stop codon removal (non-C-terminal
-    # fusion parts).  All downstream checks use effective_insert / _eff_insert_len
+    # fusion parts).  All downstream checks use insert_found / insert_len
     # so they remain correct regardless of which variant was assembled.
     insert_rc = reverse_complement(insert_seq)
-    _eff_seq, _eff_is_rc, _eff_mod = _resolve_insert(insert_seq, construct_seq)
-    effective_insert = _eff_seq if _eff_seq is not None else (
+    _insert_seq, _insert_is_rc, _insert_mod = _resolve_insert(insert_seq, construct_seq)
+    insert_used = _insert_seq if _insert_seq is not None else (
         insert_rc if expect_reverse_complement else insert_seq
     )
-    effective_found = _eff_seq is not None
-    _eff_insert_len = len(effective_insert)
+    insert_found = _insert_seq is not None
+    insert_len = len(insert_used)
 
     # ── Section 1: Input Validation ─────────────────────────────────
 
@@ -399,32 +400,33 @@ def score_construct(
 
     # 2b. Insert found in construct (any variant: forward/RC, with/without ATG or stop)
     _found_parts = []
-    if _eff_is_rc:
+    if _insert_is_rc:
         _found_parts.append("reverse complement")
-    if _eff_mod:
-        _found_parts.append(_eff_mod)
+    if _insert_mod:
+        _found_parts.append(_insert_mod)
     _found_detail = ", ".join(_found_parts)
     result.checks.append(Check(
         section="Construct Assembly",
         name="Insert sequence present in construct",
         severity="Critical",
-        passed=effective_found,
+        passed=insert_found,
         detail=_found_detail,
     ))
 
     # 2c. Insert in correct orientation
+
     if expect_reverse_complement:
-        orientation_ok = _eff_is_rc
+        orientation_ok = _insert_is_rc
         orientation_detail = "" if orientation_ok else (
-            "Found in forward orientation only" if (effective_found and not _eff_is_rc)
+            "Found in forward orientation only" if (insert_found and not _insert_is_rc)
             else "Insert not found"
         )
         orientation_label = "Insert in correct orientation (reverse complement)"
     else:
-        orientation_ok = not _eff_is_rc if effective_found else False
+        orientation_ok = not _insert_is_rc if insert_found else False
         orientation_detail = (
-            "Found as reverse complement only" if _eff_is_rc else
-            ("Insert not found" if not effective_found else "")
+            "Found as reverse complement only" if _insert_is_rc else
+            ("Insert not found" if not insert_found else "")
         )
         orientation_label = "Insert in correct orientation (forward)"
 
@@ -437,8 +439,8 @@ def score_construct(
     ))
 
     # 2d. Insert at correct position
-    if effective_found:
-        actual_pos = construct_seq.index(effective_insert)
+    if insert_found:
+        actual_pos = construct_seq.index(insert_used)
         pos_correct = actual_pos == expected_insert_position
         result.checks.append(Check(
             section="Construct Assembly",
@@ -467,7 +469,7 @@ def score_construct(
     ))
 
     # 2f. Backbone downstream preserved
-    downstream_start_construct = expected_insert_position + len(effective_insert)
+    downstream_start_construct = expected_insert_position + len(insert_used)
     downstream_start_backbone = expected_insert_position
     downstream_ok = construct_seq[downstream_start_construct:] == backbone_seq[downstream_start_backbone:]
     result.checks.append(Check(
@@ -492,7 +494,7 @@ def score_construct(
 
     # 3b. Total size correct (use effective insert length — may differ from
     # the original insert_seq length when ATG or stop was trimmed for fusion)
-    expected_size = len(backbone_seq) + _eff_insert_len
+    expected_size = len(backbone_seq) + insert_len
     size_ok = len(construct_seq) == expected_size
     result.checks.append(Check(
         section="Construct Integrity",
@@ -512,7 +514,7 @@ def score_construct(
             for feat in key_features:
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, feat,
-                    _eff_insert_len, expected_insert_position,
+                    insert_len, expected_insert_position,
                 )
                 if not preserved:
                     all_preserved = False
@@ -616,9 +618,9 @@ def score_construct(
                         downstream_polya = pf
             if downstream_polya:
                 # Check that the polyA is downstream of the insert end
-                insert_end = expected_insert_position + _eff_insert_len
+                insert_end = expected_insert_position + insert_len
                 # In the construct, the polyA is shifted by insert length
-                polya_construct_start = downstream_polya["start"] + _eff_insert_len
+                polya_construct_start = downstream_polya["start"] + insert_len
                 polya_downstream = polya_construct_start >= insert_end
                 result.checks.append(Check(
                     section="Biological Sanity",
@@ -631,7 +633,7 @@ def score_construct(
                 # 4c-2. PolyA signal sequence preserved
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, downstream_polya,
-                    _eff_insert_len, expected_insert_position,
+                    insert_len, expected_insert_position,
                 )
                 result.checks.append(Check(
                     section="Biological Sanity",
@@ -674,7 +676,7 @@ def score_construct(
             for feat in cds_features:
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, feat,
-                    _eff_insert_len, expected_insert_position,
+                    insert_len, expected_insert_position,
                 )
                 if not preserved:
                     all_markers_ok = False
@@ -712,7 +714,7 @@ def score_construct(
             for feat in origin_features:
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, feat,
-                    _eff_insert_len, expected_insert_position,
+                    insert_len, expected_insert_position,
                 )
                 if not preserved:
                     all_origins_ok = False

@@ -343,38 +343,26 @@ def assemble_construct(
     return result
 
 
-def fuse_sequences(
-    sequences: list[dict],
-    linker: Optional[str] = DEFAULT_FUSION_LINKER,
-    remove_internal_atg: bool = True,
-) -> str:
+def fuse_sequences(sequences: list[dict], linker: Optional[str] = DEFAULT_FUSION_LINKER) -> str:
     """Fuse multiple coding sequences into a single CDS.
 
     Handles start/stop codon management at junctions:
     - First sequence: keep start codon (ATG), remove stop codon
     - Middle sequences (type="protein"): remove start codon AND stop codon
-      (only when remove_internal_atg=True, the default)
-    - Last sequence (type="protein"): remove start codon (if remove_internal_atg),
-      keep stop codon
+    - Last sequence (type="protein"): remove start codon, keep stop codon
     - Middle/last sequences (type="tag"): keep start codon (if any), manage stop only
     - Linker DNA inserted between each junction by default
 
-    When remove_internal_atg=True (default), start codons are removed from
-    non-first protein sequences. This is biologically required: in a fusion protein
-    the ribosome translates from the first ATG only, so internal ATGs in subsequent
-    CDS parts must be removed to keep the reading frame correct.
+    Start codons are removed from non-first sequences when their type is "protein"
+    (the default). This is biologically required: in a fusion protein the ribosome
+    translates from the first ATG only, so internal ATGs in subsequent CDS parts
+    must be removed to keep the reading frame correct.
 
-    When remove_internal_atg=False, non-first protein sequences keep their ATG,
-    and Kozak (GCCACC) is inserted before them (same as for tags). Use this only
-    when the downstream sequence must retain its initiator context.
-
-    Set type="tag" to always preserve ATG regardless of remove_internal_atg
-    (used for small epitope tags such as HA or Myc that may lack their own start
-    codon, or fluorescent-protein tags where the initiator Met context matters).
-
-    Kozak (GCCACC) is inserted before the linker junction whenever the following
-    sequence retains its ATG (whether it's a tag or a protein with
-    remove_internal_atg=False).
+    Set type="tag" to preserve ATG (used for small epitope tags such as HA or Myc
+    that may lack their own start codon, or fluorescent-protein tags appended
+    C-terminally where you want to preserve the initiator Met context).
+    Kozak (GCCACC) is inserted before the linker junction only when the following
+    sequence is a "tag" that carries an ATG.
 
     The default linker is (GGGGS)x4 for protein-protein fusions. Pass
     linker="" for direct concatenation (e.g., short epitope tag fusions).
@@ -384,14 +372,9 @@ def fuse_sequences(
             - sequence: DNA sequence (required)
             - name: Name of the sequence (optional)
             - type: "protein" (default) or "tag". Non-first "protein" sequences
-                    have their ATG removed when remove_internal_atg=True.
-                    "tag" sequences always keep their ATG.
+                    have their ATG removed. "tag" sequences are left as-is.
         linker: Linker DNA sequence. Defaults to (GGGGS)x4. Pass "" for
                 direct concatenation (tag fusions).
-        remove_internal_atg: If True (default), remove ATG from non-first
-                             protein sequences so translation initiates from
-                             the first ATG only. If False, ATG is preserved
-                             and Kozak is added before it.
 
     Returns:
         Fused CDS DNA sequence.
@@ -423,9 +406,9 @@ def fuse_sequences(
             if seq[-3:] in ("TAA", "TAG", "TGA"):
                 seq = seq[:-3]
 
-        # Remove start codon from non-first protein sequences when the flag is set.
+        # Remove start codon from non-first protein sequences.
         # Tags are left unchanged — they either lack ATG or intentionally keep it.
-        if not is_first and remove_internal_atg and seq_type == "protein" and seq[:3] == "ATG":
+        if not is_first and seq_type == "protein" and seq[:3] == "ATG":
             seq = seq[3:]
 
         parts_seqs.append(seq)
@@ -439,14 +422,13 @@ def fuse_sequences(
             raise ValueError(f"Invalid linker DNA: {'; '.join(errors)}")
 
         # Build the result part by part.
-        # Kozak (GCCACC) is inserted whenever the next sequence retains its ATG —
-        # this covers tags (always keep ATG) and proteins with remove_internal_atg=False.
-        # Protein parts processed with remove_internal_atg=True had their ATG
-        # stripped, so seq_str won't start with ATG and Kozak is skipped naturally.
+        # Kozak (GCCACC) is inserted only when the next sequence is a tag that
+        # keeps its ATG — protein parts had their ATG removed, so no Kozak needed.
         result = parts_seqs[0]
         for i in range(1, len(parts_seqs)):
             seq_str = parts_seqs[i]
-            if seq_str[:3] == "ATG":
+            seq_type = parts_types[i]
+            if seq_type == "tag" and seq_str[:3] == "ATG":
                 result += cleaned_linker + KOZAK + seq_str
             else:
                 result += cleaned_linker + seq_str

@@ -183,6 +183,62 @@ def _extract_sequence_from_output(output_text: str, output_format: str) -> Optio
     return None
 
 
+# ── Insert-search helper ────────────────────────────────────────────────
+
+
+def _resolve_insert(
+    insert_seq: str,
+    construct_seq: str,
+) -> tuple[Optional[str], bool, str]:
+    """Find the insert (or a codon-trimmed variant) in the construct.
+
+    Tries, in order:
+    - Original sequence (forward)
+    - Reverse complement
+    - ATG removed (forward / RC)
+    - Stop removed (forward / RC)
+    - ATG and stop removed (forward / RC)
+
+    Requires at least 9 bp to avoid spurious matches.
+
+    Returns (found_seq, is_rc, modification_label) where:
+    - found_seq  : the variant that matched, or None if nothing found
+    - is_rc      : True if the RC orientation was matched
+    - modification_label: human-readable description of codon changes applied
+    """
+    _STOP_CODONS = ("TAA", "TAG", "TGA")
+    has_atg = insert_seq[:3] == "ATG"
+    has_stop = insert_seq[-3:] in _STOP_CODONS
+    MIN_LEN = 9
+
+    candidates: list[tuple[str, bool, str]] = []
+
+    def _add(seq: str, is_rc: bool, mod: str) -> None:
+        if len(seq) >= MIN_LEN:
+            candidates.append((seq, is_rc, mod))
+
+    _add(insert_seq, False, "")
+    _add(reverse_complement(insert_seq), True, "")
+    if has_atg:
+        no_atg = insert_seq[3:]
+        _add(no_atg, False, "ATG removed")
+        _add(reverse_complement(no_atg), True, "ATG removed")
+    if has_stop:
+        no_stop = insert_seq[:-3]
+        _add(no_stop, False, "stop removed")
+        _add(reverse_complement(no_stop), True, "stop removed")
+    if has_atg and has_stop:
+        no_both = insert_seq[3:-3]
+        _add(no_both, False, "ATG and stop removed")
+        _add(reverse_complement(no_both), True, "ATG and stop removed")
+
+    for seq, is_rc, mod in candidates:
+        if seq in construct_seq:
+            return seq, is_rc, mod
+    breakpoint()
+    return None, False, "not found"
+
+
 # ── Scoring function ────────────────────────────────────────────────────
 
 
@@ -201,6 +257,7 @@ def score_construct(
     output_format: Optional[str] = None,
     expect_reverse_complement: bool = False,
     fusion_parts: Optional[list[dict]] = None,
+    remove_internal_atg: bool = True,
 ) -> RubricResult:
     """
     Score an assembled construct against the Allen Institute rubric.
@@ -233,6 +290,10 @@ def score_construct(
                       to C-terminal. Each dict has keys: name (str),
                       sequence (str), type ("protein" or "tag"). Used for
                       fusion linker checks.
+        remove_internal_atg: If True (default), the rubric expects ATG to be
+                             removed from non-first protein parts (Check 3).
+                             If False, the rubric expects ATG to be preserved
+                             and checks for Kozak insertion instead.
 
     Returns:
         RubricResult with all checks populated.
@@ -242,8 +303,18 @@ def score_construct(
     backbone_seq = clean_sequence(expected_backbone_sequence)
     insert_seq = clean_sequence(expected_insert_sequence)
 
-    # Pre-compute RC for orientation checks
+    # Pre-compute RC and resolve the insert variant present in
+    # the construct.  This handles: forward/RC orientation, ATG removal
+    # (non-N-terminal fusion parts), and stop codon removal (non-C-terminal
+    # fusion parts).  All downstream checks use insert_found / insert_len
+    # so they remain correct regardless of which variant was assembled.
     insert_rc = reverse_complement(insert_seq)
+    _insert_seq, _insert_is_rc, _insert_mod = _resolve_insert(insert_seq, construct_seq)
+    insert_used = _insert_seq if _insert_seq is not None else (
+        insert_rc if expect_reverse_complement else insert_seq
+    )
+    insert_found = _insert_seq is not None
+    insert_len = len(insert_used)
 
     # ── Section 1: Input Validation ─────────────────────────────────
 
@@ -327,35 +398,37 @@ def score_construct(
         detail="; ".join(con_errs) if con_errs else f"{len(construct_seq)} bp",
     ))
 
-    # 2b. Insert found in construct (forward or RC orientation)
-    insert_found = insert_seq in construct_seq
-    insert_found_rc = insert_rc in construct_seq
+    # 2b. Insert found in construct (any variant: forward/RC, with/without ATG or stop)
+    _found_parts = []
+    if _insert_is_rc:
+        _found_parts.append("reverse complement")
+    if _insert_mod:
+        _found_parts.append(_insert_mod)
+    _found_detail = ", ".join(_found_parts)
     result.checks.append(Check(
         section="Construct Assembly",
         name="Insert sequence present in construct",
         severity="Critical",
-        passed=insert_found or insert_found_rc,
-        detail="reverse complement" if insert_found_rc and not insert_found else "",
+        passed=insert_found,
+        detail=_found_detail,
     ))
 
     # 2c. Insert in correct orientation
+
     if expect_reverse_complement:
-        orientation_ok = insert_found_rc
+        orientation_ok = _insert_is_rc
         orientation_detail = "" if orientation_ok else (
-            "Found in forward only" if insert_found else "Insert not found"
+            "Found in forward orientation only" if (insert_found and not _insert_is_rc)
+            else "Insert not found"
         )
         orientation_label = "Insert in correct orientation (reverse complement)"
-        # For RC inserts, use the RC sequence for position/preservation checks
-        effective_insert = insert_rc
-        effective_found = insert_found_rc
     else:
-        orientation_ok = insert_found
+        orientation_ok = not _insert_is_rc if insert_found else False
         orientation_detail = (
-            "Found as reverse complement only" if insert_found_rc and not insert_found else ""
+            "Found as reverse complement only" if _insert_is_rc else
+            ("Insert not found" if not insert_found else "")
         )
         orientation_label = "Insert in correct orientation (forward)"
-        effective_insert = insert_seq
-        effective_found = insert_found
 
     result.checks.append(Check(
         section="Construct Assembly",
@@ -366,8 +439,8 @@ def score_construct(
     ))
 
     # 2d. Insert at correct position
-    if effective_found:
-        actual_pos = construct_seq.index(effective_insert)
+    if insert_found:
+        actual_pos = construct_seq.index(insert_used)
         pos_correct = actual_pos == expected_insert_position
         result.checks.append(Check(
             section="Construct Assembly",
@@ -396,7 +469,7 @@ def score_construct(
     ))
 
     # 2f. Backbone downstream preserved
-    downstream_start_construct = expected_insert_position + len(effective_insert)
+    downstream_start_construct = expected_insert_position + len(insert_used)
     downstream_start_backbone = expected_insert_position
     downstream_ok = construct_seq[downstream_start_construct:] == backbone_seq[downstream_start_backbone:]
     result.checks.append(Check(
@@ -419,8 +492,9 @@ def score_construct(
         detail=f"Construct {len(construct_seq)} bp > backbone {len(backbone_seq)} bp" if full_length else f"Construct {len(construct_seq)} bp <= backbone {len(backbone_seq)} bp",
     ))
 
-    # 3b. Total size correct
-    expected_size = len(backbone_seq) + len(insert_seq)
+    # 3b. Total size correct (use effective insert length — may differ from
+    # the original insert_seq length when ATG or stop was trimmed for fusion)
+    expected_size = len(backbone_seq) + insert_len
     size_ok = len(construct_seq) == expected_size
     result.checks.append(Check(
         section="Construct Integrity",
@@ -440,7 +514,7 @@ def score_construct(
             for feat in key_features:
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, feat,
-                    len(insert_seq), expected_insert_position,
+                    insert_len, expected_insert_position,
                 )
                 if not preserved:
                     all_preserved = False
@@ -544,9 +618,9 @@ def score_construct(
                         downstream_polya = pf
             if downstream_polya:
                 # Check that the polyA is downstream of the insert end
-                insert_end = expected_insert_position + len(insert_seq)
+                insert_end = expected_insert_position + insert_len
                 # In the construct, the polyA is shifted by insert length
-                polya_construct_start = downstream_polya["start"] + len(insert_seq)
+                polya_construct_start = downstream_polya["start"] + insert_len
                 polya_downstream = polya_construct_start >= insert_end
                 result.checks.append(Check(
                     section="Biological Sanity",
@@ -559,7 +633,7 @@ def score_construct(
                 # 4c-2. PolyA signal sequence preserved
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, downstream_polya,
-                    len(insert_seq), expected_insert_position,
+                    insert_len, expected_insert_position,
                 )
                 result.checks.append(Check(
                     section="Biological Sanity",
@@ -602,7 +676,7 @@ def score_construct(
             for feat in cds_features:
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, feat,
-                    len(insert_seq), expected_insert_position,
+                    insert_len, expected_insert_position,
                 )
                 if not preserved:
                     all_markers_ok = False
@@ -640,7 +714,7 @@ def score_construct(
             for feat in origin_features:
                 preserved, detail = _feature_preserved(
                     construct_seq, backbone_seq, feat,
-                    len(insert_seq), expected_insert_position,
+                    insert_len, expected_insert_position,
                 )
                 if not preserved:
                     all_origins_ok = False
@@ -710,13 +784,16 @@ def score_construct(
                 break
 
         # Compute expected fusion length: sum of all part sequences after
-        # codon management (remove stop from non-terminal proteins). Linker parts included at full length.
+        # codon management. Linker parts included at full length.
         # Also accounts for stop codon added by fuse_inserts when missing.
-        # Start codons are NOT managed here — parts are taken as-is.
+        # remove_internal_atg=True (default): ATG removed from non-first proteins.
+        # remove_internal_atg=False: ATG kept; Kozak (6 bp) is inserted before each
+        # retained ATG when a linker is present (inferred from junction type).
+        KOZAK_LEN = 6  # len("GCCACC")
+        _uses_linker = has_explicit_linker or has_protein_protein_junction
         expected_fusion_len = 0
         for i, seq in enumerate(part_seqs):
             if part_types[i] == "linker":
-                # Linkers included at full length, no codon management
                 expected_fusion_len += len(seq)
                 continue
             seq_len = len(seq)
@@ -724,16 +801,15 @@ def score_construct(
             if i < len(part_seqs) - 1:
                 if seq[-3:] in ("TAA", "TAG", "TGA"):
                     seq_len -= 3
+            if i > 0 and part_types[i] == "protein" and seq[:3] == "ATG":
+                if remove_internal_atg:
+                    seq_len -= 3  # ATG stripped, no Kozak
+                elif _uses_linker:
+                    expected_fusion_len += KOZAK_LEN  # ATG kept, Kozak inserted
             expected_fusion_len += seq_len
         # If the last part lacks a stop codon, fuse_inserts adds one (3 bp)
         if part_seqs[-1][-3:] not in ("TAA", "TAG", "TGA"):
             expected_fusion_len += 3
-
-        # Add expected length of the Kozak sequence (GCCACC, 6 bp) when an
-        # explicit linker separates two proteins. The Kozak is placed between
-        # the linker and the following protein to ensure translation initiation.
-        if has_explicit_linker and has_protein_protein_junction:
-            expected_fusion_len += 6
 
         # Compute proteins-only length (excluding linker parts)
         linker_total_len = sum(
@@ -796,31 +872,69 @@ def score_construct(
                 ),
             ))
 
-        # Check 3: Kozak (GCCACC) present upstream of second protein ATG in fusion (Major)
+        # Check 3: ATG management at non-N-terminal protein junctions (Major)
+        # When remove_internal_atg=True (default): each non-first protein must have
+        # its initiator ATG stripped so the ribosome reads one continuous ORF.
+        # When remove_internal_atg=False: each non-first protein keeps its ATG, and
+        # a Kozak sequence should be present just before it in the fused insert.
         if has_protein_protein_junction:
-            # Look for GCCACCATG in the insert — this is the Kozak + ATG
-            # that fuse_sequences places between the linker and the second gene
-            kozak_atg = "GCCACCATG"
-            kozak_found = kozak_atg in insert_seq
-            if kozak_found:
-                kozak_pos = insert_seq.index(kozak_atg)
-                kozak_detail = f"GCCACC+ATG found at position {kozak_pos} in fused insert"
+            if remove_internal_atg:
+                atg_removed_ok = True
+                atg_removed_detail = []
+                for i in range(1, len(part_seqs)):
+                    if part_types[i] == "protein" and part_seqs[i][:3] == "ATG":
+                        # The first ~18 bp of the original sequence (with ATG) should
+                        # NOT appear verbatim in the fused insert — that would mean
+                        # the ATG was not removed.
+                        original_start = clean_sequence(part_seqs[i])[:18]
+                        if original_start in clean_sequence(insert_seq):
+                            atg_removed_ok = False
+                            name = fusion_parts[i].get("name", f"part_{i}")
+                            atg_removed_detail.append(f"ATG not removed from '{name}'")
+                result.checks.append(Check(
+                    section="Biological Sanity",
+                    name="ATG removed from non-N-terminal protein(s) at junction",
+                    severity="Major",
+                    passed=atg_removed_ok,
+                    detail=(
+                        "; ".join(atg_removed_detail)
+                        if not atg_removed_ok
+                        else "Start codon correctly removed from non-terminal protein(s)"
+                    ),
+                ))
             else:
-                kozak_detail = "GCCACCATG not found in fused insert — Kozak missing upstream of second protein"
-            result.checks.append(Check(
-                section="Biological Sanity",
-                name="Kozak sequence at fusion junction",
-                severity="Critical",
-                passed=kozak_found,
-                detail=kozak_detail,
-            ))
+                # remove_internal_atg=False: verify ATG is retained and Kozak present
+                kozak_ok = True
+                kozak_detail = []
+                fused = clean_sequence(insert_seq)
+                for i in range(1, len(part_seqs)):
+                    if part_types[i] == "protein" and part_seqs[i][:3] == "ATG":
+                        name = fusion_parts[i].get("name", f"part_{i}")
+                        # Find where the original sequence (including ATG) appears
+                        original_start = clean_sequence(part_seqs[i])[:18]
+                        pos = fused.find(original_start)
+                        if pos < 0:
+                            kozak_ok = False
+                            kozak_detail.append(f"ATG not found for '{name}' — was it accidentally removed?")
+                        elif pos < 6 or fused[pos - 6:pos] != "GCCACC":
+                            kozak_ok = False
+                            kozak_detail.append(f"Kozak missing before '{name}' (found '{fused[max(0,pos-6):pos]}' instead of 'GCCACC')")
+                        else:
+                            kozak_detail.append(f"Kozak+ATG present before '{name}'")
+                result.checks.append(Check(
+                    section="Biological Sanity",
+                    name="Kozak+ATG preserved for non-N-terminal protein(s) at junction",
+                    severity="Major",
+                    passed=kozak_ok,
+                    detail="; ".join(kozak_detail) if kozak_detail else "No non-first proteins with ATG found",
+                ))
         else:
             result.checks.append(Check(
                 section="Biological Sanity",
-                name="Kozak sequence at fusion junction",
+                name="ATG removed from non-N-terminal protein(s) at junction",
                 severity="Info",
                 passed=True,
-                detail="Skipped — tag-protein junction, no internal Kozak expected",
+                detail="Skipped — tag-protein junction, no ATG removal expected",
             ))
 
     # ── Section 5: Output Verification ──────────────────────────────

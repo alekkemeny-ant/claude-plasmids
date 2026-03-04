@@ -194,8 +194,7 @@ Example: `fuse_inserts(inserts=[{"insert_id": "H2B"}, {"insert_id": "EGFP"}])`
 ### Codon management (both cases)
 The `fuse_inserts` tool automatically handles codons at junctions:
   - Non-last sequences: stop codon removed
-  - Last sequence: kept intact (ATG and stop codon preserved)
-  - ATG is never removed from any sequence
+  - Last sequence: kept intact (ATG removed for protein fusions, not if the protein is C-terminal to a tag, stop codon preserved)
 
 ## Expression Plasmid Biology Reference
 
@@ -235,6 +234,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 - **Wrong backbone retrieved**: When a user says "pcDNA3" they might mean pcDNA3.0, pcDNA3.1(+), or pcDNA3.1(-). Clarify if ambiguous.
 - **Wrong species**: A user expressing a gene in HEK293 (human) cells might want the mouse or rat ortholog. Always confirm the species.
 - **Wrong gene variant**: Many genes have multiple variants or family members (e.g., H2B has >20 subtypes with distinct expression patterns). Confirm the specific variant with the user when their request is ambiguous.
+- **Gene not reverse complemented for reverse orientated promoter** The gene should be reverse complemented, when the promoter it is being expressed from is also reversed. 
 
 ## Tool Reference
 

@@ -34,8 +34,10 @@ from .assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
     find_mcs_insertion_point,
+    resolve_insertion_point,
     clean_sequence,
     validate_dna,
+    reverse_complement,
     format_as_fasta,
     format_as_genbank,
     DEFAULT_FUSION_LINKER as _DEFAULT_FUSION_LINKER,
@@ -265,8 +267,9 @@ async def assemble_construct(args):
 
     # Resolve position
     pos = args.get("insertion_position")
+    auto_rc = False
     if pos is None and backbone_data:
-        pos = find_mcs_insertion_point(backbone_data)
+        pos, auto_rc = resolve_insertion_point(backbone_data, backbone_seq)
     if pos is None:
         return _error("Error: No insertion position. Provide insertion_position or use a backbone with MCS data.")
 
@@ -275,7 +278,8 @@ async def assemble_construct(args):
         insert_seq=insert_seq,
         insertion_position=pos,
         replace_region_end=args.get("replace_region_end"),
-        reverse_complement_insert=args.get("reverse_complement_insert", False),
+        reverse_complement_insert=args.get("reverse_complement_insert", False) or auto_rc,
+        backbone=backbone_data,
     )
 
     if not result.success:
@@ -378,28 +382,62 @@ async def validate_construct(args):
 
     if insert_seq:
         insert_seq = clean_sequence(insert_seq)
-        found = insert_seq in construct_seq
-        checks.append(f"Insert found in construct: {'PASS' if found else 'FAIL (CRITICAL)'}")
+
+        # Build search candidates: original, RC, and codon-trimmed variants.
+        # This handles reverse-complemented inserts (reverse-orientation backbones)
+        # as well as fusion parts that had their ATG or stop codon removed.
+        _has_atg = insert_seq[:3] == "ATG"
+        _has_stop = insert_seq[-3:] in ("TAA", "TAG", "TGA")
+        _candidates = [
+            (insert_seq, ""),
+            (reverse_complement(insert_seq), "reverse complement"),
+        ]
+        if _has_atg:
+            _no_atg = insert_seq[3:]
+            _candidates += [(_no_atg, "ATG removed"),
+                            (reverse_complement(_no_atg), "ATG removed, reverse complement")]
+        if _has_stop:
+            _no_stop = insert_seq[:-3]
+            _candidates += [(_no_stop, "stop removed"),
+                            (reverse_complement(_no_stop), "stop removed, reverse complement")]
+        if _has_atg and _has_stop:
+            _no_both = insert_seq[3:-3]
+            _candidates += [(_no_both, "ATG and stop removed"),
+                            (reverse_complement(_no_both), "ATG and stop removed, reverse complement")]
+
+        found_seq = None
+        found_desc = ""
+        for _seq, _desc in _candidates:
+            if len(_seq) >= 9 and _seq in construct_seq:
+                found_seq, found_desc = _seq, _desc
+                break
+
+        found = found_seq is not None
+        _detail_suffix = f" ({found_desc})" if found_desc else ""
+        checks.append(f"Insert found in construct: {'PASS' + _detail_suffix if found else 'FAIL (CRITICAL)'}")
+
         if found:
-            pos = construct_seq.index(insert_seq)
+            pos = construct_seq.index(found_seq)
             checks.append(f"Insert position: {pos}")
             exp = args.get("expected_insert_position")
             if exp is not None:
                 checks.append(f"Position correct: {'PASS' if pos == exp else 'FAIL — expected ' + str(exp)}")
-            start_ok = insert_seq[:3] == "ATG"
-            stop_ok = insert_seq[-3:] in ("TAA", "TAG", "TGA")
-            checks.append(f"Start codon: {'PASS' if start_ok else 'FAIL (Minor)'}")
-            checks.append(f"Stop codon: {'PASS' if stop_ok else 'FAIL (Minor)'}")
+            # Codon checks on the expressed (sense) orientation
+            expressed = reverse_complement(found_seq) if "reverse complement" in found_desc else found_seq
+            start_ok = expressed[:3] == "ATG"
+            stop_ok = expressed[-3:] in ("TAA", "TAG", "TGA")
+            checks.append(f"Start codon: {'PASS' if start_ok else 'Note — ATG absent (expected for non-N-terminal fusion parts)'}")
+            checks.append(f"Stop codon: {'PASS' if stop_ok else 'Note — stop absent (expected for non-C-terminal fusion parts)'}")
 
     if backbone_seq and insert_seq:
         backbone_seq = clean_sequence(backbone_seq)
-        if insert_seq in construct_seq:
-            ipos = construct_seq.index(insert_seq)
+        if found_seq and found_seq in construct_seq:
+            ipos = construct_seq.index(found_seq)
             up_ok = construct_seq[:ipos] == backbone_seq[:ipos]
-            dn_ok = construct_seq[ipos + len(insert_seq):] == backbone_seq[ipos:]
+            dn_ok = construct_seq[ipos + len(found_seq):] == backbone_seq[ipos:]
             checks.append(f"Backbone upstream preserved: {'PASS' if up_ok else 'FAIL (CRITICAL)'}")
             checks.append(f"Backbone downstream preserved: {'PASS' if dn_ok else 'FAIL (CRITICAL)'}")
-            exp_size = len(backbone_seq) + len(insert_seq)
+            exp_size = len(backbone_seq) + len(found_seq)
             checks.append(f"Expected size {exp_size} bp: {'PASS' if len(construct_seq) == exp_size else 'FAIL'}")
 
     return _text("Validation Report:\n" + "\n".join(f"  {c}" for c in checks))
@@ -596,7 +634,7 @@ async def fetch_gene_tool(args):
 
 @tool(
     "fuse_inserts",
-    "Fuse multiple coding sequences into a single CDS for protein tagging or fusion proteins. Handles start/stop codon management at junctions. Use for N-terminal tags (FLAG-GeneX), C-terminal tags (GeneX-FLAG), or multi-domain fusions.",
+    "Fuse multiple coding sequences into a single CDS for protein tagging or fusion proteins. Handles start/stop codon management at junctions. For protein fusions (EGFP-mCherry), the ATG is automatically removed from non-first protein sequences — set type='tag' to preserve ATG for small epitope tags (FLAG, HA, Myc). Use for N-terminal tags (FLAG-GeneX), C-terminal tags (GeneX-FLAG), or multi-domain fusions.",
     {
         "type": "object",
         "properties": {
@@ -608,20 +646,33 @@ async def fetch_gene_tool(args):
                         "insert_id": {"type": "string", "description": "Insert ID from library (e.g., 'FLAG_tag', 'EGFP')"},
                         "sequence": {"type": "string", "description": "Raw DNA sequence (if not using library ID)"},
                         "name": {"type": "string", "description": "Name for this sequence"},
+                        "type": {
+                            "type": "string",
+                            "enum": ["protein", "tag"],
+                            "description": "Sequence type: 'protein' (default) removes ATG from non-first positions to keep the reading frame in a fusion; 'tag' preserves ATG for small epitope tags (FLAG, HA, Myc, His) that either lack ATG or need it kept intact.",
+                        },
                     },
                 },
                 "description": "Ordered list of sequences to fuse (N-terminal first, C-terminal last)",
             },
             "linker": {"type": "string", "description": "Optional linker DNA sequence between fusion partners"},
+            "remove_internal_atg": {
+                "type": "boolean",
+                "description": "If true (default), the start codon (ATG) is removed from non-first protein sequences so the ribosome translates from the first ATG only — biologically correct for most protein fusions. Set to false to preserve all ATGs; a Kozak sequence will be inserted before each retained ATG.",
+                "default": True,
+            },
         },
         "required": ["inserts"],
     },
 )
 async def fuse_inserts_tool(args):
+    remove_internal_atg = args.get("remove_internal_atg", True)
     sequences = []
-    for item in args["inserts"]:
+    atg_removals = []  # names of sequences whose ATG will be stripped
+    for i, item in enumerate(args["inserts"]):
         seq = item.get("sequence")
         name = item.get("name", "")
+        seq_type = item.get("type", "protein")
         if not seq and item.get("insert_id"):
             ins = get_insert_by_id(item["insert_id"])
             if not ins:
@@ -630,13 +681,18 @@ async def fuse_inserts_tool(args):
             name = name or ins.get("name", item["insert_id"])
         if not seq:
             return _error(f"No sequence available for '{name or 'unknown'}'.")
-        sequences.append({"sequence": seq, "name": name})
+        sequences.append({"sequence": seq, "name": name, "type": seq_type})
+        # Track which non-first protein sequences have an ATG to be removed
+        if i > 0 and seq_type == "protein" and remove_internal_atg:
+            from .assembler import clean_sequence as _clean_seq
+            if _clean_seq(seq)[:3] == "ATG":
+                atg_removals.append(name or f"sequence_{i}")
 
     try:
         linker = args.get("linker")
         if linker is None:
             linker = _DEFAULT_FUSION_LINKER
-        fused = _fuse_sequences(sequences, linker)
+        fused = _fuse_sequences(sequences, linker, remove_internal_atg=remove_internal_atg)
     except ValueError as e:
         return _error(f"Fusion error: {e}")
 
@@ -649,6 +705,12 @@ async def fuse_inserts_tool(args):
     out += f"Start codon: {'Yes' if has_atg else 'No — MISSING'}\n"
     out += f"Stop codon: {'Yes' if has_stop else 'No — MISSING'}\n"
     out += f"In frame: {'Yes' if len(fused) % 3 == 0 else 'No'}\n"
+
+    if atg_removals:
+        out += f"\nNote: Start codon (ATG) removed from: {', '.join(atg_removals)}\n"
+        out += "This is correct for a protein fusion — translation initiates from the first ATG only.\n"
+    elif not remove_internal_atg:
+        out += "\nNote: ATG removal is disabled (remove_internal_atg=false). Internal ATGs are preserved and Kozak sequences are inserted before each.\n"
 
     # Provide ready-to-use sequence with ATG/stop added if missing
     expressible = fused

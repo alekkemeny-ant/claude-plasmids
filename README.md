@@ -6,20 +6,24 @@ The tool takes a backbone vector, insert gene, and optional parameters as input,
 
 ## Setup
 
-### 1. Create a virtual environment
+pLannotate (used for GenBank annotation) is only available via conda/bioconda and requires Python <3.13. The project uses a conda environment instead of a plain venv.
+
+### 1. Create the conda environment
+
+This installs all Python dependencies (including pLannotate and everything in `requirements.txt`) in one step:
 
 ```bash
 cd claude-plasmids
-
-python -m venv .venv
-source .venv/bin/activate   # macOS/Linux
-# .venv\Scripts\activate    # Windows
+conda env create -f environment.yml
+conda activate claude-plasmids
 ```
 
-### 2. Install dependencies
+### 2. Download pLannotate annotation databases
+
+One-time download (~1–2 GB) required for GenBank annotation:
 
 ```bash
-pip install -r requirements.txt
+plannotate setupdb
 ```
 
 ### 3. Configure your API key
@@ -97,8 +101,14 @@ Every nucleotide in the output comes from a verified source (library JSON, Addge
 ## Running Tests
 
 ```bash
-# All tests (unit + integration + pipeline)
+# All tests (unit + integration + pipeline), excluding slow pLannotate BLAST tests
+python -m pytest tests/ -v -m "not slow"
+
+# Include slow tests (requires plannotate setupdb)
 python -m pytest tests/ -v
+
+# Annotation tests only
+python -m pytest tests/test_annotation.py -v -m "not slow"
 
 # Pipeline tests only (rubric-scored assembly cases)
 python -m pytest tests/test_pipeline.py -v

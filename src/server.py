@@ -365,6 +365,11 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Insert length in bp (for GenBank annotation).",
                         "default": 0
+                    },
+                    "reverse_complement_insert": {
+                        "type": "boolean",
+                        "description": "True if insert was inserted in reverse complement orientation.",
+                        "default": False
                     }
                 },
                 "required": ["sequence", "output_format"]
@@ -853,6 +858,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         insert_name = arguments.get("insert_name", "")
         insert_position = arguments.get("insert_position", 0)
         insert_length = arguments.get("insert_length", 0)
+        rc_insert = arguments.get("reverse_complement_insert", False)
 
         try:
             if fmt == "raw":
@@ -868,6 +874,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     insert_name=insert_name,
                     insert_position=insert_position,
                     insert_length=insert_length,
+                    reverse_complement_insert=rc_insert,
                 )
             else:
                 return [TextContent(type="text", text=f"Unknown format: {fmt}. Use 'raw', 'fasta', or 'genbank'.")]

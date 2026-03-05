@@ -9,7 +9,20 @@ on verified sequences.
 
 import re
 from dataclasses import dataclass, field
+import io
 from typing import Optional
+from Bio import SeqIO                                                                                                     
+from Bio.SeqFeature import SeqFeature, FeatureLocation
+from bokeh.embed import json_item
+import json
+from plannotate.annotate import annotate
+from plannotate.bokeh_plot import get_bokeh                                                                        
+from plannotate.resources import get_seq_record                                                                           
+   
+    
+    
+                                                                                                                     
+
 
 # (GGGGS)x4 linker — default for protein-protein fusions
 DEFAULT_FUSION_LINKER = "GGTGGCGGTGGCTCTGGCGGTGGTGGTTCCGGTGGCGGTGGCTCCGGCGGTGGCGGTAGC"
@@ -295,6 +308,47 @@ def format_as_fasta(sequence: str, name: str, description: str = "") -> str:
     return "\n".join(lines) + "\n"
 
 
+def _build_annotated_record(
+    sequence: str,
+    df,
+    name: str,
+    backbone_name: str,
+    insert_name: str,
+    insert_position: int,
+    insert_length: int,
+    reverse_complement_insert: bool,
+):
+    """Build a BioPython SeqRecord from a pLannotate df, adding the insert feature if needed."""
+    record = get_seq_record(df, sequence, is_linear=False)
+    record.annotations["molecule_type"] = "DNA"
+    record.annotations["topology"] = "circular"
+
+    locus_name = re.sub(r'[^A-Za-z0-9_\-]', '_', name)[:16]
+    record.name = locus_name
+    record.id = locus_name
+    record.description = f"{insert_name} in {backbone_name}" if backbone_name else name
+
+    if insert_length > 0:
+        insert_start = insert_position
+        insert_end = insert_position + insert_length
+        already_annotated = any(
+            int(f.location.start) < insert_end and int(f.location.end) > insert_start
+            for f in record.features
+            if f.type not in ("source", "rep_origin")
+        )
+        if not already_annotated:
+            strand = -1 if reverse_complement_insert else 1
+            record.features.append(SeqFeature(
+                FeatureLocation(insert_start, insert_end, strand=strand),
+                type="CDS",
+                qualifiers={
+                    "label": [insert_name],
+                    "note": [f"Insert: {insert_name}"],
+                }
+            ))
+    return record
+
+
 def format_as_genbank(
     sequence: str,
     name: str,
@@ -302,80 +356,64 @@ def format_as_genbank(
     insert_name: str = "",
     insert_position: int = 0,
     insert_length: int = 0,
+    reverse_complement_insert: bool = False,
     features: Optional[list[dict]] = None,
 ) -> str:
-    """
-    Format an assembled construct as a minimal GenBank flat file.
+    """Format an assembled construct as a GenBank flat file using pLannotate for annotation."""
+    df = annotate(sequence, linear=False)
+    record = _build_annotated_record(
+        sequence, df, name, backbone_name, insert_name,
+        insert_position, insert_length, reverse_complement_insert,
+    )
+    handle = io.StringIO()
+    SeqIO.write(record, handle, "genbank")
+    return handle.getvalue()
+
+
+def get_plasmid_plot_json(df, linear: bool = False) -> str:
+    """Generate an interactive Bokeh plasmid map from a pLannotate annotation DataFrame.
 
     Args:
-        sequence: The assembled DNA sequence.
-        name: Locus name for the GenBank record.
-        backbone_name: Name of the backbone used.
-        insert_name: Name of the insert used.
-        insert_position: 0-based start position of the insert.
-        insert_length: Length of the insert in bp.
-        features: Optional list of feature dicts with name, start, end, type keys.
+        df: DataFrame returned by plannotate.annotate.annotate()
+        linear: If True, render as linear map; otherwise circular.
 
     Returns:
-        GenBank-formatted string.
+        JSON string suitable for Bokeh.embed.embed_item() in the browser.
     """
-    # Truncate locus name to 16 chars per GenBank spec
-    locus_name = re.sub(r'[^A-Za-z0-9_\-]', '_', name)[:16]
-    total_len = len(sequence)
+    
+    plot = get_bokeh(df, linear=linear)
+    plot.plot_width = 600
+    plot.plot_height = 600
+    plot.sizing_mode = "stretch_width"
+    return json.dumps(json_item(plot))
 
-    lines = []
 
-    # LOCUS line
-    lines.append(
-        f"LOCUS       {locus_name:<16} {total_len:>5} bp    DNA     circular   UNK"
+def export_genbank_with_plot(
+    sequence: str,
+    name: str,
+    backbone_name: str = "",
+    insert_name: str = "",
+    insert_position: int = 0,
+    insert_length: int = 0,
+    reverse_complement_insert: bool = False,
+) -> tuple[str, str]:
+    """Annotate a sequence, returning both a GenBank string and a Bokeh plot JSON.
+
+    Runs pLannotate once and reuses the result for both outputs.
+
+    Returns:
+        (genbank_str, plot_json_str)
+    """
+    df = annotate(sequence, linear=False)
+    record = _build_annotated_record(
+        sequence, df, name, backbone_name, insert_name,
+        insert_position, insert_length, reverse_complement_insert,
     )
-
-    # DEFINITION
-    lines.append(f"DEFINITION  Expression construct: {insert_name} in {backbone_name}.")
-
-    # FEATURES
-    lines.append("FEATURES             Location/Qualifiers")
-
-    # Source feature
-    lines.append(f"     source          1..{total_len}")
-    lines.append(f'                     /mol_type="other DNA"')
-    lines.append(f'                     /note="Assembled construct"')
-
-    # Insert feature
-    if insert_length > 0:
-        ins_start_1based = insert_position + 1
-        ins_end_1based = insert_position + insert_length
-        lines.append(f"     CDS             {ins_start_1based}..{ins_end_1based}")
-        lines.append(f'                     /label="{insert_name}"')
-        lines.append(f'                     /note="Insert: {insert_name}"')
-
-    # Additional features (offset those that come after the insertion point)
-    if features:
-        for feat in features:
-            feat_start = feat["start"]
-            feat_end = feat["end"]
-            # Offset features downstream of the insert
-            if feat_start >= insert_position:
-                feat_start += insert_length
-                feat_end += insert_length
-            feat_type = feat.get("type", "misc_feature")
-            feat_name = feat.get("name", "unknown")
-            # Pad feature type to match GenBank format
-            lines.append(f"     {feat_type:<16}{feat_start + 1}..{feat_end}")
-            lines.append(f'                     /label="{feat_name}"')
-
-    # ORIGIN + sequence
-    lines.append("ORIGIN")
-    seq_lower = sequence.lower()
-    for i in range(0, len(seq_lower), 60):
-        # Format: position (right-justified 9 chars), then 6 groups of 10 bases
-        chunk = seq_lower[i:i + 60]
-        groups = [chunk[j:j + 10] for j in range(0, len(chunk), 10)]
-        lines.append(f"{i + 1:>9} {' '.join(groups)}")
-
-    lines.append("//")
-
-    return "\n".join(lines) + "\n"
+    handle = io.StringIO()
+    SeqIO.write(record, handle, "genbank")
+    gbk = handle.getvalue()
+    plot_json = get_plasmid_plot_json(df, linear=False)
+    return gbk, plot_json
 
 
 def export_construct(
@@ -384,6 +422,7 @@ def export_construct(
     construct_name: str = "construct",
     backbone_name: str = "",
     insert_name: str = "",
+    reverse_complement_insert: bool = False,
     insert_length: int = 0,
     backbone_features: Optional[list[dict]] = None,
 ) -> str:
@@ -398,7 +437,7 @@ def export_construct(
         insert_name: Name of insert (for GenBank annotation).
         insert_length: Length of insert (for GenBank annotation).
         backbone_features: Original backbone features (for GenBank annotation).
-
+        reverse_complement_insert: bool = False
     Returns:
         Formatted sequence string.
 
@@ -426,6 +465,7 @@ def export_construct(
             insert_position=result.insert_position or 0,
             insert_length=insert_length,
             features=backbone_features,
+            reverse_complement_insert=reverse_complement_insert,
         )
 
     else:

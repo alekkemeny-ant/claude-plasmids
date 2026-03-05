@@ -16,6 +16,7 @@ import os
 import sys
 import logging
 from pathlib import Path
+from typing import Optional
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
@@ -43,7 +44,11 @@ from assembler import (
     validate_dna,
     format_as_fasta,
     format_as_genbank,
+    export_genbank_with_plot,
 )
+
+# Stores plot JSON from the most recent genbank export, read by the SSE handler
+_last_plot_json: Optional[str] = None
 
 try:
     from ncbi_integration import (
@@ -200,6 +205,7 @@ TOOLS = [
                 "insert_name": {"type": "string", "description": "Insert name for annotation", "default": ""},
                 "insert_position": {"type": "integer", "description": "Insert start position", "default": 0},
                 "insert_length": {"type": "integer", "description": "Insert length in bp", "default": 0},
+                "reverse_complement_insert": {"type": "boolean", "description": "True if insert was inserted in reverse complement orientation", "default": False},
             },
             "required": ["sequence", "output_format"],
         },
@@ -442,6 +448,8 @@ def execute_tool(name: str, args: dict) -> str:
             return out
 
         elif name == "export_construct":
+            global _last_plot_json
+            _last_plot_json = None
             seq = clean_sequence(args["sequence"])
             fmt = args["output_format"]
             cname = args.get("construct_name", "construct")
@@ -449,6 +457,7 @@ def execute_tool(name: str, args: dict) -> str:
             iname = args.get("insert_name", "")
             ipos = args.get("insert_position", 0)
             ilen = args.get("insert_length", 0)
+            rc_insert = args.get("reverse_complement_insert", False)
 
             if fmt == "raw":
                 return seq
@@ -456,10 +465,13 @@ def execute_tool(name: str, args: dict) -> str:
                 desc = f"{iname} in {bname}, {len(seq)} bp" if bname else f"{len(seq)} bp"
                 return format_as_fasta(seq, cname, desc)
             elif fmt in ("genbank", "gb"):
-                return format_as_genbank(
+                gbk, plot_json = export_genbank_with_plot(
                     sequence=seq, name=cname, backbone_name=bname,
                     insert_name=iname, insert_position=ipos, insert_length=ilen,
+                    reverse_complement_insert=rc_insert,
                 )
+                _last_plot_json = plot_json
+                return gbk
             else:
                 return f"Unknown format: {fmt}"
 
@@ -913,6 +925,9 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                                     ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
                                     event_data["download_filename"] = cname + ext
                                 safe_write(event_data)
+                                # Emit plasmid plot after genbank export
+                                if current_tool_name == "export_construct" and _last_plot_json:
+                                    safe_write({"type": "plot_data", "plot_json": json.loads(_last_plot_json)})
                                 tool_results.append({
                                     "type": "tool_result",
                                     "tool_use_id": current_tool_id,
@@ -1022,6 +1037,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Plasmid Designer</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.bokeh.org/bokeh/release/bokeh-2.4.1.min.js"></script>
 <style>
   :root {
     --brand-fig: #D97757;
@@ -1906,6 +1922,19 @@ function startToolBlock(toolName) {
   scrollToBottom();
 }
 
+function addPlasmidPlot(plotJson) {
+  const plotId = 'plot-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.innerHTML = '<div class="msg-bubble-assistant" style="margin-top:8px;padding:12px;width:100%;max-width:640px;">' +
+    '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Plasmid Map</div>' +
+    '<div id="' + plotId + '" style="width:100%;"></div>' +
+  '</div>';
+  getInner().appendChild(div);
+  Bokeh.embed.embed_item(plotJson, plotId);
+  scrollToBottom();
+}
+
 function addDownloadButton(container, content, filename) {
   const dlId = 'dl-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
   const div = document.createElement('div');
@@ -2020,6 +2049,7 @@ async function sendMessage() {
           case 'text_end': endTextBlock(); break;
           case 'tool_use_start': startToolBlock(event.tool); break;
           case 'tool_result': finishToolBlock(event.tool, event.input || {}, event.content, event.download_content, event.download_filename); break;
+          case 'plot_data': addPlasmidPlot(event.plot_json); break;
           case 'error':
             startTextBlock();
             appendTextDelta('Error: ' + event.content);

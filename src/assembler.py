@@ -9,13 +9,19 @@ on verified sequences.
 
 import re
 from dataclasses import dataclass, field
+import io
 from typing import Optional
 from Bio import SeqIO                                                                                                     
-from Bio.SeqFeature import SeqFeature, FeatureLocation                                                                    
-from plannotate.annotate import annotate                                                                                  
+from Bio.SeqFeature import SeqFeature, FeatureLocation
+from bokeh.embed import json_item
+import json
+from plannotate.annotate import annotate
+from plannotate.bokeh_plot import get_bokeh                                                                        
 from plannotate.resources import get_seq_record                                                                           
-import io   
-from plannotate.annotate import annotate                                                                                                                                           
+   
+    
+    
+                                                                                                                     
 
 
 # (GGGGS)x4 linker — default for protein-protein fusions
@@ -302,6 +308,47 @@ def format_as_fasta(sequence: str, name: str, description: str = "") -> str:
     return "\n".join(lines) + "\n"
 
 
+def _build_annotated_record(
+    sequence: str,
+    df,
+    name: str,
+    backbone_name: str,
+    insert_name: str,
+    insert_position: int,
+    insert_length: int,
+    reverse_complement_insert: bool,
+):
+    """Build a BioPython SeqRecord from a pLannotate df, adding the insert feature if needed."""
+    record = get_seq_record(df, sequence, is_linear=False)
+    record.annotations["molecule_type"] = "DNA"
+    record.annotations["topology"] = "circular"
+
+    locus_name = re.sub(r'[^A-Za-z0-9_\-]', '_', name)[:16]
+    record.name = locus_name
+    record.id = locus_name
+    record.description = f"{insert_name} in {backbone_name}" if backbone_name else name
+
+    if insert_length > 0:
+        insert_start = insert_position
+        insert_end = insert_position + insert_length
+        already_annotated = any(
+            int(f.location.start) < insert_end and int(f.location.end) > insert_start
+            for f in record.features
+            if f.type not in ("source", "rep_origin")
+        )
+        if not already_annotated:
+            strand = -1 if reverse_complement_insert else 1
+            record.features.append(SeqFeature(
+                FeatureLocation(insert_start, insert_end, strand=strand),
+                type="CDS",
+                qualifiers={
+                    "label": [insert_name],
+                    "note": [f"Insert: {insert_name}"],
+                }
+            ))
+    return record
+
+
 def format_as_genbank(
     sequence: str,
     name: str,
@@ -312,62 +359,61 @@ def format_as_genbank(
     reverse_complement_insert: bool = False,
     features: Optional[list[dict]] = None,
 ) -> str:
-    """
-    Format an assembled construct as a minimal GenBank flat file.
-
-    Args:
-        sequence: The assembled DNA sequence.
-        name: Locus name for the GenBank record.
-        backbone_name: Name of the backbone used.
-        insert_name: Name of the insert used.
-        insert_position: 0-based start position of the insert.
-        insert_length: Length of the insert in bp.
-        features: Optional list of feature dicts with name, start, end, type keys.
-
-    Returns:
-        GenBank-formatted string.
-    """                                                                                                                
-    # 1. Annotate with pLannotate
+    """Format an assembled construct as a GenBank flat file using pLannotate for annotation."""
     df = annotate(sequence, linear=False)
-    record = get_seq_record(df, sequence, is_linear=False)
-    record.annotations["molecule_type"] = "DNA"
-    record.annotations["topology"] = "circular"
-
-    # Set name/id so Benchling uses construct_name as the imported file name
-    locus_name = re.sub(r'[^A-Za-z0-9_\-]', '_', name)[:16]
-    record.name = locus_name
-    record.id = locus_name
-    record.description = f"{insert_name} in {backbone_name}" if backbone_name else name
-
-
-    if insert_length > 0:                                                                                                     
-        insert_start = insert_position                                                                                        
-        insert_end = insert_position + insert_length
-
-        # Check if pLannotate already annotated something overlapping the insert region
-        already_annotated = any(
-            int(f.location.start) < insert_end and int(f.location.end) > insert_start
-            for f in record.features
-            if f.type not in ("source", "rep_origin")  # skip generic features
-        )
-
-        if not already_annotated:
-            strand = -1 if reverse_complement_insert else 1
-            insert_feature = SeqFeature(
-                FeatureLocation(insert_start, insert_end, strand=strand),
-                type="CDS",
-                qualifiers={
-                    "label": [insert_name],
-                    "note": [f"Insert: {insert_name}"],
-                }
-            )
-            record.features.append(insert_feature)
-
+    record = _build_annotated_record(
+        sequence, df, name, backbone_name, insert_name,
+        insert_position, insert_length, reverse_complement_insert,
+    )
     handle = io.StringIO()
     SeqIO.write(record, handle, "genbank")
-    gbk_string = handle.getvalue()
+    return handle.getvalue()
+
+
+def get_plasmid_plot_json(df, linear: bool = False) -> str:
+    """Generate an interactive Bokeh plasmid map from a pLannotate annotation DataFrame.
+
+    Args:
+        df: DataFrame returned by plannotate.annotate.annotate()
+        linear: If True, render as linear map; otherwise circular.
+
+    Returns:
+        JSON string suitable for Bokeh.embed.embed_item() in the browser.
+    """
     
-    return gbk_string
+    plot = get_bokeh(df, linear=linear)
+    plot.plot_width = 600
+    plot.plot_height = 600
+    plot.sizing_mode = "stretch_width"
+    return json.dumps(json_item(plot))
+
+
+def export_genbank_with_plot(
+    sequence: str,
+    name: str,
+    backbone_name: str = "",
+    insert_name: str = "",
+    insert_position: int = 0,
+    insert_length: int = 0,
+    reverse_complement_insert: bool = False,
+) -> tuple[str, str]:
+    """Annotate a sequence, returning both a GenBank string and a Bokeh plot JSON.
+
+    Runs pLannotate once and reuses the result for both outputs.
+
+    Returns:
+        (genbank_str, plot_json_str)
+    """
+    df = annotate(sequence, linear=False)
+    record = _build_annotated_record(
+        sequence, df, name, backbone_name, insert_name,
+        insert_position, insert_length, reverse_complement_insert,
+    )
+    handle = io.StringIO()
+    SeqIO.write(record, handle, "genbank")
+    gbk = handle.getvalue()
+    plot_json = get_plasmid_plot_json(df, linear=False)
+    return gbk, plot_json
 
 
 def export_construct(

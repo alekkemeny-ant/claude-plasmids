@@ -167,7 +167,10 @@ export_construct(
 Present the user with:
 1. A summary of the construct (backbone, insert, total size, key features)
 2. The validation report (all checks passed / any warnings)
-3. The exported sequence in their requested format
+3. The exported sequence in their requested format. 
+
+
+**Do not describe the output file format or download instructions.** Only present the construct summary, validation report, and exported sequence.
 
 ## Protein Tagging & Fusions
 

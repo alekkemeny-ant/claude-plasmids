@@ -3,3 +3,7 @@ python-dotenv>=1.0.0
 requests>=2.31.0
 pytest>=8.0.0
 biopython>=1.83
+
+# pLannotate is NOT available on PyPI. Install via conda using environment.yml:
+#   conda env create -f environment.yml
+#   conda activate claude-plasmids

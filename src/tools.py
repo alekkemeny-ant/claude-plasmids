@@ -345,6 +345,7 @@ async def assemble_construct(args):
             "insert_name": {"type": "string", "description": "Insert name for annotation", "default": ""},
             "insert_position": {"type": "integer", "description": "Insert start position", "default": 0},
             "insert_length": {"type": "integer", "description": "Insert length in bp", "default": 0},
+            "reverse_complement_insert": {"type": "boolean", "description": "True if insert was inserted in reverse complement orientation", "default": False},
         },
         "required": ["sequence", "output_format"],
     },
@@ -357,6 +358,7 @@ async def export_construct(args):
     iname = args.get("insert_name", "")
     ipos = args.get("insert_position", 0)
     ilen = args.get("insert_length", 0)
+    rc_insert = args.get("reverse_complement_insert", False)
 
     try:
         if fmt == "raw":
@@ -368,6 +370,7 @@ async def export_construct(args):
             return _text(format_as_genbank(
                 sequence=seq, name=cname, backbone_name=bname,
                 insert_name=iname, insert_position=ipos, insert_length=ilen,
+                reverse_complement_insert=rc_insert,
             ))
         else:
             return _error(f"Unknown format: {fmt}")

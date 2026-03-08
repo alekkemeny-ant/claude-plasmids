@@ -49,8 +49,17 @@ from assembler import (
     export_genbank_with_plot,
 )
 
-# Stores plot JSON from the most recent genbank export, read by the SSE handler
-_last_plot_json: Optional[str] = None
+# Stores plot JSON from the most recent genbank export, read by the SSE handler.
+# Uses threading.local() so concurrent SSE requests don't see each other's plots.
+_thread_local = threading.local()
+
+
+def _get_last_plot_json() -> Optional[str]:
+    return getattr(_thread_local, "last_plot_json", None)
+
+
+def _set_last_plot_json(val: Optional[str]):
+    _thread_local.last_plot_json = val
 
 try:
     from ncbi_integration import (
@@ -592,8 +601,7 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             return out
 
         elif name == "export_construct":
-            global _last_plot_json
-            _last_plot_json = None
+            _set_last_plot_json(None)
             seq = clean_sequence(args["sequence"])
             fmt = args["output_format"]
             cname = args.get("construct_name", "construct")
@@ -609,13 +617,28 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 desc = f"{iname} in {bname}, {len(seq)} bp" if bname else f"{len(seq)} bp"
                 return format_as_fasta(seq, cname, desc)
             elif fmt in ("genbank", "gb"):
-                gbk, plot_json = export_genbank_with_plot(
-                    sequence=seq, name=cname, backbone_name=bname,
-                    insert_name=iname, insert_position=ipos, insert_length=ilen,
-                    reverse_complement_insert=rc_insert,
-                )
-                _last_plot_json = plot_json
-                return gbk
+                # export_genbank_with_plot requires pLannotate (conda-only).
+                # In pip environments it raises RuntimeError — fall back to
+                # format_as_genbank (no plot) rather than failing the export.
+                try:
+                    gbk, plot_json = export_genbank_with_plot(
+                        sequence=seq, name=cname, backbone_name=bname,
+                        insert_name=iname, insert_position=ipos, insert_length=ilen,
+                        reverse_complement_insert=rc_insert,
+                    )
+                    _set_last_plot_json(plot_json)
+                    return gbk
+                except RuntimeError as e:
+                    logger.info(
+                        f"pLannotate unavailable ({e}); falling back to "
+                        f"basic GenBank export without plasmid map."
+                    )
+                    return format_as_genbank(
+                        sequence=seq, name=cname, backbone_name=bname,
+                        insert_name=iname, insert_position=ipos,
+                        insert_length=ilen,
+                        reverse_complement_insert=rc_insert,
+                    )
             else:
                 return f"Unknown format: {fmt}"
 
@@ -1295,8 +1318,9 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                                     event_data["download_filename"] = cname + ext
                                 safe_write(event_data)
                                 # Emit plasmid plot after genbank export
-                                if current_tool_name == "export_construct" and _last_plot_json:
-                                    safe_write({"type": "plot_data", "plot_json": json.loads(_last_plot_json)})
+                                _plot = _get_last_plot_json()
+                                if current_tool_name == "export_construct" and _plot:
+                                    safe_write({"type": "plot_data", "plot_json": json.loads(_plot)})
                                 tool_results.append({
                                     "type": "tool_result",
                                     "tool_use_id": current_tool_id,

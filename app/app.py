@@ -1138,15 +1138,21 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         if is_cancelled() or disconnected:
             break
 
-        current_block_type = None
-        current_tool_name = None
-        current_tool_id = None
-        current_tool_input_json = ""
-        tool_results = []
         stop_reason = None
+        final_message = None
 
         # Retry loop for rate limits
         for retry_attempt in range(max_retries + 1):
+            # Reset per-API-call state on each retry. If a stream partially
+            # succeeded before rate-limiting, any tool_results accumulated
+            # reference tool_use_ids from the aborted stream — replaying them
+            # alongside the retry's fresh tool_use_ids causes a 400 error
+            # (tool_use/tool_result ID mismatch).
+            current_block_type = None
+            current_tool_name = None
+            current_tool_id = None
+            current_tool_input_json = ""
+            tool_results = []
             try:
                 with client.messages.stream(
                     model=model,
@@ -1262,6 +1268,12 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                 raise
 
         if is_cancelled() or disconnected:
+            break
+
+        # Guard: if all retries were exhausted (rate limit) or the stream
+        # broke before get_final_message, final_message is None. Don't try
+        # to append history — just exit the agent loop.
+        if final_message is None:
             break
 
         # Convert content blocks to plain dicts to strip extra SDK fields

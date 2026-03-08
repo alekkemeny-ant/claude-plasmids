@@ -76,6 +76,8 @@ try:
 except ImportError:
     ADDGENE_AVAILABLE = False
 
+from references import ReferenceTracker
+
 logger = logging.getLogger(__name__)
 
 LIBRARY_PATH = PROJECT_ROOT / "library"
@@ -325,7 +327,7 @@ TOOLS = [
 
 # ── Tool execution ──────────────────────────────────────────────────────
 
-def execute_tool(name: str, args: dict) -> str:
+def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = None) -> str:
     """Execute a tool call and return the result as a string."""
     try:
         if name == "search_backbones":
@@ -338,6 +340,8 @@ def execute_tool(name: str, args: dict) -> str:
             bb = get_backbone_by_id(args["backbone_id"])
             if not bb:
                 return f"Backbone '{args['backbone_id']}' not found in library."
+            if tracker:
+                tracker.add_backbone(bb)
             out = format_backbone_summary(bb)
             if args.get("include_sequence") and bb.get("sequence"):
                 out += f"\n\nDNA Sequence ({len(bb['sequence'])} bp):\n{bb['sequence'][:200]}... [{len(bb['sequence'])} bp total]"
@@ -353,6 +357,8 @@ def execute_tool(name: str, args: dict) -> str:
             ins = get_insert_by_id(args["insert_id"])
             if not ins:
                 return f"Insert '{args['insert_id']}' not found in library."
+            if tracker:
+                tracker.add_insert(ins)
             out = format_insert_summary(ins)
             if ins.get("sequence"):
                 out += f"\n\nDNA Sequence ({len(ins['sequence'])} bp):\n{ins['sequence']}"
@@ -396,6 +402,8 @@ def execute_tool(name: str, args: dict) -> str:
                     backbone_seq = backbone_data.get("sequence")
             if not backbone_seq:
                 return "Error: No backbone sequence available. Provide backbone_id (with sequence in library) or backbone_sequence."
+            if backbone_data and tracker:
+                tracker.add_backbone(backbone_data)
 
             # Resolve insert
             insert_seq = args.get("insert_sequence")
@@ -406,6 +414,8 @@ def execute_tool(name: str, args: dict) -> str:
                     insert_seq = insert_data.get("sequence")
             if not insert_seq:
                 return "Error: No insert sequence available. Provide insert_id or insert_sequence."
+            if insert_data and tracker:
+                tracker.add_insert(insert_data)
 
             # Resolve position
             pos = args.get("insertion_position")
@@ -527,6 +537,8 @@ def execute_tool(name: str, args: dict) -> str:
             plasmid = _get_addgene_plasmid(args["addgene_id"])
             if not plasmid:
                 return f"Could not fetch Addgene #{args['addgene_id']}"
+            if tracker:
+                tracker.add_addgene_plasmid(plasmid.__dict__)
             out = f"Addgene #{args['addgene_id']}: {plasmid.name}\n"
             out += f"Size: {plasmid.size_bp} bp\n"
             out += f"Resistance: {plasmid.bacterial_resistance}\n"
@@ -543,6 +555,8 @@ def execute_tool(name: str, args: dict) -> str:
             bb = integration.import_plasmid(args["addgene_id"], args.get("include_sequence", True))
             if not bb:
                 return f"Failed to import Addgene #{args['addgene_id']}"
+            if tracker:
+                tracker.add_backbone(bb)
             out = f"Imported: {bb['id']} ({bb['size_bp']} bp)"
             if bb.get("sequence"):
                 out += f", sequence: {len(bb['sequence'])} bp"
@@ -601,6 +615,8 @@ def execute_tool(name: str, args: dict) -> str:
             )
             if not result:
                 return "Could not fetch gene sequence from NCBI."
+            if tracker:
+                tracker.add_ncbi_gene(result)
             out = f"Gene: {result['symbol']} ({result['organism']})\n"
             out += f"Accession: {result['accession']}\n"
             out += f"Full name: {result['full_name']}\n"
@@ -619,6 +635,8 @@ def execute_tool(name: str, args: dict) -> str:
                         return f"Insert '{item['insert_id']}' not found in library."
                     seq = ins.get("sequence")
                     seq_name = seq_name or ins.get("name", item["insert_id"])
+                    if tracker:
+                        tracker.add_insert(ins)
                 if not seq:
                     return f"No sequence available for '{seq_name or 'unknown'}'."
                 sequences.append({"sequence": seq, "name": seq_name})
@@ -803,6 +821,8 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         write_event({"type": "error", "content": "Session not found"})
         return
 
+    tracker = ReferenceTracker()
+    export_called = False
     client = anthropic.Anthropic()
     history = session["history"]
     history.append({"role": "user", "content": user_message})
@@ -897,7 +917,9 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                                 if is_cancelled() or disconnected:
                                     break
                                 tool_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
-                                result_str = execute_tool(current_tool_name, tool_input)
+                                result_str = execute_tool(current_tool_name, tool_input, tracker)
+                                if current_tool_name == "export_construct":
+                                    export_called = True
                                 display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
                                 event_data = {
                                     "type": "tool_result",
@@ -988,6 +1010,17 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         for b in assistant_blocks
     ):
         assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
+
+    # Append formatted references only when a sequence file was exported this turn
+    if export_called and not (is_cancelled() or disconnected):
+        refs_text = tracker.format_references()
+        if refs_text:
+            ref_block = f"\n\n{refs_text}"
+            assistant_text += ref_block
+            assistant_blocks.append({"type": "text", "content": ref_block})
+            safe_write({"type": "text_start"})
+            safe_write({"type": "text_delta", "content": ref_block})
+            safe_write({"type": "text_end"})
 
     # Save assistant text and structured blocks to display messages
     if assistant_text or assistant_blocks:

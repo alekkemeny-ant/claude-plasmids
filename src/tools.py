@@ -15,9 +15,11 @@ Usage:
 
 import json
 from pathlib import Path
+from typing import Optional
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
+from .references import ReferenceTracker
 from .library import (
     search_backbones as _search_backbones,
     search_inserts as _search_inserts,
@@ -63,6 +65,28 @@ except ImportError:
     ADDGENE_AVAILABLE = False
 
 LIBRARY_PATH = Path(__file__).parent.parent / "library"
+
+# ── Per-run reference tracker ──────────────────────────────────────────
+# Callers (app/agent.py, evals/run_agent_evals.py) call set_tracker()
+# before running the agent and get_tracker() afterwards to retrieve
+# the accumulated references.
+
+_tracker: Optional[ReferenceTracker] = None
+
+
+def set_tracker(tracker: Optional[ReferenceTracker]) -> None:
+    global _tracker
+    _tracker = tracker
+
+
+def get_tracker() -> Optional[ReferenceTracker]:
+    return _tracker
+
+
+def _record(method_name: str, *args, **kwargs) -> None:
+    """Call a tracker method if a tracker is set, silently ignore otherwise."""
+    if _tracker is not None:
+        getattr(_tracker, method_name)(*args, **kwargs)
 
 
 def _text(s: str) -> dict:
@@ -113,6 +137,7 @@ async def get_backbone(args):
     bb = get_backbone_by_id(args["backbone_id"])
     if not bb:
         return _text(f"Backbone '{args['backbone_id']}' not found in library.")
+    _record("add_backbone", bb)
     out = format_backbone_summary(bb)
     if args.get("include_sequence") and bb.get("sequence"):
         out += f"\n\nDNA Sequence ({len(bb['sequence'])} bp):\n{bb['sequence'][:200]}... [{len(bb['sequence'])} bp total]"
@@ -153,6 +178,7 @@ async def get_insert(args):
     ins = get_insert_by_id(args["insert_id"])
     if not ins:
         return _text(f"Insert '{args['insert_id']}' not found in library.")
+    _record("add_insert", ins)
     out = format_insert_summary(ins)
     if ins.get("sequence"):
         out += f"\n\nDNA Sequence ({len(ins['sequence'])} bp):\n{ins['sequence']}"
@@ -252,6 +278,8 @@ async def assemble_construct(args):
             backbone_seq = backbone_data.get("sequence")
     if not backbone_seq:
         return _error("Error: No backbone sequence available. Provide backbone_id (with sequence in library) or backbone_sequence.")
+    if backbone_data:
+        _record("add_backbone", backbone_data)
 
     # Resolve insert
     insert_seq = args.get("insert_sequence")
@@ -262,6 +290,8 @@ async def assemble_construct(args):
             insert_seq = insert_data.get("sequence")
     if not insert_seq:
         return _error("Error: No insert sequence available. Provide insert_id or insert_sequence.")
+    if insert_data:
+        _record("add_insert", insert_data)
 
     # Resolve position
     pos = args.get("insertion_position")
@@ -447,6 +477,7 @@ async def get_addgene_plasmid(args):
     plasmid = _get_addgene_plasmid_fn(args["addgene_id"])
     if not plasmid:
         return _text(f"Could not fetch Addgene #{args['addgene_id']}")
+    _record("add_addgene_plasmid", plasmid.__dict__)
     out = f"Addgene #{args['addgene_id']}: {plasmid.name}\n"
     out += f"Size: {plasmid.size_bp} bp\n"
     out += f"Resistance: {plasmid.bacterial_resistance}\n"
@@ -476,6 +507,7 @@ async def import_addgene_to_library(args):
     bb = integration.import_plasmid(args["addgene_id"], args.get("include_sequence", True))
     if not bb:
         return _text(f"Failed to import Addgene #{args['addgene_id']}")
+    _record("add_backbone", bb)
     out = f"Imported: {bb['id']} ({bb['size_bp']} bp)"
     if bb.get("sequence"):
         out += f", sequence: {len(bb['sequence'])} bp"
@@ -586,6 +618,7 @@ async def fetch_gene_tool(args):
     )
     if not result:
         return _text("Could not fetch gene sequence from NCBI.")
+    _record("add_ncbi_gene", result)
     out = f"Gene: {result['symbol']} ({result['organism']})\n"
     out += f"Accession: {result['accession']}\n"
     out += f"Full name: {result['full_name']}\n"
@@ -628,6 +661,7 @@ async def fuse_inserts_tool(args):
                 return _error(f"Insert '{item['insert_id']}' not found in library.")
             seq = ins.get("sequence")
             name = name or ins.get("name", item["insert_id"])
+            _record("add_insert", ins)
         if not seq:
             return _error(f"No sequence available for '{name or 'unknown'}'.")
         sequences.append({"sequence": seq, "name": name})

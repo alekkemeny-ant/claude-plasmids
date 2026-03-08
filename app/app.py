@@ -83,6 +83,15 @@ try:
 except ImportError:
     ADDGENE_AVAILABLE = False
 
+try:
+    from fpbase_integration import (
+        search_fpbase as _search_fpbase,
+        fetch_fpbase_sequence as _fetch_fpbase,
+    )
+    FPBASE_AVAILABLE = True
+except ImportError:
+    FPBASE_AVAILABLE = False
+
 from references import ReferenceTracker
 
 logger = logging.getLogger(__name__)
@@ -136,11 +145,12 @@ TOOLS = [
     },
     {
         "name": "get_insert",
-        "description": "Get complete information about a specific insert, including its DNA sequence.",
+        "description": "Get complete information about a specific insert including its DNA sequence. Fallback chain: local library → FPbase (fluorescent proteins) → NCBI Gene. If the gene query is ambiguous across species, returns a disambiguation list instead of guessing.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "insert_id": {"type": "string", "description": "Insert ID or name"},
+                "insert_id": {"type": "string", "description": "Insert ID, gene symbol, or fluorescent protein name"},
+                "organism": {"type": "string", "description": "Species for NCBI fallback (e.g., 'human', 'mouse'). Required when the gene exists in multiple species."},
             },
             "required": ["insert_id"],
         },
@@ -216,16 +226,16 @@ TOOLS = [
     },
     {
         "name": "validate_construct",
-        "description": "Validate an assembled construct. Checks backbone preservation, insert presence/position/orientation, size, and biology.",
+        "description": "Validate an assembled construct against ground-truth sequences from the library/NCBI. Checks backbone preservation, insert presence/position/orientation, size, and codons. Prefer passing backbone_id/insert_id (the tool will fetch canonical sequences and verify identity). Only pass insert_sequence directly for custom/fused inserts — in that case identity cannot be verified.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "construct_sequence": {"type": "string", "description": "Assembled construct to validate"},
-                "backbone_id": {"type": "string", "description": "Expected backbone ID"},
-                "insert_id": {"type": "string", "description": "Expected insert ID"},
-                "backbone_sequence": {"type": "string", "description": "Expected backbone sequence"},
-                "insert_sequence": {"type": "string", "description": "Expected insert sequence"},
-                "expected_insert_position": {"type": "integer", "description": "Expected insert position"},
+                "backbone_id": {"type": "string", "description": "Backbone library ID (preferred — resolved to canonical sequence)"},
+                "insert_id": {"type": "string", "description": "Insert library ID or gene symbol (preferred — resolved to canonical sequence for ground-truth identity check)"},
+                "backbone_sequence": {"type": "string", "description": "Raw backbone sequence (only if backbone_id unavailable)"},
+                "insert_sequence": {"type": "string", "description": "Raw insert sequence (for custom/fused inserts — identity will NOT be verified)"},
+                "expected_insert_position": {"type": "integer", "description": "Expected 0-indexed insert position in the construct"},
             },
             "required": ["construct_sequence"],
         },
@@ -293,6 +303,17 @@ TOOLS = [
                 "organism": {"type": "string", "description": "Organism filter (e.g., 'human', 'mouse')"},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "search_fpbase",
+        "description": "Search FPbase (fpbase.org) for fluorescent proteins by name. FPbase is the canonical reference for engineered FPs like mRuby, mScarlet, mNeonGreen — these are NOT natural genes and won't be found in NCBI Gene. Use when the user wants an FP not in the local library.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Fluorescent protein name (e.g., 'mRuby', 'mScarlet')"},
+            },
+            "required": ["name"],
         },
     },
     {
@@ -387,12 +408,36 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             return "\n\n---\n\n".join(format_insert_summary(ins) for ins in results)
 
         elif name == "get_insert":
-            ins = get_insert_by_id(args["insert_id"])
+            ins = get_insert_by_id(args["insert_id"], organism=args.get("organism"))
             if not ins:
-                return f"Insert '{args['insert_id']}' not found in library."
+                return (
+                    f"Insert '{args['insert_id']}' not found in local library, "
+                    f"FPbase, or NCBI Gene. Please provide the DNA sequence "
+                    f"directly, or check the spelling/species."
+                )
+            # ── Disambiguation signal from NCBI fallback ──
+            if ins.get("needs_disambiguation"):
+                out = (
+                    f"⚠️ **Ambiguous gene query**: '{args['insert_id']}' matched "
+                    f"multiple entries across different species. I cannot "
+                    f"auto-select. Please specify which one:\n\n"
+                )
+                for opt in ins.get("options", []):
+                    out += (
+                        f"  - {opt.get('symbol', '?')} ({opt.get('organism', '?')}) — "
+                        f"{opt.get('full_name', '')}\n"
+                        f"    gene_id: {opt.get('gene_id', '?')}\n"
+                    )
+                out += (
+                    "\nEither tell me which species you want, or call "
+                    "fetch_gene with the specific gene_id."
+                )
+                return out
             if tracker:
                 tracker.add_insert(ins)
             out = format_insert_summary(ins)
+            if ins.get("sequence_warning"):
+                out += f"\n\n⚠️ {ins['sequence_warning']}\n"
             if ins.get("sequence"):
                 out += f"\n\nDNA Sequence ({len(ins['sequence'])} bp):\n{ins['sequence']}"
             return out
@@ -444,6 +489,13 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             if not insert_seq and args.get("insert_id"):
                 insert_data = get_insert_by_id(args["insert_id"])
                 if insert_data:
+                    if insert_data.get("needs_disambiguation"):
+                        return (
+                            f"Error: insert '{args['insert_id']}' is ambiguous "
+                            f"(matched multiple species on NCBI). Resolve with "
+                            f"get_insert(insert_id=..., organism=...) first, "
+                            f"then pass the resolved insert_id."
+                        )
                     insert_seq = insert_data.get("sequence")
             if not insert_seq:
                 return "Error: No insert sequence available. Provide insert_id or insert_sequence."
@@ -516,57 +568,156 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
 
         elif name == "validate_construct":
             construct_seq = clean_sequence(args["construct_sequence"])
+
+            # ── Resolve backbone (ground truth) ──
+            backbone_data = None
             backbone_seq = args.get("backbone_sequence")
-            if not backbone_seq and args.get("backbone_id"):
+            backbone_source = "agent-supplied"
+            if args.get("backbone_id"):
                 backbone_data = get_backbone_by_id(args["backbone_id"])
-                if backbone_data:
+                if backbone_data and backbone_data.get("sequence"):
                     backbone_seq = backbone_data.get("sequence")
+                    backbone_source = (
+                        f"library/Addgene ({backbone_data.get('id', args['backbone_id'])})"
+                    )
 
-            _, auto_rc = resolve_insertion_point(backbone_data, backbone_seq)
-
+            # ── Resolve insert (ground truth) ──
             insert_seq = args.get("insert_sequence")
-            if not insert_seq and args.get("insert_id"):
+            insert_source = "agent-supplied"
+            if args.get("insert_id"):
                 ins = get_insert_by_id(args["insert_id"])
-                if ins:
+                if ins and ins.get("sequence"):
                     insert_seq = ins.get("sequence")
+                    insert_source = f"library/NCBI ({ins.get('id', args['insert_id'])})"
+                    if ins.get("needs_disambiguation"):
+                        insert_source += " ⚠️ AMBIGUOUS"
 
             checks = []
-            # Valid DNA
-            
-            ok, errs = validate_dna(construct_seq)
-            checks.append(f"Valid DNA: {'PASS' if ok else 'FAIL'}")
+            warnings = []
+
+            # ── Valid DNA ──
+            ok, _errs = validate_dna(construct_seq)
+            checks.append(f"Valid DNA: {'PASS' if ok else 'FAIL (CRITICAL)'}")
             checks.append(f"Size: {len(construct_seq)} bp")
 
+            # ── Source provenance ──
+            if insert_seq:
+                checks.append(f"Insert sequence source: {insert_source}")
+                if insert_source == "agent-supplied":
+                    warnings.append(
+                        "Insert identity UNVERIFIED — validation only confirms the "
+                        "supplied sequence is present, not that it is the correct "
+                        "gene. Pass insert_id for ground-truth identity check."
+                    )
+            if backbone_seq:
+                checks.append(f"Backbone sequence source: {backbone_source}")
+
+            # ── Find insert in construct (try 8 variants) ──
+            found_seq = None
+            found_desc = ""
             if insert_seq:
                 insert_seq = clean_sequence(insert_seq)
-                if auto_rc:
-                  found = reverse_complement(insert_seq) in construct_seq
-                else:
-                  found = insert_seq in construct_seq
-                checks.append(f"Insert found in construct: {'PASS' if found else 'FAIL (CRITICAL)'}")
+                _has_atg = insert_seq[:3] == "ATG"
+                _has_stop = insert_seq[-3:] in ("TAA", "TAG", "TGA")
+                _candidates = [
+                    (insert_seq, ""),
+                    (reverse_complement(insert_seq), "reverse complement"),
+                ]
+                if _has_atg:
+                    _no_atg = insert_seq[3:]
+                    _candidates += [
+                        (_no_atg, "ATG removed"),
+                        (reverse_complement(_no_atg), "ATG removed, reverse complement"),
+                    ]
+                if _has_stop:
+                    _no_stop = insert_seq[:-3]
+                    _candidates += [
+                        (_no_stop, "stop removed"),
+                        (reverse_complement(_no_stop), "stop removed, reverse complement"),
+                    ]
+                if _has_atg and _has_stop:
+                    _no_both = insert_seq[3:-3]
+                    _candidates += [
+                        (_no_both, "ATG and stop removed"),
+                        (reverse_complement(_no_both), "ATG and stop removed, reverse complement"),
+                    ]
+
+                for _seq, _desc in _candidates:
+                    if len(_seq) >= 9 and _seq in construct_seq:
+                        found_seq, found_desc = _seq, _desc
+                        break
+
+                found = found_seq is not None
+                _suffix = f" ({found_desc})" if found_desc else ""
+                checks.append(
+                    f"Insert found in construct: {'PASS' + _suffix if found else 'FAIL (CRITICAL)'}"
+                )
+
+                # ── Orientation check against backbone MCS direction ──
+                if found and backbone_data and backbone_seq:
+                    try:
+                        _, auto_rc = resolve_insertion_point(backbone_data, backbone_seq)
+                        is_rc = "reverse complement" in found_desc
+                        if auto_rc != is_rc:
+                            checks.append(
+                                f"Orientation: FAIL (CRITICAL) — backbone MCS expects "
+                                f"{'RC' if auto_rc else 'forward'} insert but found "
+                                f"{'RC' if is_rc else 'forward'}"
+                            )
+                        else:
+                            checks.append(
+                                f"Orientation: PASS ({'RC' if is_rc else 'forward'}, "
+                                f"matches backbone MCS direction)"
+                            )
+                    except Exception as e:
+                        checks.append(f"Orientation: could not determine ({e})")
+
                 if found:
-                    pos = construct_seq.index(insert_seq)
+                    pos = construct_seq.index(found_seq)
                     checks.append(f"Insert position: {pos}")
                     exp = args.get("expected_insert_position")
                     if exp is not None:
-                        checks.append(f"Position correct: {'PASS' if pos == exp else 'FAIL — expected ' + str(exp)}")
-                    start_ok = insert_seq[:3] == "ATG"
-                    stop_ok = insert_seq[-3:] in ("TAA", "TAG", "TGA")
-                    checks.append(f"Start codon: {'PASS' if start_ok else 'FAIL (Minor)'}")
-                    checks.append(f"Stop codon: {'PASS' if stop_ok else 'FAIL (Minor)'}")
+                        checks.append(
+                            f"Position correct: {'PASS' if pos == exp else 'FAIL — expected ' + str(exp)}"
+                        )
+                    # Codon checks on the expressed (sense) orientation
+                    expressed = (
+                        reverse_complement(found_seq)
+                        if "reverse complement" in found_desc
+                        else found_seq
+                    )
+                    start_ok = expressed[:3] == "ATG"
+                    stop_ok = expressed[-3:] in ("TAA", "TAG", "TGA")
+                    checks.append(
+                        f"Start codon: {'PASS' if start_ok else 'Note — ATG absent (expected for non-N-terminal fusion parts)'}"
+                    )
+                    checks.append(
+                        f"Stop codon: {'PASS' if stop_ok else 'Note — stop absent (expected for non-C-terminal fusion parts)'}"
+                    )
 
-            if backbone_seq and insert_seq:
+            # ── Backbone preservation ──
+            if backbone_seq and found_seq:
                 backbone_seq = clean_sequence(backbone_seq)
-                if insert_seq in construct_seq:
-                    ipos = construct_seq.index(insert_seq)
-                    up_ok = construct_seq[:ipos] == backbone_seq[:ipos]
-                    dn_ok = construct_seq[ipos + len(insert_seq):] == backbone_seq[ipos:]
-                    checks.append(f"Backbone upstream preserved: {'PASS' if up_ok else 'FAIL (CRITICAL)'}")
-                    checks.append(f"Backbone downstream preserved: {'PASS' if dn_ok else 'FAIL (CRITICAL)'}")
-                    exp_size = len(backbone_seq) + len(insert_seq)
-                    checks.append(f"Expected size {exp_size} bp: {'PASS' if len(construct_seq) == exp_size else 'FAIL'}")
+                ipos = construct_seq.index(found_seq)
+                up_ok = construct_seq[:ipos] == backbone_seq[:ipos]
+                dn_ok = (
+                    construct_seq[ipos + len(found_seq):] == backbone_seq[ipos:]
+                )
+                checks.append(
+                    f"Backbone upstream preserved: {'PASS' if up_ok else 'FAIL (CRITICAL)'}"
+                )
+                checks.append(
+                    f"Backbone downstream preserved: {'PASS' if dn_ok else 'FAIL (CRITICAL)'}"
+                )
+                exp_size = len(backbone_seq) + len(found_seq)
+                checks.append(
+                    f"Expected size {exp_size} bp: {'PASS' if len(construct_seq) == exp_size else 'FAIL'}"
+                )
 
-            return "Validation Report:\n" + "\n".join(f"  {c}" for c in checks)
+            out = "Validation Report:\n" + "\n".join(f"  {c}" for c in checks)
+            if warnings:
+                out += "\n\n⚠️ Warnings:\n" + "\n".join(f"  - {w}" for w in warnings)
+            return out
 
         elif name == "search_addgene":
             if not ADDGENE_AVAILABLE:
@@ -669,6 +820,21 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             )
             if not result:
                 return "Could not fetch gene sequence from NCBI."
+            # Disambiguation signal — multiple species matched, no organism given
+            if result.get("needs_disambiguation"):
+                out = (
+                    f"⚠️ **Ambiguous gene**: '{args.get('gene_symbol', '?')}' "
+                    f"matched {len(result.get('options', []))} entries across "
+                    f"multiple species. Please specify organism:\n\n"
+                )
+                for opt in result.get("options", []):
+                    out += (
+                        f"  - {opt.get('symbol')} ({opt.get('organism')}) — "
+                        f"{opt.get('full_name')}\n"
+                        f"    gene_id: {opt.get('gene_id')}\n"
+                    )
+                out += "\nRetry with organism set, or pass gene_id directly."
+                return out
             if tracker:
                 tracker.add_ncbi_gene(result)
             out = f"Gene: {result['symbol']} ({result['organism']})\n"
@@ -677,6 +843,29 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"CDS length: {result['length']} bp\n"
             out += f"\nCDS Sequence ({result['length']} bp):\n{result['sequence']}"
             return out
+
+        elif name == "search_fpbase":
+            if not FPBASE_AVAILABLE:
+                return "FPbase integration not available."
+            results = _search_fpbase(args["name"], limit=5)
+            if not results:
+                return (
+                    f"No fluorescent proteins found on FPbase matching "
+                    f"'{args['name']}'. Try a different spelling or check "
+                    f"https://www.fpbase.org/"
+                )
+            lines = [f"FPbase results for '{args['name']}':"]
+            for r in results:
+                ex_em = ""
+                if r.get("ex_max") and r.get("em_max"):
+                    ex_em = f" — Ex/Em {r['ex_max']}/{r['em_max']} nm"
+                lines.append(
+                    f"  - {r['name']} (slug: {r['slug']}){ex_em}"
+                )
+            lines.append(
+                "\nUse get_insert with the FP name to retrieve the DNA sequence."
+            )
+            return "\n".join(lines)
 
         elif name == "fuse_inserts":
             sequences = []
@@ -688,7 +877,13 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 if not seq and item.get("insert_id"):
                     ins = get_insert_by_id(item["insert_id"])
                     if not ins:
-                        return f"Insert '{item['insert_id']}' not found in library."
+                        return f"Insert '{item['insert_id']}' not found in library, FPbase, or NCBI."
+                    if ins.get("needs_disambiguation"):
+                        return (
+                            f"Cannot fuse: insert '{item['insert_id']}' is ambiguous "
+                            f"(matched multiple species). Call get_insert first "
+                            f"with an organism, or specify gene_id directly."
+                        )
                     seq = ins.get("sequence")
                     seq_name = seq_name or ins.get("name", item["insert_id"])
                     if tracker:

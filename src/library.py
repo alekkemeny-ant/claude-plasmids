@@ -48,6 +48,23 @@ except ImportError:
     except ImportError:
         NCBI_AVAILABLE = False
 
+# Optional FPbase integration (fluorescent proteins — engineered, not in NCBI Gene)
+try:
+    from .fpbase_integration import (
+        fetch_fpbase_sequence as _fpbase_fetch,
+        looks_like_fp_name as _looks_like_fp,
+    )
+    FPBASE_AVAILABLE = True
+except ImportError:
+    try:
+        from fpbase_integration import (
+            fetch_fpbase_sequence as _fpbase_fetch,
+            looks_like_fp_name as _looks_like_fp,
+        )
+        FPBASE_AVAILABLE = True
+    except ImportError:
+        FPBASE_AVAILABLE = False
+
 
 def load_backbones() -> dict:
     """Load backbone library from JSON file."""
@@ -288,19 +305,22 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
         return None
 
 
-def get_insert_by_id(insert_id: str) -> Optional[dict]:
+def get_insert_by_id(insert_id: str, organism: Optional[str] = None) -> Optional[dict]:
     """
     Get a specific insert by ID or alias.
 
-    Checks the local library first. If not found and NCBI integration is
-    available, attempts to fetch the gene CDS from NCBI and caches the
-    result in inserts.json for future fast lookups.
+    Fallback chain: Local library → FPbase (for FP-like names) → NCBI Gene.
+
+    When the query is ambiguous (multiple species, gene family), returns a
+    dict with "needs_disambiguation": True and "options" list — the caller
+    should present these to the user rather than proceeding.
 
     Args:
-        insert_id: Insert identifier or alias
+        insert_id: Insert identifier, alias, FP name, or gene symbol
+        organism: Optional organism for NCBI fallback (e.g., "human", "mouse")
 
     Returns:
-        Insert dictionary or None if not found
+        Insert dictionary, disambiguation dict, or None if not found
     """
     data = load_inserts()
     id_normalized = normalize_name(insert_id)
@@ -316,26 +336,91 @@ def get_insert_by_id(insert_id: str) -> Optional[dict]:
     if alias_match is not None:
         return alias_match
 
-    # ── NCBI fallback ──
-    if not NCBI_AVAILABLE:
-        return None
-
-    # Skip NCBI fallback if the query doesn't look like a gene name
+    # Skip remote fallback if the query doesn't look like a gene/FP name
     # (e.g., "pcDNA3.1(+)" contains parens/dots → backbone, not a gene)
     if not re.match(r'^[A-Za-z0-9_\-]+$', insert_id.strip()):
         return None
 
+    alias_candidate = insert_id.strip()
+
+    # ── FPbase fallback (for engineered fluorescent proteins) ──
+    # Try FPbase FIRST when the name looks like an FP (mRuby, mScarlet, etc.)
+    # These are engineered proteins — NCBI Gene won't have them as genes,
+    # and a broader NCBI search can return wildly wrong results.
+    if FPBASE_AVAILABLE and _looks_like_fp(insert_id):
+        try:
+            logger.info(f"Insert '{insert_id}' looks like an FP; trying FPbase...")
+            fp_result = _fpbase_fetch(insert_id)
+            if fp_result and fp_result.get("sequence"):
+                insert = {
+                    "id": fp_result["name"],
+                    "name": fp_result["name"],
+                    "aliases": [alias_candidate] if alias_candidate != fp_result["name"] else [],
+                    "description": (
+                        f"Fluorescent protein from FPbase. "
+                        f"Ex/Em: {fp_result.get('ex_max','?')}/{fp_result.get('em_max','?')} nm. "
+                        f"{fp_result.get('url','')}"
+                    ),
+                    "category": "fluorescent_protein",
+                    "size_bp": fp_result["length"],
+                    "sequence": fp_result["sequence"],
+                    "source": "FPbase",
+                    "fpbase_slug": fp_result.get("slug"),
+                    "sequence_origin": fp_result.get("sequence_origin"),
+                }
+                # Warn if reverse-translated (not the published DNA)
+                if fp_result.get("sequence_origin") == "reverse_translated":
+                    insert["sequence_warning"] = (
+                        "DNA sequence was reverse-translated from the FPbase "
+                        "amino-acid sequence using human-preferred codons. "
+                        "Functionally equivalent but NOT the original "
+                        "published DNA sequence."
+                    )
+                    # Do NOT cache reverse-translated sequences — they're
+                    # synthetic, and we'd rather re-derive than treat as canon.
+                    logger.info(
+                        f"FPbase hit for '{insert_id}' (reverse-translated, "
+                        f"not caching)"
+                    )
+                    return insert
+
+                # Cache to local library (FPbase DNA is canonical)
+                existing_ids = {i["id"] for i in data["inserts"]}
+                if insert["id"] not in existing_ids:
+                    data["inserts"].append(insert)
+                    with open(LIBRARY_PATH / "inserts.json", "w") as f:
+                        json.dump(data, f, indent=2)
+                logger.info(
+                    f"Cached FPbase protein '{fp_result['name']}' ({fp_result['length']} bp)"
+                )
+                return insert
+        except Exception as e:
+            logger.warning(f"FPbase fallback failed for '{insert_id}': {e}")
+            # fall through to NCBI
+
+    # ── NCBI Gene fallback ──
+    if not NCBI_AVAILABLE:
+        return None
+
     try:
-        logger.info(f"Insert '{insert_id}' not in local library, searching NCBI...")
-        result = _ncbi_fetch_gene(gene_symbol=insert_id)
-        if not result or not result.get("sequence"):
+        logger.info(f"Insert '{insert_id}' not in library/FPbase, searching NCBI Gene...")
+        result = _ncbi_fetch_gene(gene_symbol=insert_id, organism=organism)
+        if not result:
+            logger.info(f"No NCBI result for '{insert_id}'")
+            return None
+
+        # Check for ambiguity signal from fetch_gene_sequence
+        if result.get("needs_disambiguation"):
+            logger.info(
+                f"NCBI search for '{insert_id}' returned multiple species; "
+                f"disambiguation required"
+            )
+            return result  # pass disambiguation dict up to caller
+
+        if not result.get("sequence"):
             logger.info(f"No NCBI CDS found for '{insert_id}'")
             return None
 
-        # Build insert dict — only store the original query as an alias if
-        # it looks like a plausible gene name (letters/digits/hyphens only,
-        # no parentheses or dots that indicate backbone IDs like "pcDNA3.1(+)")
-        alias_candidate = insert_id.strip()
         store_alias = (
             alias_candidate != result["symbol"]
             and re.match(r'^[A-Za-z0-9_\-]+$', alias_candidate)

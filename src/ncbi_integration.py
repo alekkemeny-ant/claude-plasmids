@@ -136,6 +136,28 @@ def fetch_gene_sequence(
         results = search_gene(gene_symbol, organism)
         if not results:
             return None
+
+        # Ambiguity check: if no organism was specified and the search
+        # returned multiple distinct species, DO NOT auto-pick the first.
+        # Return a disambiguation signal so the caller can ask the user.
+        if not organism and len(results) > 1:
+            organisms_seen = {r.get("organism", "") for r in results if r.get("organism")}
+            if len(organisms_seen) > 1:
+                return {
+                    "needs_disambiguation": True,
+                    "reason": "multiple_species",
+                    "query": gene_symbol,
+                    "options": [
+                        {
+                            "gene_id": r["gene_id"],
+                            "symbol": r["symbol"],
+                            "organism": r.get("organism", ""),
+                            "full_name": r.get("full_name", ""),
+                        }
+                        for r in results[:10]
+                    ],
+                }
+
         gene_id = results[0]["gene_id"]
 
     if not gene_id:

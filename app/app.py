@@ -249,7 +249,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "addgene_id": {"type": "string", "description": "Addgene catalog number"},
-                "fetch_sequence": {"type": "boolean", "description": "Fetch DNA sequence", "default": True},
+                "include_sequence": {"type": "boolean", "description": "Return full DNA sequence text in the response (default False — sequence is large). Set True only when you need the raw sequence.", "default": False},
             },
             "required": ["addgene_id"],
         },
@@ -347,10 +347,27 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
         elif name == "get_backbone":
             bb = get_backbone_by_id(args["backbone_id"])
             if not bb:
-                return f"Backbone '{args['backbone_id']}' not found in library."
+                return f"Backbone '{args['backbone_id']}' not found in library or on Addgene."
             if tracker:
                 tracker.add_backbone(bb)
             out = format_backbone_summary(bb)
+            if bb.get("unconfirmed"):
+                out += (
+                    "\n\n⚠️ **Unconfirmed Addgene match** — this backbone was "
+                    "fuzzy-matched from Addgene search results and has NOT been "
+                    "cached. Please confirm this is the intended plasmid before "
+                    "proceeding.\n"
+                )
+                alts = bb.get("addgene_search_alternatives", [])
+                if alts:
+                    out += "\nOther Addgene search results for this query:\n"
+                    for a in alts:
+                        out += f"  - {a.get('name')} (Addgene #{a.get('addgene_id')})\n"
+                out += (
+                    "\nIf correct, call `import_addgene_to_library` with the "
+                    "confirmed addgene_id to cache it. If wrong, ask the user "
+                    "for the exact plasmid name or Addgene catalog number."
+                )
             if args.get("include_sequence") and bb.get("sequence"):
                 out += f"\n\nDNA Sequence ({len(bb['sequence'])} bp):\n{bb['sequence'][:200]}... [{len(bb['sequence'])} bp total]"
             return out
@@ -566,9 +583,15 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"Size: {plasmid.size_bp} bp\n"
             out += f"Resistance: {plasmid.bacterial_resistance}\n"
             if plasmid.sequence:
-                out += f"Sequence: {len(plasmid.sequence)} bp available"
+                out += f"Sequence: {len(plasmid.sequence)} bp available\n"
+                # If explicitly requested, include the full sequence text so the
+                # agent can pass it directly to assemble_construct.
+                if args.get("include_sequence", False):
+                    out += f"\nSequence ({len(plasmid.sequence)} bp):\n{plasmid.sequence}"
+                else:
+                    out += "(Use get_backbone or import_addgene_to_library to make it available by ID, or set include_sequence=true to retrieve raw text.)"
             else:
-                out += "Sequence: not available"
+                out += "Sequence: not available (Addgene may require login for this plasmid's depositor sequence)"
             return out
 
         elif name == "import_addgene_to_library":

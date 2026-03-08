@@ -138,9 +138,20 @@ async def search_backbones(args):
 async def get_backbone(args):
     bb = get_backbone_by_id(args["backbone_id"])
     if not bb:
-        return _text(f"Backbone '{args['backbone_id']}' not found in library.")
+        return _text(f"Backbone '{args['backbone_id']}' not found in library or on Addgene.")
     _record("add_backbone", bb)
     out = format_backbone_summary(bb)
+    if bb.get("unconfirmed"):
+        out += (
+            "\n\n⚠️ **Unconfirmed Addgene match** — fuzzy-matched from search, "
+            "NOT cached. Confirm with user before proceeding.\n"
+        )
+        alts = bb.get("addgene_search_alternatives", [])
+        if alts:
+            out += "\nOther Addgene search results:\n"
+            for a in alts:
+                out += f"  - {a.get('name')} (Addgene #{a.get('addgene_id')})\n"
+        out += "\nIf correct, call import_addgene_to_library with the confirmed addgene_id."
     if args.get("include_sequence") and bb.get("sequence"):
         out += f"\n\nDNA Sequence ({len(bb['sequence'])} bp):\n{bb['sequence'][:200]}... [{len(bb['sequence'])} bp total]"
     return _text(out)

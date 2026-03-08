@@ -19,11 +19,17 @@ LIBRARY_PATH = Path(__file__).parent.parent / "library"
 logger = logging.getLogger(__name__)
 
 # Optional Addgene integration (gracefully degrades if not available)
+# Try relative import first (when loaded as a package), then fall back to
+# absolute import (when src/ is on sys.path directly, as app.py does).
 try:
     from .addgene_integration import AddgeneClient, AddgeneLibraryIntegration
     ADDGENE_AVAILABLE = True
 except ImportError:
-    ADDGENE_AVAILABLE = False
+    try:
+        from addgene_integration import AddgeneClient, AddgeneLibraryIntegration
+        ADDGENE_AVAILABLE = True
+    except ImportError:
+        ADDGENE_AVAILABLE = False
 
 # Optional NCBI integration
 try:
@@ -217,9 +223,11 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
 
         # Pick the best match: prefer exact normalized name match, else first result
         best = results[0]
+        exact_name_match = False
         for r in results:
             if normalize_name(r.get("name", "")) == id_normalized:
                 best = r
+                exact_name_match = True
                 break
 
         addgene_id = best.get("addgene_id")
@@ -246,7 +254,23 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
 
         backbone = plasmid.to_backbone_dict()
 
-        # Cache to local library for future fast lookups
+        # If we only fuzzy-matched the name, do NOT silently cache.
+        # Tag as unconfirmed so the agent can present it to the user first.
+        # The agent should call import_addgene_to_library with the confirmed
+        # addgene_id to commit it.
+        if not exact_name_match:
+            backbone["unconfirmed"] = True
+            backbone["addgene_search_alternatives"] = [
+                {"name": r.get("name"), "addgene_id": r.get("addgene_id")}
+                for r in results[:5]
+            ]
+            logger.info(
+                f"Addgene fuzzy match for '{backbone_id}' → #{addgene_id} "
+                f"({backbone.get('name', '?')}). Returning unconfirmed; not caching."
+            )
+            return backbone
+
+        # Exact-name match: cache to local library for future fast lookups
         data["backbones"].append(backbone)
         with open(LIBRARY_PATH / "backbones.json", "w") as f:
             json.dump(data, f, indent=2)

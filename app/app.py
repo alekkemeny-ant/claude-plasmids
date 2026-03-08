@@ -71,6 +71,8 @@ from library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    infer_species_from_cell_line,
+    check_gene_family_ambiguity,
 )
 
 try:
@@ -317,6 +319,17 @@ TOOLS = [
         },
     },
     {
+        "name": "get_cell_line_info",
+        "description": "Look up the species for a common cell line name (e.g., HEK293 → human, RAW 264.7 → mouse). Use when the user mentions a cell line but not a species, to infer the likely organism for gene retrieval. IMPORTANT: this infers the cell line's species — the user might still want a gene from a DIFFERENT species. Confirm with the user when the species matters.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "cell_line": {"type": "string", "description": "Cell line name (e.g., 'HEK293', 'RAW 264.7', 'NIH3T3')"},
+            },
+            "required": ["cell_line"],
+        },
+    },
+    {
         "name": "fetch_gene",
         "description": "Fetch the coding DNA sequence (CDS) for a gene from NCBI RefSeq. Returns the CDS sequence, accession, organism, and metadata.",
         "input_schema": {
@@ -441,8 +454,20 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                     f"FPbase, or NCBI Gene. Please provide the DNA sequence "
                     f"directly, or check the spelling/species."
                 )
-            # ── Disambiguation signal from NCBI fallback ──
+            # ── Disambiguation signals ──
             if ins.get("needs_disambiguation"):
+                reason = ins.get("reason", "")
+                if reason == "gene_family":
+                    out = (
+                        f"⚠️ **Ambiguous gene family**: '{args['insert_id']}' is "
+                        f"a family name, not a specific gene. I cannot "
+                        f"auto-select. Please specify which family member:\n\n"
+                    )
+                    for m in ins.get("members", []):
+                        out += f"  - {m}\n"
+                    out += "\nAsk the user which one they want, then retry with the specific name."
+                    return out
+                # Multiple species (NCBI fallback)
                 out = (
                     f"⚠️ **Ambiguous gene query**: '{args['insert_id']}' matched "
                     f"multiple entries across different species. I cannot "
@@ -894,6 +919,21 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 "\nUse get_insert with the FP name to retrieve the DNA sequence."
             )
             return "\n".join(lines)
+
+        elif name == "get_cell_line_info":
+            cl = args["cell_line"]
+            species = infer_species_from_cell_line(cl)
+            if species:
+                return (
+                    f"Cell line '{cl}' is from species: **{species}**\n"
+                    f"Note: confirm with the user before assuming the gene of "
+                    f"interest is also {species} — they may want a different "
+                    f"species' gene expressed in {cl} cells."
+                )
+            return (
+                f"Cell line '{cl}' not found in the known cell lines database. "
+                f"Ask the user what species it is."
+            )
 
         elif name == "fuse_inserts":
             sequences = []

@@ -41,11 +41,14 @@ Use the answers to search the library (`search_backbones`) and select the best-f
 **Be decisive**: When the user explicitly asks you to "pick", "choose", or "select" a backbone, make the decision yourself based on the information available in the conversation. Use `search_backbones` to find candidates and pick the best fit. If there is not enough information to make a well-informed choice, ask the necessary questions first. Do NOT ask the user to choose between options when they have delegated the decision to you.
 
 #### Insert selection
-- **If species not specified** → ask which species. Do NOT assume the species matches the cell type (e.g., a user might want mouse MyD88 in human HEK293 cells).
-- **If gene name is ambiguous** → present options. For example:
+- **If species not specified** → ask which species. Do NOT assume the species matches the cell type (e.g., a user might want mouse MyD88 in human HEK293 cells). Use `get_cell_line_info` to infer the cell line's species, but confirm before using that as the gene's species.
+- **If gene name is ambiguous** → present options. The `get_insert` tool enforces this: ambiguous family names return a disambiguation list instead of a sequence. Examples:
   - "TRAF" → ask which family member (TRAF1, TRAF2, TRAF3, TRAF4, TRAF5, TRAF6, TRAF7)
+  - "H2B" → ask which histone H2B variant (H2BC21/HIST1H2BJ is the most common choice for fusions, but there are 20+)
   - "RFP" → ask which variant (mCherry, tdTomato, mScarlet, DsRed)
+- **If `search_gene` returns >1 result spanning multiple species/variants** → present ALL options to the user. Do NOT pick the first one. The tools now enforce this: `get_insert`/`fetch_gene` without an organism will return a disambiguation list when multiple species match.
 - **Recognize alternative gene names**: SERPINE1 = PAI-1 = Planh1, etc. NCBI's alias data helps resolve these.
+- **Engineered fluorescent proteins** (mRuby, mScarlet, etc.) are NOT natural genes. They're in FPbase, not NCBI Gene. `get_insert` automatically routes FP-like names to FPbase first. You can also use `search_fpbase` directly.
 
 #### CRITICAL — Ask, then STOP
 
@@ -266,6 +269,16 @@ Use this knowledge to make design decisions and catch errors — but always use 
 |------|---------|
 | `search_gene` | Search NCBI Gene DB by symbol/name, returns gene IDs and metadata |
 | `fetch_gene` | Fetch CDS sequence from NCBI RefSeq by gene ID or symbol |
+
+### FPbase Integration (engineered fluorescent proteins)
+| Tool | Purpose |
+|------|---------|
+| `search_fpbase` | Search FPbase for fluorescent proteins (mRuby, mScarlet, etc.) |
+
+### Disambiguation Helpers
+| Tool | Purpose |
+|------|---------|
+| `get_cell_line_info` | Look up species for a cell line name (HEK293 → human, RAW 264.7 → mouse) |
 
 ### Addgene Integration
 | Tool | Purpose |

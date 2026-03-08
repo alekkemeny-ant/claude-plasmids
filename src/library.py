@@ -107,6 +107,112 @@ _PROMOTER_PROPERTIES = {
 }
 
 
+# ── Disambiguation aids ──────────────────────────────────────────────────
+#
+# GENE_FAMILIES: ambiguous query → list of specific family members.
+# When a user asks for "TRAF" or "H2B", the agent should present these
+# options rather than auto-picking one.
+GENE_FAMILIES = {
+    "TRAF": [
+        "TRAF1", "TRAF2", "TRAF3", "TRAF4", "TRAF5", "TRAF6", "TRAF7",
+    ],
+    "H2B": [
+        # Human histone H2B has 20+ variants. Most common in cell biology:
+        "H2BC21",  # HIST1H2BJ — broadly expressed, common fusion choice
+        "H2BC11",  # HIST1H2BK
+        "H2BC12",  # HIST1H2BN
+        "H2BC4",   # HIST1H2BC
+        "H2BC5",   # HIST1H2BD
+        "HIST1H2BJ",  # legacy alias for H2BC21
+    ],
+    "RFP": [
+        "mCherry", "tdTomato", "mScarlet", "mScarlet-I", "DsRed",
+        "DsRed2", "mRFP1", "TagRFP", "mKate2",
+    ],
+    "GFP": [
+        "EGFP", "sfGFP", "mNeonGreen", "mClover3", "GFP",
+    ],
+    "YFP": [
+        "EYFP", "Venus", "Citrine", "mVenus",
+    ],
+    "CFP": [
+        "ECFP", "Cerulean", "mTurquoise2", "mCerulean3",
+    ],
+    # TNF receptor associated factor → same as TRAF
+    "TNF RECEPTOR ASSOCIATED FACTOR": [
+        "TRAF1", "TRAF2", "TRAF3", "TRAF4", "TRAF5", "TRAF6", "TRAF7",
+    ],
+}
+
+# CELL_LINE_SPECIES: common cell line name → species.
+# Used so the agent can infer organism when the user only mentions a cell line.
+CELL_LINE_SPECIES = {
+    # Human
+    "HEK293": "human", "HEK293T": "human", "HEK-293": "human",
+    "293T": "human", "293": "human",
+    "HELA": "human", "HeLa": "human",
+    "A549": "human", "U2OS": "human", "U-2 OS": "human",
+    "HCT116": "human", "MCF7": "human", "MCF-7": "human",
+    "JURKAT": "human", "K562": "human", "THP-1": "human", "THP1": "human",
+    "HUH7": "human", "HUH-7": "human", "SH-SY5Y": "human",
+    # Mouse
+    "RAW264": "mouse", "RAW 264.7": "mouse", "RAW264.7": "mouse",
+    "RAW 264": "mouse",
+    "NIH3T3": "mouse", "NIH 3T3": "mouse", "3T3": "mouse",
+    "MEF": "mouse", "C2C12": "mouse", "4T1": "mouse",
+    "B16": "mouse", "CT26": "mouse", "MC38": "mouse",
+    # Hamster
+    "CHO": "hamster", "CHO-K1": "hamster",
+    # Monkey
+    "COS-7": "monkey", "COS7": "monkey", "VERO": "monkey",
+    # Rat
+    "PC12": "rat", "RAT1": "rat",
+    # Dog
+    "MDCK": "dog",
+    # Insect
+    "SF9": "insect", "SF21": "insect", "HIGH FIVE": "insect", "S2": "fly",
+}
+
+
+def check_gene_family_ambiguity(query: str) -> Optional[dict]:
+    """Check if a query is an ambiguous gene-family name.
+
+    Args:
+        query: Gene name the user provided
+
+    Returns:
+        None if unambiguous, or a dict with:
+        - family: the family name matched
+        - members: list of specific family members to present to the user
+    """
+    q_upper = query.strip().upper()
+    for family, members in GENE_FAMILIES.items():
+        if q_upper == family.upper():
+            return {"family": family, "members": members}
+    return None
+
+
+def infer_species_from_cell_line(cell_line: str) -> Optional[str]:
+    """Infer organism species from a cell line name.
+
+    Args:
+        cell_line: Cell line name (e.g., "HEK293", "RAW 264.7")
+
+    Returns:
+        Species string (e.g., "human", "mouse") or None if unknown
+    """
+    cl_upper = cell_line.strip().upper()
+    # Try direct lookup (case-insensitive)
+    for name, species in CELL_LINE_SPECIES.items():
+        if name.upper() == cl_upper:
+            return species
+    # Try substring (e.g., "RAW 264.7 macrophages" -> "RAW 264.7")
+    for name, species in CELL_LINE_SPECIES.items():
+        if name.upper() in cl_upper:
+            return species
+    return None
+
+
 def _backbone_searchable_text(backbone: dict) -> str:
     """Build a single lowercase string of all searchable backbone fields."""
     parts = [
@@ -335,6 +441,24 @@ def get_insert_by_id(insert_id: str, organism: Optional[str] = None) -> Optional
                 alias_match = insert
     if alias_match is not None:
         return alias_match
+
+    # ── Gene family ambiguity check ──
+    # Catch ambiguous family names (TRAF, H2B, RFP, ...) BEFORE hitting
+    # remote databases. NCBI would return something for "H2B" but it'd be
+    # an arbitrary variant — the user needs to choose.
+    family_check = check_gene_family_ambiguity(insert_id)
+    if family_check:
+        logger.info(
+            f"'{insert_id}' is an ambiguous gene family; "
+            f"{len(family_check['members'])} members"
+        )
+        return {
+            "needs_disambiguation": True,
+            "reason": "gene_family",
+            "query": insert_id,
+            "family": family_check["family"],
+            "members": family_check["members"],
+        }
 
     # Skip remote fallback if the query doesn't look like a gene/FP name
     # (e.g., "pcDNA3.1(+)" contains parens/dots → backbone, not a gene)

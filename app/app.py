@@ -309,7 +309,7 @@ TOOLS = [
     },
     {
         "name": "fuse_inserts",
-        "description": "Fuse multiple coding sequences into a single CDS for protein tagging or fusion proteins. Handles start/stop codon management. Use for N-terminal tags (FLAG-GeneX), C-terminal tags (GeneX-FLAG), or fusions.",
+        "description": "Fuse multiple coding sequences into a single CDS for protein tagging or fusion proteins. Handles start/stop codon management at junctions. For protein fusions (H2B-EGFP), the ATG is automatically removed from non-first 'protein' parts — set type='tag' to preserve ATG for small epitope tags (FLAG, HA, Myc). Use for N-terminal tags (FLAG-GeneX), C-terminal tags (GeneX-FLAG), or multi-domain fusions.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -318,14 +318,22 @@ TOOLS = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "insert_id": {"type": "string", "description": "Insert ID from library"},
-                            "sequence": {"type": "string", "description": "Raw DNA sequence"},
+                            "insert_id": {"type": "string", "description": "Insert ID from library (e.g., 'FLAG_tag', 'EGFP')"},
+                            "sequence": {"type": "string", "description": "Raw DNA sequence (if not using library ID)"},
                             "name": {"type": "string", "description": "Name for this sequence"},
+                            "type": {
+                                "type": "string",
+                                "enum": ["protein", "tag"],
+                                "description": "Sequence type: 'protein' (default) removes ATG from non-first positions to keep the reading frame in a fusion; 'tag' preserves ATG for small epitope tags (FLAG, HA, Myc, His) that either lack ATG or need it kept intact.",
+                            },
                         },
                     },
                     "description": "Ordered list of sequences to fuse (N-terminal first, C-terminal last)",
                 },
-                "linker": {"type": "string", "description": "Optional linker DNA between fusion partners"},
+                "linker": {
+                    "type": "string",
+                    "description": "Linker DNA sequence between fusion partners. Omit for default (GGGGS)x4 flexible linker. Pass empty string '' for direct concatenation (epitope tags).",
+                },
             },
             "required": ["inserts"],
         },

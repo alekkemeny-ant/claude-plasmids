@@ -38,7 +38,9 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
+    reverse_complement,
     find_mcs_insertion_point,
+    resolve_insertion_point,
     clean_sequence,
     validate_dna,
     format_as_fasta,
@@ -419,8 +421,9 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
 
             # Resolve position
             pos = args.get("insertion_position")
+            auto_rc = False
             if pos is None and backbone_data:
-                pos = find_mcs_insertion_point(backbone_data)
+                pos, auto_rc = resolve_insertion_point(backbone_data, backbone_seq)
             if pos is None:
                 return "Error: No insertion position. Provide insertion_position or use a backbone with MCS data."
 
@@ -429,7 +432,8 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 insert_seq=insert_seq,
                 insertion_position=pos,
                 replace_region_end=args.get("replace_region_end"),
-                reverse_complement_insert=args.get("reverse_complement_insert", False),
+                reverse_complement_insert=args.get("reverse_complement_insert", False) or auto_rc,
+                backbone=backbone_data,
             )
 
             if not result.success:
@@ -477,9 +481,12 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             construct_seq = clean_sequence(args["construct_sequence"])
             backbone_seq = args.get("backbone_sequence")
             if not backbone_seq and args.get("backbone_id"):
-                bb = get_backbone_by_id(args["backbone_id"])
-                if bb:
-                    backbone_seq = bb.get("sequence")
+                backbone_data = get_backbone_by_id(args["backbone_id"])
+                if backbone_data:
+                    backbone_seq = backbone_data.get("sequence")
+
+            _, auto_rc = resolve_insertion_point(backbone_data, backbone_seq)
+
             insert_seq = args.get("insert_sequence")
             if not insert_seq and args.get("insert_id"):
                 ins = get_insert_by_id(args["insert_id"])
@@ -488,13 +495,17 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
 
             checks = []
             # Valid DNA
+            
             ok, errs = validate_dna(construct_seq)
             checks.append(f"Valid DNA: {'PASS' if ok else 'FAIL'}")
             checks.append(f"Size: {len(construct_seq)} bp")
 
             if insert_seq:
                 insert_seq = clean_sequence(insert_seq)
-                found = insert_seq in construct_seq
+                if auto_rc:
+                  found = reverse_complement(insert_seq) in construct_seq
+                else:
+                  found = insert_seq in construct_seq
                 checks.append(f"Insert found in construct: {'PASS' if found else 'FAIL (CRITICAL)'}")
                 if found:
                     pos = construct_seq.index(insert_seq)
@@ -626,9 +637,11 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
 
         elif name == "fuse_inserts":
             sequences = []
-            for item in args["inserts"]:
+            atg_removals = []
+            for i, item in enumerate(args["inserts"]):
                 seq = item.get("sequence")
                 seq_name = item.get("name", "")
+                seq_type = item.get("type", "protein")
                 if not seq and item.get("insert_id"):
                     ins = get_insert_by_id(item["insert_id"])
                     if not ins:
@@ -639,7 +652,11 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                         tracker.add_insert(ins)
                 if not seq:
                     return f"No sequence available for '{seq_name or 'unknown'}'."
-                sequences.append({"sequence": seq, "name": seq_name})
+                sequences.append({"sequence": seq, "name": seq_name, "type": seq_type})
+                if i > 0 and seq_type == "protein":
+                    from assembler import clean_sequence as _clean_seq
+                    if _clean_seq(seq)[:3] == "ATG":
+                        atg_removals.append(seq_name or f"sequence_{i}")
 
             try:
                 fused = _fuse_sequences(sequences, args.get("linker"))
@@ -652,6 +669,9 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"Start codon: {'Yes' if fused[:3] == 'ATG' else 'No'}\n"
             out += f"Stop codon: {'Yes' if fused[-3:] in ('TAA', 'TAG', 'TGA') else 'No'}\n"
             out += f"In frame: {'Yes' if len(fused) % 3 == 0 else 'No'}\n"
+            if atg_removals:
+                out += f"\nNote: Start codon (ATG) removed from: {', '.join(atg_removals)}\n"
+                out += "This is correct for a protein fusion — translation initiates from the first ATG only.\n"
             out += f"\nFused sequence ({len(fused)} bp):\n{fused}"
             return out
 

@@ -989,6 +989,320 @@ AGENT_CASES = [
         transcript_assertions=["FPbase", "mRuby"],  # must route via FPbase
         tools_should_not_use=["search_gene"],  # must NOT try NCBI Gene
     ),
+
+    # ══════════════════════════════════════════════════════════════════
+    # P2: Phase 2 Advanced Design Features (Anthropic-assigned)
+    # ══════════════════════════════════════════════════════════════════
+    # These cases exercise the 5 Anthropic-assigned features from the
+    # Allen Institute Epics & Prioritization doc:
+    #   - Design Confidence Score (cryptic signals, CAI, Kozak, etc.)
+    #   - Bespoke Promoters (detect non-standard, offer 3 options, no loop)
+    #   - Intelligent Fusion Design (disorder-based internal fusion sites)
+    #   - Smart Mutation Design (curated GoF/LoF lookup + deterministic edit)
+    #   - Troubleshooting Mode (diagnose failure → propose remediation)
+    #
+    # Most of these are TRANSCRIPT-assertion evals (did the agent say/do
+    # the right thing?), not sequence-correctness evals. expected_backbone_id
+    # and expected_insert_id are still required by the schema but the key
+    # grading signal is transcript_assertions + tool usage.
+
+    # ── P2-DCS: Design Confidence Score ────────────────────────────────
+    AgentTestCase(
+        id="P2-DCS1",
+        name="Confidence score surfaces cryptic polyA warning",
+        prompt=(
+            "I have a custom CDS I want to express in HEK293 cells using "
+            "pcDNA3.1(+). Before I proceed, can you check if there are any "
+            "sequence-level problems? Here is the CDS:\n\n"
+            "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTG"
+            "GACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCC"
+            "ACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCC"
+            "TGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAATAAACTGCTTCAGCCGCT"
+            "ACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACG"
+            "TCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGG"
+            "TGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCA"
+            "AGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACG"
+            "TCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCC"
+            "ACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCA"
+            "TCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCC"
+            "TGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCG"
+            "CCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA"
+        ),
+        description=(
+            "The supplied CDS has an AATAAA cryptic polyA signal at ~position "
+            "200 (in the insert body, not the last 150bp). Agent should call "
+            "score_construct_confidence and surface the cryptic-polyA warning. "
+            "Tests the Design Confidence Score feature from Epic 3."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",  # the CDS is a modified EGFP; use for size ref
+        tags=["phase2", "confidence_score", "cryptic_polya"],
+        transcript_assertions=["polyA", "cryptic"],  # must mention the signal
+        user_persona=(
+            "You just want an analysis of the sequence. If the agent finds "
+            "the cryptic polyA signal, acknowledge it and say you will "
+            "fix it by codon-optimizing that region. No assembly needed."
+        ),
+        # Negative assertion: agent should NOT blindly assemble without warning
+    ),
+
+    AgentTestCase(
+        id="P2-DCS2",
+        name="Confidence score on clean CDS returns high score",
+        prompt=(
+            "I want to express EGFP in HEK293 using pcDNA3.1(+). Before "
+            "assembling, can you run a design confidence check on the EGFP "
+            "CDS to make sure there are no red flags?"
+        ),
+        description=(
+            "EGFP is a well-optimized CDS (CAI 0.91, good Kozak, no cryptic "
+            "signals). Agent should score it, report high confidence (≥85), "
+            "and proceed. Positive-path test for the confidence scorer."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",
+        expected_insertion_position=895,
+        tags=["phase2", "confidence_score", "positive"],
+        transcript_assertions=["confidence", "100"],  # EGFP scores 100/100
+        user_persona="Looks good, please proceed with assembly.",
+    ),
+
+    # ── P2-BP: Bespoke Promoters ───────────────────────────────────────
+    AgentTestCase(
+        id="P2-BP1",
+        name="p65 promoter reporter — detect bespoke, offer options, no loop",
+        prompt=(
+            "Design a p65 promoter reporter construct for stable expression "
+            "in HEK293 and RAW264.7 cells."
+        ),
+        description=(
+            "Direct from the Allen Epics doc. p65 (RELA) is NOT a standard "
+            "promoter. The agent should: (1) detect this is a bespoke "
+            "promoter request, (2) NOT get stuck in a search loop, (3) offer "
+            "the 3 options: research/Addgene, user-paste, or native upstream "
+            "fetch. The agent should also ask which species since the user "
+            "mentioned both human (HEK293) and mouse (RAW264.7) cells. "
+            "Reference: Epics doc, 'Bespoke promoters' section."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",  # reporter gene
+        tags=["phase2", "bespoke_promoter", "no_loop", "multiturn"],
+        transcript_assertions=[
+            "p65",           # agent acknowledges the promoter name
+            "upstream",      # agent offers the native-upstream option
+            "sequence",      # agent offers paste-sequence option
+        ],
+        # CRITICAL: agent should not call search_addgene or fetch_gene in
+        # a retry loop looking for "p65 promoter" — one search max before
+        # offering the 3-option decision.
+        user_persona=(
+            "I want a human p65 (RELA) promoter reporter — EGFP as the "
+            "reporter gene. I know there is a published p65 promoter on "
+            "Addgene, but I do not have the catalog number handy. Just "
+            "fetch the ~2kb upstream of the human RELA gene from NCBI "
+            "and use that. pcDNA3.1(+) backbone is fine for the rest."
+        ),
+    ),
+
+    AgentTestCase(
+        id="P2-BP2",
+        name="IFNβ promoter — user pastes sequence",
+        prompt=(
+            "I want to build an IFNβ promoter reporter. I have the IFNβ "
+            "promoter sequence — should I paste it?"
+        ),
+        description=(
+            "IFNβ (IFNB1) promoter is not standard. Agent should recognize "
+            "the bespoke promoter pattern, confirm it wants the user to "
+            "paste the sequence (option b in the decision tree), validate "
+            "it, and use it. Tests the paste-sequence branch."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="Luciferase",  # or EGFP — persona decides
+        tags=["phase2", "bespoke_promoter", "paste_sequence", "multiturn"],
+        transcript_assertions=["paste", "sequence"],
+        user_persona=(
+            "Yes, here is the ~300bp IFNβ minimal promoter:\n"
+            "AGTTTCACTTTCCATTTCCCAGAGTCAGGAGACTTCCTAAGTGCCTCAAGGGCTCAG"
+            "TTTAGAAATCCTACCAAGATGCGCACAGGCTGTTTCTCTCAGGCCTAGGCGGTGTCT"
+            "CCTGCTGTCCTTCCTGCCACAGCATCTGCTGAGCCTTCCCACCGGGCGTGGAGGAGG"
+            "AGCGCTCTCCTGATTTTCCTGCCGCTCCCCGGCAAAGCCTAGCACGGCGCGGAGCCT"
+            "ACCTGCCGTCCGCGAAGGAGTCAATCAGCGGAAGTTCATC\n"
+            "Use EGFP as the reporter, pcDNA3.1(+) backbone. Transient in "
+            "HEK293."
+        ),
+    ),
+
+    # ── P2-IF: Intelligent Fusion Design ───────────────────────────────
+    AgentTestCase(
+        id="P2-IF1",
+        name="Internal fusion site for buried-terminus protein",
+        prompt=(
+            "I want to tag human TP53 with EGFP for live-cell imaging in "
+            "U2OS cells. I've tried a C-terminal fusion before and it was "
+            "non-functional — the C-terminus of p53 is critical for "
+            "tetramerization. Can you suggest an internal insertion site "
+            "in a disordered loop instead?"
+        ),
+        description=(
+            "User explicitly asks for internal (not terminal) fusion. "
+            "Agent should call predict_fusion_sites on TP53's protein "
+            "sequence and offer ranked disordered regions. p53 has a "
+            "well-known intrinsically disordered N-terminal transactivation "
+            "domain (residues ~1-60) that should be detected. Tests the "
+            "Smart Fusion Design feature from Epic 3."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="TP53",
+        tags=["phase2", "intelligent_fusion", "internal_fusion", "multiturn"],
+        transcript_assertions=[
+            "disorder",      # agent should reference disorder prediction
+            "residue",       # agent should give specific residue positions
+        ],
+        user_persona=(
+            "Human TP53. The N-terminal disordered region sounds right — "
+            "let's insert EGFP into the most disordered window you find "
+            "there. Use the default (GGGGS)x4 linker on both sides of EGFP. "
+            "pcDNA3.1(+) is fine."
+        ),
+    ),
+
+    # ── P2-SM: Smart Mutation Design ───────────────────────────────────
+    AgentTestCase(
+        id="P2-SM1",
+        name="Constitutively active BRAF — curated V600E lookup",
+        prompt=(
+            "I want to express a constitutively active human BRAF in "
+            "HEK293 cells to study MEK/ERK signaling. What mutation should "
+            "I use?"
+        ),
+        description=(
+            "Agent should call lookup_known_mutations('BRAF', 'GoF') and "
+            "return V600E (and V600K) with phenotype + PMID. Then offer "
+            "to apply the mutation and assemble. Tests the Smart Mutation "
+            "feature — Tier A curated database."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="BRAF",
+        tags=["phase2", "smart_mutation", "gof", "curated_db", "multiturn"],
+        transcript_assertions=[
+            "V600E",         # must surface the canonical mutation
+            "constitutive",  # phenotype from the DB
+        ],
+        user_persona=(
+            "V600E is perfect. Please apply it to the human BRAF CDS and "
+            "assemble in pcDNA3.1(+) for transient expression. Show me "
+            "the original→new codon change."
+        ),
+    ),
+
+    AgentTestCase(
+        id="P2-SM2",
+        name="Loss-of-function PTEN — curated + premature stop fallback",
+        prompt=(
+            "I need a kinase-dead PTEN (loss of function) for a rescue "
+            "experiment in PTEN-null cells. What are my options?"
+        ),
+        description=(
+            "Agent should look up curated PTEN LoF mutations (C124S "
+            "catalytic-dead, R130G phosphatase-dead) and ALSO mention the "
+            "premature-stop option. Tests both Tier A (curated) and Tier B "
+            "(de novo LoF design)."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="PTEN",
+        tags=["phase2", "smart_mutation", "lof", "curated_db", "multiturn"],
+        transcript_assertions=[
+            "C124S",          # curated catalytic-dead
+            "phosphatase",    # phenotype
+        ],
+        user_persona=(
+            "C124S is the one I want (catalytic-dead). Human PTEN. "
+            "pcDNA3.1(+). Apply the mutation and assemble."
+        ),
+    ),
+
+    # ── P2-TM: Troubleshooting Mode ────────────────────────────────────
+    AgentTestCase(
+        id="P2-TM1",
+        name="Troubleshooting — no expression, agent diagnoses cryptic polyA",
+        prompt=(
+            "I previously designed a pcDNA3.1(+)-myGene construct with you "
+            "and tested it in the lab. I got zero fluorescence in HEK293, "
+            "even though transfection efficiency looked normal (control "
+            "plasmid worked). Here is the insert CDS I used:\n\n"
+            "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTG"
+            "GACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCC"
+            "ACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCC"
+            "TGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAATAAACTGCTTCAGCCGCT"
+            "ACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACG"
+            "TCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGG"
+            "TGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCA"
+            "AGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACG"
+            "TCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCC"
+            "ACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCA"
+            "TCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCC"
+            "TGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCG"
+            "CCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA\n\n"
+            "What went wrong and how do I fix it?"
+        ),
+        description=(
+            "The CDS has a cryptic AATAAA polyA signal at ~pos 200 that "
+            "would cause premature transcription termination → truncated/ "
+            "no protein → no fluorescence. Agent should: (1) acknowledge "
+            "the prior failure, (2) run score_construct_confidence or "
+            "manually inspect, (3) identify the cryptic polyA, (4) propose "
+            "specific remediation (codon-optimize around that position to "
+            "eliminate AATAAA). Tests Troubleshooting Mode from Epic 5. "
+            "Same CDS as P2-DCS1 but framed as a post-lab-failure scenario."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",  # modified EGFP, for size ref
+        tags=["phase2", "troubleshooting", "diagnosis", "multiturn"],
+        transcript_assertions=[
+            "polyA",         # must identify the cryptic polyA
+            "premature",     # explain the mechanism (premature termination)
+            "codon",         # propose codon-optimization as fix
+        ],
+        user_persona=(
+            "That makes sense — the cryptic polyA explains the truncated "
+            "transcript. Please log this outcome so I can refer back to "
+            "it. I will codon-optimize that region and come back with a "
+            "revised sequence."
+        ),
+    ),
+
+    AgentTestCase(
+        id="P2-TM2",
+        name="Troubleshooting — fusion misfolding, agent suggests internal site",
+        prompt=(
+            "Follow-up on a fusion design: I made a C-terminal EGFP fusion "
+            "to human Lamin A/C (LMNA) and it mislocalized — EGFP was "
+            "cytoplasmic instead of at the nuclear envelope. The LMNA "
+            "C-terminus has the CaaX farnesylation motif that targets it to "
+            "the membrane. I think the fusion blocked it. What should I try?"
+        ),
+        description=(
+            "Classic C-terminus-critical case: LMNA's C-terminal CaaX box "
+            "is essential for nuclear lamina targeting. Agent should "
+            "diagnose (C-term fusion buried the CaaX), and propose either "
+            "(a) N-terminal fusion, or (b) internal fusion via "
+            "predict_fusion_sites. Tests the troubleshooting-mode → "
+            "intelligent-fusion pipeline."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="LMNA",
+        tags=["phase2", "troubleshooting", "intelligent_fusion", "multiturn"],
+        transcript_assertions=[
+            "CaaX",          # agent acknowledges the farnesylation motif
+            "N-terminal",    # suggests N-term alternative
+        ],
+        user_persona=(
+            "N-terminal fusion sounds safer for this case. Use the "
+            "standard (GGGGS)x4 linker. Human LMNA, transient in U2OS, "
+            "pcDNA3.1(+)."
+        ),
+    ),
 ]
 
 

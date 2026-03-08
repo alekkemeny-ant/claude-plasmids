@@ -961,25 +961,33 @@ AGENT_CASES = [
 
     AgentTestCase(
         id="P1-SP7",
-        name="mRuby in HEK293 (FPbase retrieval, no hallucination)",
+        name="mRuby in HEK293 (FPbase routing, no hallucination, fail-closed)",
         prompt=(
             "Design an expression vector for mRuby in HEK293 cells, "
             "transient expression."
         ),
         description=(
             "mRuby is NOT in local library and NOT a natural gene. "
-            "Previously the agent would hallucinate or fetch wrong NCBI "
-            "result. Now FPbase integration should retrieve it correctly. "
-            "No hallucination: validation must confirm identity."
+            "Previously the agent hallucinated or fetched wrong NCBI result. "
+            "Now: FPbase routing confirms it's a real FP. Two valid outcomes: "
+            "(a) FPbase has DNA -> agent retrieves and assembles directly; "
+            "(b) FPbase has only AA -> agent tells user exactly what it found "
+            "and asks for DNA (fail-closed, no synthesis). Both pass the "
+            "'no hallucination' criterion — the key is the agent NEVER goes "
+            "to NCBI Gene for an engineered FP and NEVER synthesizes DNA."
         ),
         expected_backbone_id="pcDNA3.1(+)",
         expected_insert_id="mRuby",
         tags=["phase1", "acceptance", "fpbase", "no_hallucination", "multiturn"],
         user_persona=(
             "pcDNA3.1(+) is fine. If you find multiple mRuby variants, "
-            "I want the original mRuby (not mRuby2 or mRuby3)."
+            "I want the original mRuby (not mRuby2 or mRuby3). "
+            "If FPbase doesn't have the DNA sequence, suggest I look at "
+            "Addgene plasmid #40260 (pcDNA3-mRuby) and you can extract the "
+            "mRuby CDS from there."
         ),
-        # No transcript assertions — just needs correct sequence
+        transcript_assertions=["FPbase", "mRuby"],  # must route via FPbase
+        tools_should_not_use=["search_gene"],  # must NOT try NCBI Gene
     ),
 ]
 

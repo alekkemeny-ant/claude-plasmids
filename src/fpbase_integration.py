@@ -22,17 +22,6 @@ logger = logging.getLogger(__name__)
 FPBASE_API = "https://www.fpbase.org/api/proteins/"
 _HTTP_TIMEOUT = 10
 
-# Standard codon table for reverse-translation (human-preferred codons).
-# Used ONLY as a last resort when FPbase has the protein but no DNA seq.
-# When this is used, the result is flagged as reverse-translated.
-_CODON_TABLE = {
-    "A": "GCC", "R": "CGC", "N": "AAC", "D": "GAC", "C": "TGC",
-    "Q": "CAG", "E": "GAG", "G": "GGC", "H": "CAC", "I": "ATC",
-    "L": "CTG", "K": "AAG", "M": "ATG", "F": "TTC", "P": "CCC",
-    "S": "AGC", "T": "ACC", "W": "TGG", "Y": "TAC", "V": "GTG",
-    "*": "TGA",
-}
-
 # Common FP name patterns — used to decide when to try FPbase before NCBI.
 # Covers mCherry/mRuby/mScarlet (m + capital), eGFP/eYFP, tdTomato, etc.
 _FP_NAME_PATTERNS = [
@@ -149,19 +138,24 @@ def _first_state_attr(protein: dict, attr: str) -> Optional[int]:
 def fetch_fpbase_sequence(name_or_slug: str) -> Optional[dict]:
     """Fetch the DNA coding sequence for a fluorescent protein from FPbase.
 
-    FPbase stores amino-acid sequences for all proteins. Many entries also
-    include a DNA sequence via the GraphQL API or the protein detail
-    endpoint. When DNA is unavailable, this returns None (we do NOT
-    reverse-translate silently — that would violate the "no hallucinated
-    sequence" principle unless explicitly flagged).
+    FPbase stores amino-acid sequences for all proteins. Some entries also
+    include a DNA sequence via the REST detail endpoint or GraphQL API.
+
+    **Fail-closed**: If FPbase only has the amino-acid sequence (no published
+    DNA), this returns a metadata dict with sequence=None and no_dna=True.
+    We do NOT reverse-translate — that would synthesize sequence, violating
+    the project invariant that every nucleotide comes from a verified source.
+    The caller should present the AA sequence to the user and ask them to
+    provide the DNA sequence (e.g., from the original publication, Addgene,
+    or a codon-optimized version they trust).
 
     Args:
         name_or_slug: FP name (e.g., "mRuby") or FPbase slug (e.g., "mruby")
 
     Returns:
-        Dict with: name, slug, sequence (DNA), aa_sequence, length,
-        source, ex_max, em_max, sequence_origin ("fpbase_dna" or
-        "reverse_translated"). None if not found or no DNA available.
+        Dict with: name, slug, sequence (DNA or None), aa_sequence, length,
+        source, ex_max, em_max, url, no_dna (bool).
+        None if not found on FPbase at all.
     """
     query = _normalize_fp_query(name_or_slug)
 
@@ -184,43 +178,37 @@ def fetch_fpbase_sequence(name_or_slug: str) -> Optional[dict]:
         return None
 
     # Step 2: try to fetch DNA sequence from the protein detail endpoint.
-    # The REST list endpoint only returns AA seq; the GraphQL API and
-    # per-protein page may have the published DNA sequence.
+    # The REST list endpoint only returns AA seq; the detail endpoint or
+    # GraphQL API may have the published DNA sequence.
     dna_seq = _fetch_dna_via_graphql(slug)
 
-    # Step 3: if no DNA from FPbase, try reverse-translation from AA
-    # (flagged clearly — this is a synthetic codon-optimized sequence,
-    # not the published one).
-    sequence_origin = None
-    if dna_seq:
-        sequence_origin = "fpbase_dna"
-    elif aa_seq:
-        dna_seq = _reverse_translate(aa_seq)
-        if dna_seq:
-            sequence_origin = "reverse_translated"
-            logger.warning(
-                f"FPbase: no published DNA for '{slug}'; reverse-translated "
-                f"from AA sequence using human-preferred codons. This is "
-                f"functionally equivalent but NOT the original published "
-                f"sequence."
-            )
-
-    if not dna_seq:
-        logger.info(f"FPbase: found '{slug}' but no DNA sequence available")
-        return None
-
-    return {
+    base = {
         "name": best.get("name", slug),
         "slug": slug,
-        "sequence": dna_seq,
         "aa_sequence": aa_seq,
-        "length": len(dna_seq),
         "source": "FPbase",
-        "sequence_origin": sequence_origin,
         "ex_max": best.get("ex_max"),
         "em_max": best.get("em_max"),
         "url": f"https://www.fpbase.org/protein/{slug}/",
     }
+
+    if dna_seq:
+        base["sequence"] = dna_seq
+        base["length"] = len(dna_seq)
+        base["no_dna"] = False
+        return base
+
+    # Fail closed: found on FPbase but no DNA. Return metadata so the
+    # caller can tell the user what we found and ask for the DNA.
+    logger.info(
+        f"FPbase: found '{slug}' with AA sequence ({len(aa_seq)} aa) but "
+        f"no published DNA. Caller should ask user for DNA sequence."
+    )
+    base["sequence"] = None
+    base["length"] = 0
+    base["no_dna"] = True
+    base["aa_length"] = len(aa_seq)
+    return base
 
 
 def _fetch_dna_via_graphql(slug: str) -> Optional[str]:
@@ -280,32 +268,3 @@ def _is_dna(s: str) -> bool:
     s_clean = s.upper().replace(" ", "").replace("\n", "")
     valid = set("ACGTN")
     return all(c in valid for c in s_clean) and len(s_clean) >= 20
-
-
-def _reverse_translate(aa_seq: str) -> Optional[str]:
-    """Reverse-translate an amino-acid sequence to DNA using human-preferred codons.
-
-    Adds ATG start and TGA stop. Returns None if the AA sequence
-    contains unknown residues.
-    """
-    aa_seq = aa_seq.strip().upper()
-    if not aa_seq:
-        return None
-
-    # Strip leading M if present (we add ATG explicitly)
-    if aa_seq.startswith("M"):
-        aa_seq = aa_seq[1:]
-    # Strip trailing stop if present
-    if aa_seq.endswith("*"):
-        aa_seq = aa_seq[:-1]
-
-    codons = ["ATG"]  # start codon
-    for aa in aa_seq:
-        codon = _CODON_TABLE.get(aa)
-        if not codon:
-            logger.warning(f"Unknown amino acid '{aa}' in FP sequence; cannot reverse-translate")
-            return None
-        codons.append(codon)
-    codons.append("TGA")  # stop codon
-
-    return "".join(codons)

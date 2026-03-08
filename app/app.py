@@ -81,7 +81,6 @@ from library import (
     format_backbone_summary,
     format_insert_summary,
     infer_species_from_cell_line,
-    check_gene_family_ambiguity,
 )
 
 try:
@@ -476,6 +475,27 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                         out += f"  - {m}\n"
                     out += "\nAsk the user which one they want, then retry with the specific name."
                     return out
+                if reason == "fpbase_no_dna":
+                    out = (
+                        f"✅ Found on FPbase: **{ins.get('fpbase_name')}**\n"
+                        f"  URL: {ins.get('fpbase_url')}\n"
+                        f"  Protein: {ins.get('aa_length', '?')} amino acids"
+                    )
+                    if ins.get("ex_max") and ins.get("em_max"):
+                        out += f", Ex/Em {ins['ex_max']}/{ins['em_max']} nm"
+                    out += (
+                        f"\n\n❌ **No DNA sequence available on FPbase** — only "
+                        f"the amino-acid sequence is stored.\n\n"
+                        f"I cannot synthesize a DNA sequence (every nucleotide "
+                        f"must come from a verified source). Please ask the user "
+                        f"to provide the DNA coding sequence for "
+                        f"{ins.get('fpbase_name')} — they can find it in:\n"
+                        f"  - The original publication\n"
+                        f"  - Addgene (many FP plasmids have depositor sequences)\n"
+                        f"  - A codon-optimized version they have on hand\n\n"
+                        f"Then pass it as insert_sequence to assemble_construct."
+                    )
+                    return out
                 # Multiple species (NCBI fallback)
                 out = (
                     f"⚠️ **Ambiguous gene query**: '{args['insert_id']}' matched "
@@ -496,8 +516,6 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             if tracker:
                 tracker.add_insert(ins)
             out = format_insert_summary(ins)
-            if ins.get("sequence_warning"):
-                out += f"\n\n⚠️ {ins['sequence_warning']}\n"
             if ins.get("sequence"):
                 out += f"\n\n{_fmt_seq_for_agent(ins['sequence'], 'DNA Sequence')}"
             return out

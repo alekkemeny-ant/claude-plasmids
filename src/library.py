@@ -475,7 +475,34 @@ def get_insert_by_id(insert_id: str, organism: Optional[str] = None) -> Optional
         try:
             logger.info(f"Insert '{insert_id}' looks like an FP; trying FPbase...")
             fp_result = _fpbase_fetch(insert_id)
-            if fp_result and fp_result.get("sequence"):
+            if fp_result:
+                if fp_result.get("no_dna"):
+                    # FPbase found the protein but only has the amino-acid
+                    # sequence, not DNA. We do NOT reverse-translate (that
+                    # would synthesize sequence — against project invariant).
+                    # Return a signal so the agent can tell the user what
+                    # we found and ask for the DNA sequence.
+                    #
+                    # Importantly: return here rather than falling through to
+                    # NCBI. An FP found on FPbase is confirmed engineered —
+                    # NCBI Gene WILL return a wrong result if we try it.
+                    logger.info(
+                        f"FPbase confirmed '{fp_result['name']}' but no DNA; "
+                        f"signaling agent to ask user for sequence"
+                    )
+                    return {
+                        "needs_disambiguation": True,
+                        "reason": "fpbase_no_dna",
+                        "query": insert_id,
+                        "fpbase_name": fp_result["name"],
+                        "fpbase_url": fp_result.get("url"),
+                        "aa_sequence": fp_result.get("aa_sequence"),
+                        "aa_length": fp_result.get("aa_length"),
+                        "ex_max": fp_result.get("ex_max"),
+                        "em_max": fp_result.get("em_max"),
+                    }
+
+                # FPbase has DNA — build insert dict and cache
                 insert = {
                     "id": fp_result["name"],
                     "name": fp_result["name"],
@@ -490,24 +517,7 @@ def get_insert_by_id(insert_id: str, organism: Optional[str] = None) -> Optional
                     "sequence": fp_result["sequence"],
                     "source": "FPbase",
                     "fpbase_slug": fp_result.get("slug"),
-                    "sequence_origin": fp_result.get("sequence_origin"),
                 }
-                # Warn if reverse-translated (not the published DNA)
-                if fp_result.get("sequence_origin") == "reverse_translated":
-                    insert["sequence_warning"] = (
-                        "DNA sequence was reverse-translated from the FPbase "
-                        "amino-acid sequence using human-preferred codons. "
-                        "Functionally equivalent but NOT the original "
-                        "published DNA sequence."
-                    )
-                    # Do NOT cache reverse-translated sequences — they're
-                    # synthetic, and we'd rather re-derive than treat as canon.
-                    logger.info(
-                        f"FPbase hit for '{insert_id}' (reverse-translated, "
-                        f"not caching)"
-                    )
-                    return insert
-
                 # Cache to local library (FPbase DNA is canonical)
                 existing_ids = {i["id"] for i in data["inserts"]}
                 if insert["id"] not in existing_ids:

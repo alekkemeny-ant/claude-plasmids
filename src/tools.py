@@ -208,6 +208,16 @@ async def get_insert(args):
                 out += f"  - {m}\n"
             out += "\nAsk the user which one, then retry with the specific name."
             return _text(out)
+        if reason == "fpbase_no_dna":
+            out = (
+                f"✅ Found on FPbase: **{ins.get('fpbase_name')}** "
+                f"({ins.get('aa_length', '?')} aa, {ins.get('fpbase_url')})\n\n"
+                f"❌ **No DNA sequence available on FPbase** — only the AA "
+                f"sequence. I cannot synthesize DNA. Ask the user for the "
+                f"coding sequence (from the publication, Addgene, or their "
+                f"codon-optimized version), then pass it as insert_sequence."
+            )
+            return _text(out)
         # multiple_species
         out = (
             f"⚠️ **Ambiguous gene**: '{args['insert_id']}' matched multiple "
@@ -222,8 +232,6 @@ async def get_insert(args):
         return _text(out)
     _record("add_insert", ins)
     out = format_insert_summary(ins)
-    if ins.get("sequence_warning"):
-        out += f"\n\n⚠️ {ins['sequence_warning']}\n"
     if ins.get("sequence"):
         out += f"\n\nDNA Sequence ({len(ins['sequence'])} bp):\n{ins['sequence']}"
     return _text(out)

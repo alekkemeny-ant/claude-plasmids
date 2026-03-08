@@ -235,7 +235,6 @@ def _resolve_insert(
     for seq, is_rc, mod in candidates:
         if seq in construct_seq:
             return seq, is_rc, mod
-    breakpoint()
     return None, False, "not found"
 
 
@@ -257,7 +256,6 @@ def score_construct(
     output_format: Optional[str] = None,
     expect_reverse_complement: bool = False,
     fusion_parts: Optional[list[dict]] = None,
-    remove_internal_atg: bool = True,
 ) -> RubricResult:
     """
     Score an assembled construct against the Allen Institute rubric.
@@ -290,10 +288,6 @@ def score_construct(
                       to C-terminal. Each dict has keys: name (str),
                       sequence (str), type ("protein" or "tag"). Used for
                       fusion linker checks.
-        remove_internal_atg: If True (default), the rubric expects ATG to be
-                             removed from non-first protein parts (Check 3).
-                             If False, the rubric expects ATG to be preserved
-                             and checks for Kozak insertion instead.
 
     Returns:
         RubricResult with all checks populated.
@@ -786,11 +780,7 @@ def score_construct(
         # Compute expected fusion length: sum of all part sequences after
         # codon management. Linker parts included at full length.
         # Also accounts for stop codon added by fuse_inserts when missing.
-        # remove_internal_atg=True (default): ATG removed from non-first proteins.
-        # remove_internal_atg=False: ATG kept; Kozak (6 bp) is inserted before each
-        # retained ATG when a linker is present (inferred from junction type).
-        KOZAK_LEN = 6  # len("GCCACC")
-        _uses_linker = has_explicit_linker or has_protein_protein_junction
+        # ATG is always removed from non-first protein parts.
         expected_fusion_len = 0
         for i, seq in enumerate(part_seqs):
             if part_types[i] == "linker":
@@ -802,10 +792,7 @@ def score_construct(
                 if seq[-3:] in ("TAA", "TAG", "TGA"):
                     seq_len -= 3
             if i > 0 and part_types[i] == "protein" and seq[:3] == "ATG":
-                if remove_internal_atg:
-                    seq_len -= 3  # ATG stripped, no Kozak
-                elif _uses_linker:
-                    expected_fusion_len += KOZAK_LEN  # ATG kept, Kozak inserted
+                seq_len -= 3  # ATG stripped
             expected_fusion_len += seq_len
         # If the last part lacks a stop codon, fuse_inserts adds one (3 bp)
         if part_seqs[-1][-3:] not in ("TAA", "TAG", "TGA"):
@@ -873,61 +860,32 @@ def score_construct(
             ))
 
         # Check 3: ATG management at non-N-terminal protein junctions (Major)
-        # When remove_internal_atg=True (default): each non-first protein must have
-        # its initiator ATG stripped so the ribosome reads one continuous ORF.
-        # When remove_internal_atg=False: each non-first protein keeps its ATG, and
-        # a Kozak sequence should be present just before it in the fused insert.
+        # Each non-first protein must have its initiator ATG stripped so the
+        # ribosome reads one continuous ORF.
         if has_protein_protein_junction:
-            if remove_internal_atg:
-                atg_removed_ok = True
-                atg_removed_detail = []
-                for i in range(1, len(part_seqs)):
-                    if part_types[i] == "protein" and part_seqs[i][:3] == "ATG":
-                        # The first ~18 bp of the original sequence (with ATG) should
-                        # NOT appear verbatim in the fused insert — that would mean
-                        # the ATG was not removed.
-                        original_start = clean_sequence(part_seqs[i])[:18]
-                        if original_start in clean_sequence(insert_seq):
-                            atg_removed_ok = False
-                            name = fusion_parts[i].get("name", f"part_{i}")
-                            atg_removed_detail.append(f"ATG not removed from '{name}'")
-                result.checks.append(Check(
-                    section="Biological Sanity",
-                    name="ATG removed from non-N-terminal protein(s) at junction",
-                    severity="Major",
-                    passed=atg_removed_ok,
-                    detail=(
-                        "; ".join(atg_removed_detail)
-                        if not atg_removed_ok
-                        else "Start codon correctly removed from non-terminal protein(s)"
-                    ),
-                ))
-            else:
-                # remove_internal_atg=False: verify ATG is retained and Kozak present
-                kozak_ok = True
-                kozak_detail = []
-                fused = clean_sequence(insert_seq)
-                for i in range(1, len(part_seqs)):
-                    if part_types[i] == "protein" and part_seqs[i][:3] == "ATG":
+            atg_removed_ok = True
+            atg_removed_detail = []
+            for i in range(1, len(part_seqs)):
+                if part_types[i] == "protein" and part_seqs[i][:3] == "ATG":
+                    # The first ~18 bp of the original sequence (with ATG) should
+                    # NOT appear verbatim in the fused insert — that would mean
+                    # the ATG was not removed.
+                    original_start = clean_sequence(part_seqs[i])[:18]
+                    if original_start in clean_sequence(insert_seq):
+                        atg_removed_ok = False
                         name = fusion_parts[i].get("name", f"part_{i}")
-                        # Find where the original sequence (including ATG) appears
-                        original_start = clean_sequence(part_seqs[i])[:18]
-                        pos = fused.find(original_start)
-                        if pos < 0:
-                            kozak_ok = False
-                            kozak_detail.append(f"ATG not found for '{name}' — was it accidentally removed?")
-                        elif pos < 6 or fused[pos - 6:pos] != "GCCACC":
-                            kozak_ok = False
-                            kozak_detail.append(f"Kozak missing before '{name}' (found '{fused[max(0,pos-6):pos]}' instead of 'GCCACC')")
-                        else:
-                            kozak_detail.append(f"Kozak+ATG present before '{name}'")
-                result.checks.append(Check(
-                    section="Biological Sanity",
-                    name="Kozak+ATG preserved for non-N-terminal protein(s) at junction",
-                    severity="Major",
-                    passed=kozak_ok,
-                    detail="; ".join(kozak_detail) if kozak_detail else "No non-first proteins with ATG found",
-                ))
+                        atg_removed_detail.append(f"ATG not removed from '{name}'")
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="ATG removed from non-N-terminal protein(s) at junction",
+                severity="Major",
+                passed=atg_removed_ok,
+                detail=(
+                    "; ".join(atg_removed_detail)
+                    if not atg_removed_ok
+                    else "Start codon correctly removed from non-terminal protein(s)"
+                ),
+            ))
         else:
             result.checks.append(Check(
                 section="Biological Sanity",

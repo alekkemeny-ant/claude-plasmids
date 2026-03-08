@@ -656,17 +656,11 @@ async def fetch_gene_tool(args):
                 "description": "Ordered list of sequences to fuse (N-terminal first, C-terminal last)",
             },
             "linker": {"type": "string", "description": "Optional linker DNA sequence between fusion partners"},
-            "remove_internal_atg": {
-                "type": "boolean",
-                "description": "If true (default), the start codon (ATG) is removed from non-first protein sequences so the ribosome translates from the first ATG only — biologically correct for most protein fusions. Set to false to preserve all ATGs; a Kozak sequence will be inserted before each retained ATG.",
-                "default": True,
-            },
         },
         "required": ["inserts"],
     },
 )
 async def fuse_inserts_tool(args):
-    remove_internal_atg = args.get("remove_internal_atg", True)
     sequences = []
     atg_removals = []  # names of sequences whose ATG will be stripped
     for i, item in enumerate(args["inserts"]):
@@ -683,7 +677,7 @@ async def fuse_inserts_tool(args):
             return _error(f"No sequence available for '{name or 'unknown'}'.")
         sequences.append({"sequence": seq, "name": name, "type": seq_type})
         # Track which non-first protein sequences have an ATG to be removed
-        if i > 0 and seq_type == "protein" and remove_internal_atg:
+        if i > 0 and seq_type == "protein":
             from .assembler import clean_sequence as _clean_seq
             if _clean_seq(seq)[:3] == "ATG":
                 atg_removals.append(name or f"sequence_{i}")
@@ -692,7 +686,7 @@ async def fuse_inserts_tool(args):
         linker = args.get("linker")
         if linker is None:
             linker = _DEFAULT_FUSION_LINKER
-        fused = _fuse_sequences(sequences, linker, remove_internal_atg=remove_internal_atg)
+        fused = _fuse_sequences(sequences, linker)
     except ValueError as e:
         return _error(f"Fusion error: {e}")
 
@@ -709,8 +703,6 @@ async def fuse_inserts_tool(args):
     if atg_removals:
         out += f"\nNote: Start codon (ATG) removed from: {', '.join(atg_removals)}\n"
         out += "This is correct for a protein fusion — translation initiates from the first ATG only.\n"
-    elif not remove_internal_atg:
-        out += "\nNote: ATG removal is disabled (remove_internal_atg=false). Internal ATGs are preserved and Kozak sequences are inserted before each.\n"
 
     # Provide ready-to-use sequence with ATG/stop added if missing
     expressible = fused

@@ -1395,7 +1395,7 @@ def _get_assistant_text(message) -> str:
 
 async def run_agent(
     prompt: str,
-    model: str = "claude-opus-4-5-20251101",
+    model: str = "claude-opus-4-6",
     max_turns: int = 15,
     verbose: bool = False,
     simulated_user: Optional[SimulatedUser] = None,
@@ -1553,10 +1553,10 @@ async def run_agent(
 
 async def run_agent_eval_case(
     tc: AgentTestCase,
-    model: str = "claude-opus-4-5-20251101",
+    model: str = "claude-opus-4-6",
     verbose: bool = False,
     use_judge: bool = False,
-    judge_model: str = "claude-sonnet-4-5-20250929",
+    judge_model: str = "claude-sonnet-4-6",
 ) -> tuple[Optional[RubricResult], AgentTrace]:
     """Run a single agent eval case."""
     if verbose:
@@ -1791,10 +1791,10 @@ async def run_agent_eval_case(
 
 async def run_agent_eval_suite(
     cases: list[AgentTestCase],
-    model: str = "claude-opus-4-5-20251101",
+    model: str = "claude-opus-4-6",
     verbose: bool = False,
     use_judge: bool = False,
-    judge_model: str = "claude-sonnet-4-5-20250929",
+    judge_model: str = "claude-sonnet-4-6",
 ) -> dict:
     """Run a suite of agent eval cases."""
     results = []
@@ -1921,7 +1921,7 @@ def main():
     parser.add_argument("--verbose", "-v", action="store_true", help="Show full agent trace")
     parser.add_argument("--json", action="store_true", help="Output results as JSON")
     parser.add_argument(
-        "--model", type=str, default="claude-opus-4-5-20251101",
+        "--model", type=str, default="claude-opus-4-6",
         help="Model to use (default: opus)",
     )
     parser.add_argument(
@@ -1929,7 +1929,7 @@ def main():
         help="Enable LLM-as-judge grading (off by default to save cost)",
     )
     parser.add_argument(
-        "--judge-model", type=str, default="claude-sonnet-4-5-20250929",
+        "--judge-model", type=str, default="claude-sonnet-4-6",
         help="Model for LLM judge (default: sonnet)",
     )
     args = parser.parse_args()

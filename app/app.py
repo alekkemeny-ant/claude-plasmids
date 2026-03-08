@@ -1430,7 +1430,7 @@ _cancelled_sessions: set[str] = set()
 _sessions_lock = threading.Lock()
 SESSIONS_FILE = Path(__file__).parent / ".sessions.json"
 
-MODEL = "claude-opus-4-5-20251101"
+MODEL = "claude-opus-4-6"
 
 
 def _serialize_content(content):
@@ -2324,7 +2324,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <div class="input-meta">
           <select id="model-select" class="model-select">
             <option value="claude-opus-4-6">Opus 4.6</option>
-            <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
+            <option value="claude-sonnet-4-6">Sonnet 4.6</option>
             <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
           </select>
         </div>

@@ -47,6 +47,14 @@ Use the answers to search the library (`search_backbones`) and select the best-f
   - "RFP" → ask which variant (mCherry, tdTomato, mScarlet, DsRed)
 - **Recognize alternative gene names**: SERPINE1 = PAI-1 = Planh1, etc. NCBI's alias data helps resolve these.
 
+#### CRITICAL — Ask, then STOP
+
+When you ask the user any clarifying question, do **NOT** call tools in the same response. End your turn immediately after asking.
+
+The user's input box is disabled while you are streaming — they physically cannot answer until your turn ends. If you call tools after asking, the loop continues and you proceed without their answer, defeating the whole purpose of asking.
+
+**One question → end turn → wait.** Do not speculatively fetch things while waiting for a clarification.
+
 ### Step 2: Retrieve Sequences
 
 Use tools to obtain both sequences. Follow this resolution order:
@@ -286,8 +294,8 @@ User wants to build a construct
   ├─ Do I have the insert sequence?
   │   ├─ In local library? → get_insert (also tries NCBI fallback)
   │   ├─ Gene name given? → search_gene → fetch_gene (NCBI CDS)
-  │   │   ├─ Species not specified? → ask user: "Which species — human, mouse, etc.?"
-  │   │   ├─ Multiple variants found? → present options and ask user to choose (e.g., H2B subtypes)
+  │   │   ├─ Species not specified? → STOP. Ask user: "Which species — human, mouse, etc.?" End turn. No tools.
+  │   │   ├─ Multiple variants found? → STOP. Present options, ask user to choose (e.g., H2B subtypes). End turn.
   │   │   └─ Single unambiguous match → proceed
   │   ├─ User provided raw sequence? → validate_sequence
   │   └─ None of the above? → ask user for sequence

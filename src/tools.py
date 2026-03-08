@@ -31,6 +31,7 @@ from .library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    infer_species_from_cell_line,
 )
 from .assembler import (
     assemble_construct as _assemble_construct,
@@ -178,21 +179,51 @@ async def search_inserts(args):
 
 @tool(
     "get_insert",
-    "Get complete information about a specific insert, including its DNA sequence.",
+    "Get complete information about a specific insert including its DNA sequence. Fallback chain: local library → FPbase (FPs) → NCBI Gene. Returns disambiguation list if the query is ambiguous (gene family or multiple species).",
     {
         "type": "object",
         "properties": {
-            "insert_id": {"type": "string", "description": "Insert ID or name"},
+            "insert_id": {"type": "string", "description": "Insert ID, gene symbol, or FP name"},
+            "organism": {"type": "string", "description": "Species for NCBI fallback (e.g., 'human', 'mouse')"},
         },
         "required": ["insert_id"],
     },
 )
 async def get_insert(args):
-    ins = get_insert_by_id(args["insert_id"])
+    ins = get_insert_by_id(args["insert_id"], organism=args.get("organism"))
     if not ins:
-        return _text(f"Insert '{args['insert_id']}' not found in library.")
+        return _text(
+            f"Insert '{args['insert_id']}' not found in local library, "
+            f"FPbase, or NCBI Gene. Provide the DNA sequence directly or "
+            f"check spelling/species."
+        )
+    if ins.get("needs_disambiguation"):
+        reason = ins.get("reason", "")
+        if reason == "gene_family":
+            out = (
+                f"⚠️ **Ambiguous gene family**: '{args['insert_id']}' is a "
+                f"family name, not a specific gene. Specify which member:\n\n"
+            )
+            for m in ins.get("members", []):
+                out += f"  - {m}\n"
+            out += "\nAsk the user which one, then retry with the specific name."
+            return _text(out)
+        # multiple_species
+        out = (
+            f"⚠️ **Ambiguous gene**: '{args['insert_id']}' matched multiple "
+            f"species. Specify which:\n\n"
+        )
+        for opt in ins.get("options", []):
+            out += (
+                f"  - {opt.get('symbol')} ({opt.get('organism')}) — "
+                f"{opt.get('full_name')}\n    gene_id: {opt.get('gene_id')}\n"
+            )
+        out += "\nRetry with organism set, or pass gene_id directly."
+        return _text(out)
     _record("add_insert", ins)
     out = format_insert_summary(ins)
+    if ins.get("sequence_warning"):
+        out += f"\n\n⚠️ {ins['sequence_warning']}\n"
     if ins.get("sequence"):
         out += f"\n\nDNA Sequence ({len(ins['sequence'])} bp):\n{ins['sequence']}"
     return _text(out)
@@ -300,6 +331,12 @@ async def assemble_construct(args):
     if not insert_seq and args.get("insert_id"):
         insert_data = get_insert_by_id(args["insert_id"])
         if insert_data:
+            if insert_data.get("needs_disambiguation"):
+                return _error(
+                    f"Insert '{args['insert_id']}' is ambiguous "
+                    f"({insert_data.get('reason', 'multiple matches')}). "
+                    f"Resolve with get_insert first, then retry with the specific ID."
+                )
             insert_seq = insert_data.get("sequence")
     if not insert_seq:
         return _error("Error: No insert sequence available. Provide insert_id or insert_sequence.")
@@ -670,6 +707,19 @@ async def fetch_gene_tool(args):
     )
     if not result:
         return _text("Could not fetch gene sequence from NCBI.")
+    if result.get("needs_disambiguation"):
+        out = (
+            f"⚠️ **Ambiguous gene**: '{args.get('gene_symbol', '?')}' matched "
+            f"{len(result.get('options', []))} entries across multiple species. "
+            f"Specify organism:\n\n"
+        )
+        for opt in result.get("options", []):
+            out += (
+                f"  - {opt.get('symbol')} ({opt.get('organism')}) — "
+                f"{opt.get('full_name')}\n    gene_id: {opt.get('gene_id')}\n"
+            )
+        out += "\nRetry with organism set, or pass gene_id directly."
+        return _text(out)
     _record("add_ncbi_gene", result)
     out = f"Gene: {result['symbol']} ({result['organism']})\n"
     out += f"Accession: {result['accession']}\n"
@@ -677,6 +727,33 @@ async def fetch_gene_tool(args):
     out += f"CDS length: {result['length']} bp\n"
     out += f"\nCDS Sequence ({result['length']} bp):\n{result['sequence']}"
     return _text(out)
+
+
+@tool(
+    "get_cell_line_info",
+    "Look up the species for a common cell line name (e.g., HEK293 → human, RAW 264.7 → mouse). Use when the user mentions a cell line but not a species. IMPORTANT: this infers the CELL LINE's species — the user might want a DIFFERENT species' gene.",
+    {
+        "type": "object",
+        "properties": {
+            "cell_line": {"type": "string", "description": "Cell line name (e.g., 'HEK293', 'RAW 264.7')"},
+        },
+        "required": ["cell_line"],
+    },
+)
+async def get_cell_line_info_tool(args):
+    cl = args["cell_line"]
+    species = infer_species_from_cell_line(cl)
+    if species:
+        return _text(
+            f"Cell line '{cl}' is from species: **{species}**\n"
+            f"Note: confirm with user before assuming the gene of interest is "
+            f"also {species} — they may want a different species' gene "
+            f"expressed in {cl} cells."
+        )
+    return _text(
+        f"Cell line '{cl}' not found in known cell lines database. "
+        f"Ask the user what species it is."
+    )
 
 
 @tool(
@@ -717,7 +794,12 @@ async def fuse_inserts_tool(args):
         if not seq and item.get("insert_id"):
             ins = get_insert_by_id(item["insert_id"])
             if not ins:
-                return _error(f"Insert '{item['insert_id']}' not found in library.")
+                return _error(f"Insert '{item['insert_id']}' not found in library, FPbase, or NCBI.")
+            if ins.get("needs_disambiguation"):
+                return _error(
+                    f"Cannot fuse: insert '{item['insert_id']}' is ambiguous. "
+                    f"Resolve with get_insert first, then retry."
+                )
             seq = ins.get("sequence")
             name = name or ins.get("name", item["insert_id"])
             _record("add_insert", ins)
@@ -792,6 +874,7 @@ ALL_TOOLS = [
     search_all_tool,
     search_gene_tool,
     fetch_gene_tool,
+    get_cell_line_info_tool,
     fuse_inserts_tool,
 ]
 

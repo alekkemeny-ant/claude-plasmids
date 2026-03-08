@@ -831,6 +831,156 @@ AGENT_CASES = [
         tags=["negative", "balanced", "no_fusion"],
         tools_should_not_use=["fuse_inserts"],
     ),
+
+    # ══════════════════════════════════════════════════════════════════
+    # P1: Phase 1 Acceptance Prompts (Allen Institute Reference Doc)
+    # ══════════════════════════════════════════════════════════════════
+    # These 7 prompts are the acceptance criteria for Phase 1 completion.
+    # Each exercises a specific disambiguation or routing behavior.
+
+    AgentTestCase(
+        id="P1-SP1",
+        name="sfGFP in pcDNA3.1(+) for HEK293",
+        prompt=(
+            "Design an expression vector for Super Folder GFP (sfGFP) "
+            "using pcDNA3.1(+) for transient expression in HEK293 cells."
+        ),
+        description=(
+            "Backbone explicitly specified → no backbone clarification "
+            "needed. sfGFP IS in library. Should assemble directly."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="sfGFP",
+        expected_insertion_position=895,
+        tags=["phase1", "acceptance", "explicit_backbone"],
+        tools_should_not_use=["search_addgene"],  # sfGFP is local
+    ),
+
+    AgentTestCase(
+        id="P1-SP2",
+        name="MyD88 in RAW 264 cells (species + backbone inference)",
+        prompt="Design an expression vector for MyD88 in RAW 264 cells.",
+        description=(
+            "No backbone specified → agent must ask about expression "
+            "type/level. RAW 264 = mouse → agent should infer or confirm "
+            "mouse MyD88. Tests cell-line species inference."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="Myd88",
+        tags=["phase1", "acceptance", "disambiguation", "cell_line", "multiturn"],
+        user_persona=(
+            "You want mouse MyD88 (since RAW 264.7 is a mouse cell line). "
+            "For expression: transient, strong constitutive, any standard "
+            "mammalian backbone like pcDNA3.1(+) is fine."
+        ),
+        transcript_assertions=["species", "backbone"],  # should discuss both
+    ),
+
+    AgentTestCase(
+        id="P1-SP3",
+        name="TRAF transient overexpression in Raw 264.7 (family disambiguation)",
+        prompt=(
+            "Design a vector for TRAF transient overexpression in Raw 264.7 cells."
+        ),
+        description=(
+            "TRAF is a family (1-7), not a gene. Agent MUST ask which "
+            "family member. 'transient overexpression' answers the "
+            "backbone-selection questions."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="TRAF6",
+        tags=["phase1", "acceptance", "gene_family", "disambiguation", "multiturn"],
+        user_persona=(
+            "You want TRAF6 (the well-studied one in innate immunity). "
+            "Mouse, since RAW 264.7 is mouse. pcDNA3.1(+) is fine."
+        ),
+        transcript_assertions=["TRAF6", "TRAF"],  # must present options + use choice
+    ),
+
+    AgentTestCase(
+        id="P1-SP4",
+        name="TNF receptor associated factor long-name recognition",
+        prompt=(
+            "Design a vector for TNF receptor associated factor "
+            "transient overexpression in Raw 264.7."
+        ),
+        description=(
+            "Same as SP3 but uses the long name. Agent must recognize "
+            "this as TRAF family, NOT fetch the TNF Receptor gene. "
+            "Critical alias resolution test."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="TRAF6",
+        tags=["phase1", "acceptance", "alias", "gene_family", "multiturn"],
+        user_persona=(
+            "You want TRAF6. Mouse. pcDNA3.1(+) is fine."
+        ),
+        transcript_assertions=["TRAF"],
+        # Must NOT fetch TNFR/TNFRSF genes by mistake
+    ),
+
+    AgentTestCase(
+        id="P1-SP5",
+        name="RFP in human cells (FP variant disambiguation)",
+        prompt="Design an expression vector for RFP in human cells.",
+        description=(
+            "RFP is not a specific protein. Agent MUST ask which variant "
+            "(mCherry, tdTomato, mScarlet, etc.). Also needs backbone info."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="mCherry",
+        tags=["phase1", "acceptance", "fp_variant", "disambiguation", "multiturn"],
+        user_persona=(
+            "You want mCherry — it's the standard choice. Transient, "
+            "strong constitutive, pcDNA3.1(+) is fine."
+        ),
+        transcript_assertions=["mCherry"],
+    ),
+
+    AgentTestCase(
+        id="P1-SP6",
+        name="eGFP driven by SV40 in pcDNA3.1(+) (promoter conflict)",
+        prompt=(
+            "Design an expression vector for eGFP (driven by SV40) "
+            "using pcDNA3.1(+)."
+        ),
+        description=(
+            "pcDNA3.1(+) already contains SV40 driving NeoR. Agent should "
+            "detect this conflict and offer alternatives. This tests "
+            "backbone-feature awareness."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",
+        tags=["phase1", "acceptance", "promoter_conflict", "multiturn"],
+        user_persona=(
+            "Good catch on the SV40 conflict. Just use the CMV promoter "
+            "that's already in pcDNA3.1(+) instead."
+        ),
+        transcript_assertions=["SV40"],  # should mention the conflict
+    ),
+
+    AgentTestCase(
+        id="P1-SP7",
+        name="mRuby in HEK293 (FPbase retrieval, no hallucination)",
+        prompt=(
+            "Design an expression vector for mRuby in HEK293 cells, "
+            "transient expression."
+        ),
+        description=(
+            "mRuby is NOT in local library and NOT a natural gene. "
+            "Previously the agent would hallucinate or fetch wrong NCBI "
+            "result. Now FPbase integration should retrieve it correctly. "
+            "No hallucination: validation must confirm identity."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="mRuby",
+        tags=["phase1", "acceptance", "fpbase", "no_hallucination", "multiturn"],
+        user_persona=(
+            "pcDNA3.1(+) is fine. If you find multiple mRuby variants, "
+            "I want the original mRuby (not mRuby2 or mRuby3)."
+        ),
+        # No transcript assertions — just needs correct sequence
+    ),
 ]
 
 
@@ -1445,6 +1595,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run end-to-end agent evaluations (Agent SDK)")
     parser.add_argument("--case", type=str, help="Run a single test case by ID (e.g., A1-001)")
     parser.add_argument("--tag", type=str, help="Run cases matching this tag")
+    parser.add_argument("--filter", type=str, help="Run cases whose ID starts with this prefix (e.g., P1-SP)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show full agent trace")
     parser.add_argument("--json", action="store_true", help="Output results as JSON")
     parser.add_argument(
@@ -1476,6 +1627,8 @@ def main():
         cases = [tc]
     elif args.tag:
         cases = get_agent_cases_by_tag(args.tag)
+    elif args.filter:
+        cases = [c for c in AGENT_CASES if c.id.startswith(args.filter)]
     else:
         cases = AGENT_CASES
 

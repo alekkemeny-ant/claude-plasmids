@@ -11,18 +11,27 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from assembler import (
+from assembler import _PLANNOTATE_AVAILABLE
+
+if not _PLANNOTATE_AVAILABLE:
+    pytest.skip(
+        "pLannotate not installed (requires conda environment)",
+        allow_module_level=True,
+    )
+
+import pandas as pd  # noqa: E402
+
+from assembler import (  # noqa: E402
     _build_annotated_record,
     export_genbank_with_plot,
     format_as_genbank,
     get_plasmid_plot_json,
 )
-from plannotate import resources as rsc
+from plannotate import resources as rsc  # noqa: E402
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 

@@ -11,17 +11,30 @@ import re
 from dataclasses import dataclass, field
 import io
 from typing import Optional
-from Bio import SeqIO                                                                                                     
+from Bio import SeqIO
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from bokeh.embed import json_item
 import json
-from plannotate.annotate import annotate
-from plannotate.bokeh_plot import get_bokeh                                                                        
-from plannotate.resources import get_seq_record                                                                           
-   
-    
-    
-                                                                                                                     
+
+# pLannotate and bokeh are conda-only (not on PyPI). Guard the imports so the
+# module remains importable in pip-based environments; annotation functions
+# will raise a clear error when called if these are unavailable.
+try:
+    from bokeh.embed import json_item
+    from plannotate.annotate import annotate
+    from plannotate.bokeh_plot import get_bokeh
+    from plannotate.resources import get_seq_record
+    _PLANNOTATE_AVAILABLE = True
+except ImportError:
+    json_item = None
+    annotate = None
+    get_bokeh = None
+    get_seq_record = None
+    _PLANNOTATE_AVAILABLE = False
+
+_PLANNOTATE_MISSING_MSG = (
+    "pLannotate not available — install via conda using environment.yml "
+    "(plannotate is not on PyPI)"
+)
 
 
 # (GGGGS)x4 linker — default for protein-protein fusions
@@ -319,6 +332,8 @@ def _build_annotated_record(
     reverse_complement_insert: bool,
 ):
     """Build a BioPython SeqRecord from a pLannotate df, adding the insert feature if needed."""
+    if not _PLANNOTATE_AVAILABLE:
+        raise RuntimeError(_PLANNOTATE_MISSING_MSG)
     record = get_seq_record(df, sequence, is_linear=False)
     record.annotations["molecule_type"] = "DNA"
     record.annotations["topology"] = "circular"
@@ -359,7 +374,18 @@ def format_as_genbank(
     reverse_complement_insert: bool = False,
     features: Optional[list[dict]] = None,
 ) -> str:
-    """Format an assembled construct as a GenBank flat file using pLannotate for annotation."""
+    """Format an assembled construct as a GenBank flat file.
+
+    When pLannotate is available (conda environment), uses BLAST-based
+    annotation for rich feature identification. Otherwise falls back to
+    a minimal hand-written GenBank with just the insert + backbone features.
+    """
+    if not _PLANNOTATE_AVAILABLE:
+        return _format_as_genbank_fallback(
+            sequence=sequence, name=name, backbone_name=backbone_name,
+            insert_name=insert_name, insert_position=insert_position,
+            insert_length=insert_length, features=features,
+        )
     df = annotate(sequence, linear=False)
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,
@@ -368,6 +394,79 @@ def format_as_genbank(
     handle = io.StringIO()
     SeqIO.write(record, handle, "genbank")
     return handle.getvalue()
+
+
+def _format_as_genbank_fallback(
+    sequence: str,
+    name: str,
+    backbone_name: str = "",
+    insert_name: str = "",
+    insert_position: int = 0,
+    insert_length: int = 0,
+    features: Optional[list[dict]] = None,
+) -> str:
+    """Minimal GenBank writer for environments without pLannotate.
+
+    Produces a valid GenBank flat file with the insert CDS and any
+    explicitly-passed backbone features, but no BLAST-based annotation.
+    """
+    # Truncate locus name to 16 chars per GenBank spec
+    locus_name = re.sub(r'[^A-Za-z0-9_\-]', '_', name)[:16]
+    total_len = len(sequence)
+
+    lines = []
+
+    # LOCUS line
+    lines.append(
+        f"LOCUS       {locus_name:<16} {total_len:>5} bp    DNA     circular   UNK"
+    )
+
+    # DEFINITION
+    lines.append(f"DEFINITION  Expression construct: {insert_name} in {backbone_name}.")
+
+    # FEATURES
+    lines.append("FEATURES             Location/Qualifiers")
+
+    # Source feature
+    lines.append(f"     source          1..{total_len}")
+    lines.append('                     /mol_type="other DNA"')
+    lines.append('                     /note="Assembled construct"')
+
+    # Insert feature
+    if insert_length > 0:
+        ins_start_1based = insert_position + 1
+        ins_end_1based = insert_position + insert_length
+        lines.append(f"     CDS             {ins_start_1based}..{ins_end_1based}")
+        lines.append(f'                     /label="{insert_name}"')
+        lines.append(f'                     /note="Insert: {insert_name}"')
+
+    # Additional features (offset those that come after the insertion point)
+    if features:
+        for feat in features:
+            feat_start = feat["start"]
+            feat_end = feat["end"]
+            # Offset features downstream of the insert
+            if feat_start >= insert_position:
+                feat_start += insert_length
+                feat_end += insert_length
+            feat_type = feat.get("type", "misc_feature")
+            feat_name = feat.get("name", "unknown")
+            # Pad feature type to match GenBank format
+            lines.append(f"     {feat_type:<16}{feat_start + 1}..{feat_end}")
+            lines.append(f'                     /label="{feat_name}"')
+
+    # ORIGIN + sequence
+    lines.append("ORIGIN")
+    seq_lower = sequence.lower()
+    for i in range(0, len(seq_lower), 60):
+        # Format: position (right-justified 9 chars), then 6 groups of 10 bases
+        chunk = seq_lower[i:i + 60]
+        groups = [chunk[j:j + 10] for j in range(0, len(chunk), 10)]
+        lines.append(f"{i + 1:>9} {' '.join(groups)}")
+
+    lines.append("//")
+
+    return "\n".join(lines) + "\n"
 
 
 def get_plasmid_plot_json(df, linear: bool = False) -> str:
@@ -380,7 +479,8 @@ def get_plasmid_plot_json(df, linear: bool = False) -> str:
     Returns:
         JSON string suitable for Bokeh.embed.embed_item() in the browser.
     """
-    
+    if not _PLANNOTATE_AVAILABLE:
+        raise RuntimeError(_PLANNOTATE_MISSING_MSG)
     plot = get_bokeh(df, linear=linear)
     plot.plot_width = 600
     plot.plot_height = 600
@@ -404,6 +504,8 @@ def export_genbank_with_plot(
     Returns:
         (genbank_str, plot_json_str)
     """
+    if not _PLANNOTATE_AVAILABLE:
+        raise RuntimeError(_PLANNOTATE_MISSING_MSG)
     df = annotate(sequence, linear=False)
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,

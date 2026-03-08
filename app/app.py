@@ -1490,13 +1490,18 @@ def _save_sessions():
                             "role": m.get("role", "user"),
                             "content": "[message serialization failed]",
                         })
+                # Base fields (always serializable — primitive types only)
+                base_fields = {
+                    "created_at": data.get("created_at", time.time()),
+                    "first_message": data.get("first_message"),
+                    "history": safe_history,
+                    # Phase-2 troubleshooting/project-memory fields — default
+                    # to empty for sessions created before these were added.
+                    "project_name": data.get("project_name"),
+                    "experimental_outcomes": data.get("experimental_outcomes", []),
+                }
                 try:
-                    s = {
-                        "display_messages": data.get("display_messages", []),
-                        "created_at": data.get("created_at", time.time()),
-                        "first_message": data.get("first_message"),
-                        "history": safe_history,
-                    }
+                    s = {"display_messages": data.get("display_messages", []), **base_fields}
                     json.dumps(s)
                     serializable[sid] = s
                 except (TypeError, ValueError) as e:
@@ -1506,12 +1511,7 @@ def _save_sessions():
                         f"Session {sid[:8]} display_messages unserializable, "
                         f"saving with empty display: {e}"
                     )
-                    serializable[sid] = {
-                        "display_messages": [],
-                        "created_at": data.get("created_at", time.time()),
-                        "first_message": data.get("first_message"),
-                        "history": safe_history,
-                    }
+                    serializable[sid] = {"display_messages": [], **base_fields}
 
             tmp_file = SESSIONS_FILE.with_suffix(".json.tmp")
             with open(tmp_file, "w") as f:

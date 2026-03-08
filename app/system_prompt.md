@@ -378,7 +378,7 @@ Introduces an in-frame TGA stop codon ~10% into the CDS → truncated, non-funct
 **Always confirm the mutation with the user before assembling.** Show: original codon, new codon, AA change, position. Example:
 "Mutation applied: V600E (GTG → GAG at DNA position 1798). The modified CDS is ready for assembly. Confirm?"
 
-**SAFETY NOTE**: `apply_mutation` never invents sequence. It makes one deterministic codon substitution using the standard human-preferred codon table. Every other nucleotide is preserved exactly from the input.
+**SAFETY NOTE — mutation-synthesis exception**: `apply_mutation` is a documented, bounded exception to the "every nucleotide from a verified source" rule. It modifies exactly one codon (3 nucleotides) per call. The replacement codon comes from the Kazusa human codon-usage table (`PREFERRED_CODONS`) — the empirically most-frequent codon for each amino acid in human mRNAs. This is a *table lookup*, not LLM generation. The remaining sequence is preserved nucleotide-for-nucleotide from the user's verified input. **When presenting a mutated construct, always report the original→new codon change so the user can see exactly what was modified** (e.g., "Mutation: GTG→GAG at DNA position 1798").
 
 ## Design Confidence Scoring
 

@@ -766,21 +766,47 @@ def _save_sessions():
         try:
             serializable = {}
             for sid, data in _sessions.items():
+                # Serialize history message-by-message so one bad message
+                # doesn't drop the entire session (which is what caused
+                # users to see their chat history vanish on reload).
+                safe_history = []
+                for m in data.get("history", []):
+                    try:
+                        sm = {"role": m["role"], "content": _serialize_content(m["content"])}
+                        json.dumps(sm)
+                        safe_history.append(sm)
+                    except (TypeError, ValueError) as e:
+                        logger.warning(
+                            f"Dropping unserializable message in session "
+                            f"{sid[:8]} (role={m.get('role','?')}): {e}"
+                        )
+                        # Preserve turn structure so replay doesn't break
+                        safe_history.append({
+                            "role": m.get("role", "user"),
+                            "content": "[message serialization failed]",
+                        })
                 try:
                     s = {
-                        "display_messages": data["display_messages"],
-                        "created_at": data["created_at"],
-                        "first_message": data["first_message"],
-                        "history": [
-                            {"role": m["role"], "content": _serialize_content(m["content"])}
-                            for m in data["history"]
-                        ],
+                        "display_messages": data.get("display_messages", []),
+                        "created_at": data.get("created_at", time.time()),
+                        "first_message": data.get("first_message"),
+                        "history": safe_history,
                     }
                     json.dumps(s)
                     serializable[sid] = s
                 except (TypeError, ValueError) as e:
-                    logger.debug(f"Skipping session {sid[:8]} (serialization error: {e})")
-                    continue
+                    # Fall back to saving session metadata + history only
+                    # (display_messages may contain the bad block)
+                    logger.warning(
+                        f"Session {sid[:8]} display_messages unserializable, "
+                        f"saving with empty display: {e}"
+                    )
+                    serializable[sid] = {
+                        "display_messages": [],
+                        "created_at": data.get("created_at", time.time()),
+                        "first_message": data.get("first_message"),
+                        "history": safe_history,
+                    }
 
             tmp_file = SESSIONS_FILE.with_suffix(".json.tmp")
             with open(tmp_file, "w") as f:
@@ -1036,17 +1062,22 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             break
 
         # Convert content blocks to plain dicts to strip extra SDK fields
-        # (e.g. parsed_output) that cause 400 errors on replay
+        # (e.g. parsed_output) that cause 400 errors on replay.
+        # Unknown block types are DROPPED — passing them through can cause
+        # 400 errors on the next API call when the SDK emits a new block type
+        # we don't handle (redacted_thinking, server_tool_use, etc.).
         filtered_content = []
         for b in final_message.content:
-            if getattr(b, 'type', None) == 'thinking':
+            btype = getattr(b, 'type', None)
+            if btype == 'thinking':
                 continue
-            elif getattr(b, 'type', None) == 'text':
+            elif btype == 'text':
                 filtered_content.append({"type": "text", "text": b.text})
-            elif getattr(b, 'type', None) == 'tool_use':
+            elif btype == 'tool_use':
                 filtered_content.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
             else:
-                filtered_content.append(b)
+                logger.warning(f"Dropping unknown content block type from history: {btype or type(b).__name__}")
+                continue
         history.append({"role": "assistant", "content": filtered_content})
 
         if tool_results:
@@ -2250,9 +2281,20 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self._send_json({"error": "Empty message"}, 400)
                 return
 
-            # Get or create session
+            # Get or create session.
+            # If a session_id was provided but doesn't exist, that's an error
+            # (stale client state) — don't silently create a fresh one, or the
+            # user thinks they're continuing a conversation when they're not.
             session_id = body.get("session_id")
-            if not session_id or not get_session(session_id):
+            if session_id and not get_session(session_id):
+                self._send_json({
+                    "error": (
+                        "Session not found. It may have expired or been "
+                        "cleared. Please start a new conversation."
+                    )
+                }, 404)
+                return
+            if not session_id:
                 session_id = create_session()
 
             # SSE streaming response
@@ -2290,6 +2332,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
         elif path == "/api/reset":
             # Legacy endpoint — clear all sessions
             _sessions.clear()
+            _save_sessions()
             self._send_json({"status": "ok"})
 
         else:

@@ -671,15 +671,24 @@ def search_all_sources(
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(fn): name for name, fn in tasks.items()}
 
-        for future in as_completed(futures, timeout=timeout):
-            name = futures[future]
-            results["sources_searched"].append(name)
-            try:
-                data = future.result()
-                if data is not None:
-                    results[name] = data
-            except Exception as e:
-                results["errors"][name] = str(e)
-                logger.warning(f"Concurrent search error ({name}): {e}")
+        try:
+            for future in as_completed(futures, timeout=timeout):
+                name = futures[future]
+                results["sources_searched"].append(name)
+                try:
+                    data = future.result()
+                    if data is not None:
+                        results[name] = data
+                except Exception as e:
+                    results["errors"][name] = str(e)
+                    logger.warning(f"Concurrent search error ({name}): {e}")
+        except TimeoutError:
+            # as_completed(timeout=...) raises if any future is still pending.
+            # Record which sources didn't finish; return partial results.
+            for future, name in futures.items():
+                if not future.done():
+                    future.cancel()
+                    results["errors"][name] = f"timed out after {timeout}s"
+                    logger.warning(f"Concurrent search ({name}) timed out after {timeout}s")
 
     return results

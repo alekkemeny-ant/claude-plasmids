@@ -362,6 +362,32 @@ TOOLS = [
 ]
 
 
+# ── Sequence truncation for agent-visible output ──
+# Large sequences (e.g., BRCA1 CDS is ~5.6 kb) dumped verbatim into tool
+# results cause token bloat and rate limiting. The system prompt instructs
+# the agent to use insert_id rather than copying sequence text, so we can
+# safely truncate. Full sequences are always available via the library
+# (assemble_construct resolves by ID, not by pasted text).
+_SEQ_TRUNC_THRESHOLD = 4000  # bp — show full seq below this
+
+def _fmt_seq_for_agent(seq: str, label: str = "Sequence") -> str:
+    """Format a DNA sequence for agent output, truncating if large.
+
+    Below threshold: full sequence. Above: head + tail with note that
+    the full sequence is used internally when referenced by ID.
+    """
+    n = len(seq)
+    if n <= _SEQ_TRUNC_THRESHOLD:
+        return f"{label} ({n} bp):\n{seq}"
+    head, tail = seq[:200], seq[-200:]
+    return (
+        f"{label} ({n} bp, truncated for context):\n"
+        f"{head}\n... [{n-400} bp omitted] ...\n{tail}\n"
+        f"[Full sequence is stored and used internally. Reference by ID in "
+        f"assemble_construct/validate_construct rather than copying this text.]"
+    )
+
+
 # ── Tool execution ──────────────────────────────────────────────────────
 
 def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = None) -> str:
@@ -439,7 +465,7 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             if ins.get("sequence_warning"):
                 out += f"\n\n⚠️ {ins['sequence_warning']}\n"
             if ins.get("sequence"):
-                out += f"\n\nDNA Sequence ({len(ins['sequence'])} bp):\n{ins['sequence']}"
+                out += f"\n\n{_fmt_seq_for_agent(ins['sequence'], 'DNA Sequence')}"
             return out
 
         elif name == "list_all_backbones":
@@ -535,6 +561,8 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"Reading frame ok: {'Yes' if result.insert_length_valid else 'No'}\n"
             if result.warnings:
                 out += "Warnings:\n" + "\n".join(f"- {w}" for w in result.warnings) + "\n"
+            # NOTE: full sequence is required here — the agent passes it to
+            # validate_construct and export_construct. Do not truncate.
             out += f"\nAssembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
             return out
 
@@ -841,7 +869,7 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"Accession: {result['accession']}\n"
             out += f"Full name: {result['full_name']}\n"
             out += f"CDS length: {result['length']} bp\n"
-            out += f"\nCDS Sequence ({result['length']} bp):\n{result['sequence']}"
+            out += f"\n{_fmt_seq_for_agent(result['sequence'], 'CDS Sequence')}"
             return out
 
         elif name == "search_fpbase":
@@ -1140,6 +1168,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
 
         stop_reason = None
         final_message = None
+        tool_results: list = []  # also reset inside retry loop; init here for static analysis
 
         # Retry loop for rate limits
         for retry_attempt in range(max_retries + 1):

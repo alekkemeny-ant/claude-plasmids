@@ -14,6 +14,8 @@ Key functions:
 import logging
 import os
 import re
+import threading
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -25,10 +27,31 @@ try:
 except ImportError:
     BIOPYTHON_AVAILABLE = False
 
-# Configure Entrez email (required by NCBI)
+# Configure Entrez email + optional API key (required by NCBI)
+# Without an API key: max 3 req/s. With NCBI_API_KEY: max 10 req/s.
 NCBI_EMAIL = os.environ.get("NCBI_EMAIL", "plasmid-designer@example.com")
+NCBI_API_KEY = os.environ.get("NCBI_API_KEY")
 if BIOPYTHON_AVAILABLE:
     Entrez.email = NCBI_EMAIL
+    if NCBI_API_KEY:
+        Entrez.api_key = NCBI_API_KEY
+
+# ── Rate limiting ──
+# NCBI policy: 3 req/s without API key, 10 req/s with.
+# Simple token-bucket: track last request time, sleep if needed.
+_RATE_LIMIT_INTERVAL = 0.11 if NCBI_API_KEY else 0.34  # seconds between requests
+_last_request_time = 0.0
+_rate_lock = threading.Lock()
+
+
+def _rate_limit():
+    """Enforce NCBI rate limit. Call before each Entrez request."""
+    global _last_request_time
+    with _rate_lock:
+        elapsed = time.monotonic() - _last_request_time
+        if elapsed < _RATE_LIMIT_INTERVAL:
+            time.sleep(_RATE_LIMIT_INTERVAL - elapsed)
+        _last_request_time = time.monotonic()
 
 
 def search_gene(
@@ -69,6 +92,7 @@ def search_gene(
         search_term = f"{query}[Gene Name]"
 
     try:
+        _rate_limit()
         handle = Entrez.esearch(db="gene", term=search_term, retmax=10, sort="relevance")
         record = Entrez.read(handle)
         handle.close()
@@ -76,6 +100,7 @@ def search_gene(
         gene_ids = record.get("IdList", [])
         if not gene_ids:
             # Try broader search without [Gene Name] qualifier
+            _rate_limit()
             handle = Entrez.esearch(db="gene", term=query if not organism else f"{query} AND {org_map.get(organism.lower(), organism) if organism else ''}[Organism]", retmax=10)
             record = Entrez.read(handle)
             handle.close()
@@ -85,6 +110,7 @@ def search_gene(
             return []
 
         # Fetch gene summaries
+        _rate_limit()
         handle = Entrez.esummary(db="gene", id=",".join(gene_ids))
         summaries = Entrez.read(handle)
         handle.close()
@@ -165,6 +191,7 @@ def fetch_gene_sequence(
 
     try:
         # Fetch gene record to get RefSeq mRNA accession
+        _rate_limit()
         handle = Entrez.efetch(db="gene", id=gene_id, rettype="gene_table", retmode="text")
         gene_text = handle.read()
         handle.close()
@@ -174,6 +201,7 @@ def fetch_gene_sequence(
 
         if not nm_accessions:
             # Try linking gene to nucleotide
+            _rate_limit()
             handle = Entrez.elink(dbfrom="gene", db="nucleotide", id=gene_id, linkname="gene_nuccore_refseqrna")
             link_results = Entrez.read(handle)
             handle.close()
@@ -186,6 +214,7 @@ def fetch_gene_sequence(
 
             if nuc_ids:
                 # Fetch the first nucleotide record to get the accession
+                _rate_limit()
                 handle = Entrez.esummary(db="nucleotide", id=nuc_ids[0])
                 nuc_summary = Entrez.read(handle)
                 handle.close()
@@ -220,6 +249,7 @@ def fetch_sequence_by_accession(accession: str) -> Optional[dict]:
         raise RuntimeError("Biopython is required for NCBI integration. Install with: pip install biopython")
 
     try:
+        _rate_limit()
         handle = Entrez.efetch(db="nucleotide", id=accession, rettype="gb", retmode="text")
         record = SeqIO.read(handle, "genbank")
         handle.close()

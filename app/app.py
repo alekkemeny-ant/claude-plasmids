@@ -102,6 +102,45 @@ try:
 except ImportError:
     FPBASE_AVAILABLE = False
 
+# ── Phase-2 advanced design modules (Design Confidence, Protein Analysis,
+#    Mutations, Bespoke Promoters). These are new modules that may not exist
+#    in every deployment — guard each import so the app still loads.
+
+try:
+    from confidence import compute_confidence, format_confidence_report
+    CONFIDENCE_AVAILABLE = True
+except ImportError:
+    CONFIDENCE_AVAILABLE = False
+
+try:
+    from protein_analysis import translate as _translate_dna, find_fusion_sites as _find_fusion_sites
+    PROTEIN_ANALYSIS_AVAILABLE = True
+except ImportError:
+    PROTEIN_ANALYSIS_AVAILABLE = False
+
+try:
+    from mutations import (
+        lookup_known_mutations as _lookup_known_mutations,
+        apply_point_mutation as _apply_point_mutation,
+        design_premature_stop as _design_premature_stop,
+        parse_mutation_notation as _parse_mutation_notation,
+    )
+    MUTATIONS_AVAILABLE = True
+except ImportError:
+    MUTATIONS_AVAILABLE = False
+
+try:
+    from ncbi_integration import fetch_genomic_upstream as _fetch_genomic_upstream
+    GENOMIC_UPSTREAM_AVAILABLE = True
+except ImportError:
+    GENOMIC_UPSTREAM_AVAILABLE = False
+
+try:
+    from library import is_known_promoter as _is_known_promoter
+    PROMOTER_DETECTION_AVAILABLE = True
+except ImportError:
+    PROMOTER_DETECTION_AVAILABLE = False
+
 from references import ReferenceTracker
 
 logger = logging.getLogger(__name__)
@@ -378,6 +417,140 @@ TOOLS = [
                 },
             },
             "required": ["inserts"],
+        },
+    },
+    {
+        "name": "score_construct_confidence",
+        "description": (
+            "Compute a Design Confidence Score (0-100) for an insert/CDS. "
+            "Checks for cryptic polyA/splice signals, codon adaptation index (CAI), "
+            "Kozak context, GC content, fusion linker adequacy, repeat runs, and "
+            "promoter count. Use this before presenting a final design to flag "
+            "potential expression problems."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "insert_sequence": {"type": "string", "description": "Insert/CDS DNA sequence to analyze"},
+                "backbone_id": {"type": "string", "description": "Optional backbone ID (for promoter-count check)"},
+                "fusion_parts": {
+                    "type": "array",
+                    "description": "Optional fusion part metadata for linker adequacy check",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "aa_length": {"type": "integer"},
+                            "is_linker": {"type": "boolean"},
+                        },
+                    },
+                },
+            },
+            "required": ["insert_sequence"],
+        },
+    },
+    {
+        "name": "predict_fusion_sites",
+        "description": (
+            "Predict disordered regions in a protein as candidate fusion-insertion sites. "
+            "Use when designing an internal (loop) fusion rather than terminal fusion, "
+            "or when troubleshooting a terminal fusion that failed. Accepts either an "
+            "amino-acid sequence OR a DNA CDS (which will be translated). "
+            "Returns ranked disordered windows (longest + most disordered first). "
+            "NOTE: This is a sequence-based heuristic, not a full structure prediction. "
+            "For high-stakes designs, verify against AlphaFold2."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "protein_sequence": {"type": "string", "description": "Amino-acid sequence (single-letter code)"},
+                "dna_sequence": {"type": "string", "description": "Alternative: DNA CDS (will be translated in frame 0)"},
+                "min_window": {"type": "integer", "description": "Minimum disordered-window length in residues (default 10)", "default": 10},
+            },
+        },
+    },
+    {
+        "name": "lookup_known_mutations",
+        "description": (
+            "Look up curated gain-of-function (GoF) or loss-of-function (LoF) mutations "
+            "for common oncogenes and tumor suppressors (BRAF, KRAS, TP53, EGFR, PTEN, "
+            "PIK3CA, IDH1/2, etc.). Returns mutation notation, phenotype, and PMID. "
+            "Use when the user wants a constitutively active, dominant-negative, or "
+            "kinase-dead version of a gene."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "gene_symbol": {"type": "string", "description": "Gene symbol (e.g., 'BRAF', 'TP53')"},
+                "mutation_type": {"type": "string", "description": "Filter: 'GoF' or 'LoF' (optional)", "enum": ["GoF", "LoF"]},
+            },
+            "required": ["gene_symbol"],
+        },
+    },
+    {
+        "name": "apply_mutation",
+        "description": (
+            "Apply a deterministic point mutation or premature stop codon to a CDS. "
+            "For point mutations: swaps ONE codon at the specified AA position for the "
+            "preferred human codon for the target AA. For premature stop: introduces an "
+            "in-frame TGA at ~position_fraction through the CDS. The rest of the sequence "
+            "is preserved exactly. Returns the modified sequence plus change details. "
+            "SAFETY: This is targeted single-codon editing only — no sequence is invented."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dna_sequence": {"type": "string", "description": "Input CDS DNA sequence (in-frame from position 0)"},
+                "method": {
+                    "type": "string",
+                    "enum": ["point_mutation", "premature_stop"],
+                    "description": "Mutation method (default: point_mutation)",
+                    "default": "point_mutation",
+                },
+                "mutation": {"type": "string", "description": "Standard notation like 'V600E' (for point_mutation)"},
+                "aa_position": {"type": "integer", "description": "1-indexed AA position (alternative to 'mutation' param)"},
+                "new_aa": {"type": "string", "description": "Target amino acid single-letter code (with aa_position)"},
+                "position_fraction": {"type": "number", "description": "For premature_stop: where to place the stop (0-1, default 0.1)", "default": 0.1},
+            },
+            "required": ["dna_sequence"],
+        },
+    },
+    {
+        "name": "fetch_promoter_region",
+        "description": (
+            "Fetch the native upstream genomic region of a gene from NCBI (~2kb 5' of "
+            "the TSS). Use this ONLY for bespoke promoter requests when the user "
+            "explicitly chooses option (c) — fetch native upstream region — after you've "
+            "offered the three options (Addgene search / paste sequence / native upstream). "
+            "IMPORTANT: This is the endogenous regulatory region, NOT a validated minimal "
+            "promoter. Warn the user about this in your design summary."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "gene_id": {"type": "string", "description": "NCBI Gene ID (e.g., '7157' for human TP53). Required if gene_symbol not given."},
+                "gene_symbol": {"type": "string", "description": "Gene symbol (e.g., 'TP53'). Will be resolved to gene_id via search."},
+                "organism": {"type": "string", "description": "Organism for symbol→ID resolution (e.g., 'human')"},
+                "bp_upstream": {"type": "integer", "description": "How many bp upstream to fetch (100-10000, default 2000)", "default": 2000},
+            },
+        },
+    },
+    {
+        "name": "log_experimental_outcome",
+        "description": (
+            "Record a wet-lab outcome for the current design session. The outcome is "
+            "stored in session memory and will be injected into future turns' context "
+            "for troubleshooting mode. Use when the user reports that a construct "
+            "worked, didn't express, had wrong size, was toxic, etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["success", "failed", "partial"], "description": "Experimental outcome"},
+                "observation": {"type": "string", "description": "What was observed (e.g., 'no fluorescence', 'wrong size on Western', 'low yield')"},
+                "construct_name": {"type": "string", "description": "Name/description of the construct tested (optional)"},
+            },
+            "required": ["status", "observation"],
         },
     },
 ]
@@ -1022,6 +1195,226 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"\nFused sequence ({len(fused)} bp):\n{fused}"
             return out
 
+        elif name == "score_construct_confidence":
+            if not CONFIDENCE_AVAILABLE:
+                return "Design Confidence module not available in this deployment."
+            insert_seq = clean_sequence(args["insert_sequence"])
+            backbone = None
+            if args.get("backbone_id"):
+                backbone = get_backbone_by_id(args["backbone_id"])
+            report = compute_confidence(
+                insert_seq=insert_seq,
+                backbone=backbone,
+                fusion_parts=args.get("fusion_parts"),
+            )
+            return format_confidence_report(report)
+
+        elif name == "predict_fusion_sites":
+            if not PROTEIN_ANALYSIS_AVAILABLE:
+                return "Protein Analysis module not available in this deployment."
+            # Accept either AA or DNA input
+            aa_seq = args.get("protein_sequence")
+            if not aa_seq and args.get("dna_sequence"):
+                dna = clean_sequence(args["dna_sequence"])
+                aa_seq = _translate_dna(dna)
+            if not aa_seq:
+                return "Error: provide either protein_sequence (AA) or dna_sequence (CDS)."
+            aa_seq = aa_seq.upper().strip()
+            min_window = args.get("min_window", 10)
+            sites = _find_fusion_sites(aa_seq, min_window=min_window)
+            if not sites:
+                return (
+                    f"No disordered regions ≥{min_window} residues found in this "
+                    f"protein ({len(aa_seq)} aa). The protein may be highly "
+                    f"structured throughout — terminal fusion is likely the only "
+                    f"option. Consider a longer flexible linker if terminal fusion "
+                    f"has failed."
+                )
+            lines = [
+                f"Found {len(sites)} candidate fusion site(s) in protein "
+                f"({len(aa_seq)} aa), ranked by suitability:\n"
+            ]
+            for i, s in enumerate(sites[:5], 1):
+                lines.append(
+                    f"  {i}. Residues {s['start']+1}-{s['end']} "
+                    f"({s['length']} aa, mean disorder {s['mean_disorder']:.2f}) "
+                    f"— context: ...{s['context']}..."
+                )
+            lines.append(
+                "\nNote: Disorder prediction is a sequence-based heuristic. "
+                "For high-stakes designs, verify against AlphaFold2 pLDDT "
+                "or published domain boundaries."
+            )
+            return "\n".join(lines)
+
+        elif name == "lookup_known_mutations":
+            if not MUTATIONS_AVAILABLE:
+                return "Mutation Design module not available in this deployment."
+            muts = _lookup_known_mutations(
+                args["gene_symbol"], args.get("mutation_type")
+            )
+            if not muts:
+                filter_txt = f" ({args['mutation_type']})" if args.get("mutation_type") else ""
+                return (
+                    f"No curated{filter_txt} mutations found for "
+                    f"'{args['gene_symbol']}'. The curated database covers "
+                    f"common oncogenes (BRAF, KRAS, EGFR, PIK3CA, IDH1/2, "
+                    f"NRAS, CTNNB1, AKT1, MYC) and tumor suppressors (TP53, "
+                    f"PTEN, RB1, FBXW7). For other genes, ask the user for "
+                    f"the specific mutation they want, or offer a premature-stop "
+                    f"LoF design."
+                )
+            lines = [
+                f"Curated mutations for {args['gene_symbol'].upper()}"
+                f"{' (' + args['mutation_type'] + ')' if args.get('mutation_type') else ''}:\n"
+            ]
+            for m in muts:
+                ref = f" [{m['reference']}]" if m.get("reference") else ""
+                lines.append(
+                    f"  • {m['mutation']} ({m['type']}): {m['phenotype']}{ref}"
+                )
+                if m.get("codon_change"):
+                    lines.append(f"    Codon change: {m['codon_change']}")
+            return "\n".join(lines)
+
+        elif name == "apply_mutation":
+            if not MUTATIONS_AVAILABLE:
+                return "Mutation Design module not available in this deployment."
+            dna = clean_sequence(args["dna_sequence"])
+            method = args.get("method", "point_mutation")
+
+            if method == "premature_stop":
+                frac = args.get("position_fraction", 0.1)
+                result = _design_premature_stop(dna, position_fraction=frac)
+                out = (
+                    f"Premature stop introduced:\n"
+                    f"  AA position: {result['stop_position_aa']}\n"
+                    f"  DNA position: {result['stop_position_dna']}\n"
+                    f"  Original codon: {result['original_codon']} "
+                    f"({result['original_aa']})\n"
+                    f"  New codon: TGA (*)\n"
+                    f"  Sequence length preserved: "
+                    f"{len(result['sequence'])} bp\n\n"
+                    f"Mutated sequence:\n{result['sequence']}"
+                )
+                return out
+
+            # point_mutation — accept either 'mutation' (V600E notation)
+            # or aa_position + new_aa
+            aa_pos = args.get("aa_position")
+            new_aa = args.get("new_aa")
+            if args.get("mutation"):
+                parsed = _parse_mutation_notation(args["mutation"])
+                if not parsed:
+                    return (
+                        f"Could not parse mutation notation '{args['mutation']}'. "
+                        f"Use standard format like 'V600E' or pass aa_position "
+                        f"+ new_aa directly."
+                    )
+                aa_pos = parsed["position"]
+                new_aa = parsed["new_aa"]
+                expected_original = parsed["original_aa"]
+            else:
+                expected_original = None
+
+            if aa_pos is None or not new_aa:
+                return (
+                    "Error: for point_mutation, provide either 'mutation' "
+                    "(e.g., 'V600E') or both 'aa_position' and 'new_aa'."
+                )
+
+            result = _apply_point_mutation(dna, aa_position=aa_pos, new_aa=new_aa)
+
+            # Sanity check: did the original AA match what the notation said?
+            warning = ""
+            if expected_original and result["original_aa"] != expected_original:
+                warning = (
+                    f"\n\n⚠️ WARNING: Mutation notation '{args['mutation']}' "
+                    f"expects original AA '{expected_original}' at position "
+                    f"{aa_pos}, but the sequence has '{result['original_aa']}'. "
+                    f"This may be the wrong transcript/isoform, or the position "
+                    f"is off by one. Please verify the sequence and position."
+                )
+
+            out = (
+                f"Point mutation applied: {result['original_aa']}{aa_pos}"
+                f"{result['new_aa']}\n"
+                f"  DNA position: {result['dna_position']}\n"
+                f"  Original codon: {result['original_codon']} → "
+                f"New codon: {result['new_codon']}\n"
+                f"  Sequence length preserved: "
+                f"{len(result['sequence'])} bp\n"
+                f"{warning}\n\n"
+                f"Mutated sequence:\n{result['sequence']}"
+            )
+            return out
+
+        elif name == "fetch_promoter_region":
+            if not GENOMIC_UPSTREAM_AVAILABLE:
+                return (
+                    "Genomic upstream fetch not available (requires Biopython "
+                    "+ NCBI access)."
+                )
+            gene_id = args.get("gene_id")
+            bp_upstream = args.get("bp_upstream", 2000)
+
+            # Resolve symbol → gene_id if needed
+            if not gene_id and args.get("gene_symbol"):
+                if not NCBI_AVAILABLE:
+                    return "NCBI gene search not available."
+                genes = _search_gene_fn(args["gene_symbol"], args.get("organism"))
+                if not genes:
+                    return f"Gene '{args['gene_symbol']}' not found on NCBI."
+                if len(genes) > 1 and not args.get("organism"):
+                    organisms = {g.get("organism", "") for g in genes}
+                    if len(organisms) > 1:
+                        return (
+                            f"Gene '{args['gene_symbol']}' is ambiguous across "
+                            f"species: {', '.join(sorted(organisms))}. "
+                            f"Specify organism and retry."
+                        )
+                gene_id = genes[0]["gene_id"]
+
+            if not gene_id:
+                return "Error: provide gene_id or gene_symbol."
+
+            result = _fetch_genomic_upstream(gene_id=gene_id, bp_upstream=bp_upstream)
+            if not result:
+                return (
+                    f"Could not fetch upstream region for gene_id={gene_id}. "
+                    f"The gene may not have annotated genomic coordinates, "
+                    f"or NCBI is temporarily unavailable."
+                )
+            out = (
+                f"Native upstream region for {result['gene_symbol']} "
+                f"(gene_id={result['gene_id']}):\n"
+                f"  Organism: {result.get('organism', '?')}\n"
+                f"  Chromosome: {result.get('chromosome_accession', '?')}\n"
+                f"  Strand: {result.get('strand', '?')}\n"
+                f"  Length: {result['length']} bp\n\n"
+                f"⚠️ {result['warning']}\n\n"
+                f"Upstream sequence ({result['length']} bp):\n"
+                f"{result['sequence']}"
+            )
+            return out
+
+        elif name == "log_experimental_outcome":
+            # This tool needs session context to store the outcome. The
+            # execute_tool dispatcher doesn't have session access, so we
+            # return a marker the agent-loop can intercept (or, simpler:
+            # just format for display and rely on the caller to persist).
+            # For now, return a special prefix the agent loop can detect.
+            status = args["status"]
+            observation = args["observation"]
+            cname = args.get("construct_name", "")
+            return (
+                f"[OUTCOME_LOGGED] status={status} "
+                f"construct={cname!r} observation={observation!r}\n\n"
+                f"Outcome recorded for this session: **{status}** — "
+                f"{observation}. Future troubleshooting turns will see this "
+                f"context."
+            )
+
         else:
             return f"Unknown tool: {name}"
 
@@ -1169,9 +1562,39 @@ def create_session() -> str:
         "display_messages": [],
         "created_at": time.time(),
         "first_message": None,
+        # Troubleshooting / project-memory fields (Phase 2)
+        "project_name": None,            # user-assigned project label (optional)
+        "experimental_outcomes": [],     # list of {status, observation, construct_name, timestamp}
     }
     _save_sessions()
     return sid
+
+
+def _build_system_prompt(session: dict) -> str:
+    """Build the system prompt for a turn, injecting per-session context.
+
+    Starts with the static SYSTEM_PROMPT and appends troubleshooting
+    context if the session has prior experimental outcomes. This enables
+    "project memory" — the agent can see what the user already tried.
+    """
+    prompt = SYSTEM_PROMPT
+    outcomes = session.get("experimental_outcomes") or []
+    if outcomes:
+        prompt += "\n\n---\n\n## Troubleshooting Context — Prior Experimental Outcomes\n\n"
+        prompt += (
+            "This session has recorded wet-lab outcomes for constructs the "
+            "user previously tried. Use this history to diagnose failures "
+            "and propose revised designs (see Troubleshooting Mode section "
+            "above).\n\n"
+        )
+        for i, o in enumerate(outcomes, 1):
+            cname = o.get("construct_name") or "unnamed construct"
+            prompt += (
+                f"**Prior attempt {i}** ({cname}):\n"
+                f"  Status: {o.get('status', '?')}\n"
+                f"  Observation: {o.get('observation', '?')}\n\n"
+            )
+    return prompt
 
 
 def get_session(session_id: str) -> dict | None:
@@ -1194,6 +1617,8 @@ def list_sessions() -> list[dict]:
             "session_id": sid,
             "first_message": data["first_message"],
             "created_at": data["created_at"],
+            "project_name": data.get("project_name"),
+            "outcomes_count": len(data.get("experimental_outcomes") or []),
         })
     return result
 
@@ -1216,6 +1641,10 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
 
     tracker = ReferenceTracker()
     export_called = False
+    # Build the system prompt once per turn (not per retry) so that
+    # prompt caching works. The prompt is dynamic because it includes
+    # per-session troubleshooting context (experimental_outcomes).
+    turn_system_prompt = _build_system_prompt(session)
     client = anthropic.Anthropic()
     history = session["history"]
     history.append({"role": "user", "content": user_message})
@@ -1267,7 +1696,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                 with client.messages.stream(
                     model=model,
                     max_tokens=16000,
-                    system=SYSTEM_PROMPT,
+                    system=turn_system_prompt,
                     tools=TOOLS,
                     messages=history,
                     thinking={"type": "enabled", "budget_tokens": 5000},
@@ -1320,6 +1749,18 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                                 result_str = execute_tool(current_tool_name, tool_input, tracker)
                                 if current_tool_name == "export_construct":
                                     export_called = True
+                                # Intercept outcome-log marker and persist to session
+                                if (
+                                    current_tool_name == "log_experimental_outcome"
+                                    and result_str.startswith("[OUTCOME_LOGGED]")
+                                ):
+                                    session.setdefault("experimental_outcomes", []).append({
+                                        "status": tool_input.get("status"),
+                                        "observation": tool_input.get("observation"),
+                                        "construct_name": tool_input.get("construct_name", ""),
+                                        "timestamp": time.time(),
+                                    })
+                                    _save_sessions()
                                 display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
                                 event_data = {
                                     "type": "tool_result",
@@ -2654,6 +3095,37 @@ class AgentHandler(SimpleHTTPRequestHandler):
             session_id = path.split("/")[3]
             cancel_session(session_id)
             self._send_json({"status": "ok"})
+
+        elif path.startswith("/api/sessions/") and path.endswith("/outcome"):
+            # POST /api/sessions/{id}/outcome — record experimental result
+            session_id = path.split("/")[3]
+            session = get_session(session_id)
+            if not session:
+                self._send_json({"error": "Session not found"}, 404)
+                return
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            status = body.get("status")
+            observation = body.get("observation")
+            if status not in ("success", "failed", "partial"):
+                self._send_json({"error": "status must be 'success', 'failed', or 'partial'"}, 400)
+                return
+            if not observation:
+                self._send_json({"error": "observation is required"}, 400)
+                return
+            session.setdefault("experimental_outcomes", []).append({
+                "status": status,
+                "observation": observation,
+                "construct_name": body.get("construct_name", ""),
+                "timestamp": time.time(),
+            })
+            if body.get("project_name"):
+                session["project_name"] = body["project_name"]
+            _save_sessions()
+            self._send_json({
+                "status": "ok",
+                "outcomes_count": len(session["experimental_outcomes"]),
+            })
 
         elif path == "/api/reset":
             # Legacy endpoint — clear all sessions

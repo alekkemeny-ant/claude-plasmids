@@ -106,6 +106,40 @@ _PROMOTER_PROPERTIES = {
     "ltr": "moderate constitutive",
 }
 
+# ── Bespoke promoter detection ───────────────────────────────────────────
+#
+# KNOWN_PROMOTERS: if the user requests one of these, it's a standard part
+# available in the library or easily fetchable. Anything NOT in this set is
+# a "bespoke" promoter → agent should offer: (a) research mode, (b) user
+# pastes sequence, or (c) fetch native upstream region from NCBI genomic.
+KNOWN_PROMOTERS: frozenset[str] = frozenset({
+    # Mammalian constitutive
+    "cmv", "ef1a", "ef1alpha", "ef1", "cag", "cagg", "pgk", "sv40", "ubc",
+    "ubiquitin", "cbh", "cba", "rsv",
+    # Mammalian Pol III (for shRNA/gRNA)
+    "u6", "h1", "7sk",
+    # Tissue-specific (common)
+    "synapsin", "syn", "camkii", "camk2a", "gfap", "mbp", "alb", "albumin",
+    # Bacterial
+    "t7", "sp6", "t3", "lac", "tac", "trc", "arap", "arapbad", "arabad",
+    "tet", "ptet", "rhap", "rhab",
+    # Inducible
+    "tre", "tre3g", "tetO",
+    # Viral/LTR
+    "ltr", "5ltr",
+})
+
+
+def is_known_promoter(name: str) -> bool:
+    """Check if a promoter name is a known/standard promoter.
+
+    Normalizes the name (lowercase, strip non-alphanumeric) before lookup.
+    Returns False for anything not in KNOWN_PROMOTERS — this triggers the
+    "bespoke promoter" workflow in the agent.
+    """
+    normalized = re.sub(r'[^a-z0-9]', '', name.lower())
+    return normalized in KNOWN_PROMOTERS
+
 
 # ── Disambiguation aids ──────────────────────────────────────────────────
 #

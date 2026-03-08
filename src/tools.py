@@ -56,6 +56,50 @@ try:
 except ImportError:
     NCBI_AVAILABLE = False
 
+# Genomic upstream fetch for bespoke promoters (newer, may not exist)
+try:
+    from .ncbi_integration import fetch_genomic_upstream as _fetch_genomic_upstream
+    GENOMIC_UPSTREAM_AVAILABLE = True
+except ImportError:
+    GENOMIC_UPSTREAM_AVAILABLE = False
+
+# Bespoke promoter detection
+try:
+    from .library import is_known_promoter as _is_known_promoter  # noqa: F401
+    PROMOTER_DETECTION_AVAILABLE = True
+except ImportError:
+    PROMOTER_DETECTION_AVAILABLE = False
+
+# ── Phase-2 advanced design modules ──
+# Design Confidence Score
+try:
+    from .confidence import compute_confidence, format_confidence_report
+    CONFIDENCE_AVAILABLE = True
+except ImportError:
+    CONFIDENCE_AVAILABLE = False
+
+# Protein analysis (disorder-based fusion sites)
+try:
+    from .protein_analysis import (
+        translate as _translate_dna,
+        find_fusion_sites as _find_fusion_sites,
+    )
+    PROTEIN_ANALYSIS_AVAILABLE = True
+except ImportError:
+    PROTEIN_ANALYSIS_AVAILABLE = False
+
+# Smart mutations (curated GoF/LoF + deterministic edits)
+try:
+    from .mutations import (
+        lookup_known_mutations as _lookup_known_mutations,
+        apply_point_mutation as _apply_point_mutation,
+        design_premature_stop as _design_premature_stop,
+        parse_mutation_notation as _parse_mutation_notation,
+    )
+    MUTATIONS_AVAILABLE = True
+except ImportError:
+    MUTATIONS_AVAILABLE = False
+
 # Addgene integration (optional)
 try:
     from .addgene_integration import (
@@ -861,6 +905,262 @@ async def fuse_inserts_tool(args):
     return _text(out)
 
 
+# ── Phase-2 Advanced Design tools ──────────────────────────────────────
+
+
+@tool(
+    "score_construct_confidence",
+    "Compute a Design Confidence Score (0-100) for an insert/CDS. Checks "
+    "cryptic polyA/splice signals, CAI, Kozak, GC, linker adequacy, repeat "
+    "runs, promoter count. Use before presenting a final design.",
+    {
+        "type": "object",
+        "properties": {
+            "insert_sequence": {"type": "string", "description": "Insert/CDS DNA sequence to analyze"},
+            "backbone_id": {"type": "string", "description": "Optional backbone ID (for promoter-count check)"},
+            "fusion_parts": {
+                "type": "array",
+                "description": "Optional fusion part metadata for linker adequacy check",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "aa_length": {"type": "integer"},
+                        "is_linker": {"type": "boolean"},
+                    },
+                },
+            },
+        },
+        "required": ["insert_sequence"],
+    },
+)
+async def score_construct_confidence_tool(args):
+    if not CONFIDENCE_AVAILABLE:
+        return _error("Design Confidence module not available.")
+    insert_seq = clean_sequence(args["insert_sequence"])
+    backbone = None
+    if args.get("backbone_id"):
+        backbone = get_backbone_by_id(args["backbone_id"])
+    report = compute_confidence(
+        insert_seq=insert_seq,
+        backbone=backbone,
+        fusion_parts=args.get("fusion_parts"),
+    )
+    return _text(format_confidence_report(report))
+
+
+@tool(
+    "predict_fusion_sites",
+    "Predict disordered regions in a protein as candidate fusion-insertion "
+    "sites. Use for internal/loop fusions or troubleshooting failed terminal "
+    "fusions. Accepts AA sequence or DNA CDS (translated). Returns ranked "
+    "disordered windows. Sequence-based heuristic — verify against AlphaFold2 "
+    "for high-stakes designs.",
+    {
+        "type": "object",
+        "properties": {
+            "protein_sequence": {"type": "string", "description": "Amino-acid sequence (single-letter code)"},
+            "dna_sequence": {"type": "string", "description": "Alternative: DNA CDS (translated in frame 0)"},
+            "min_window": {"type": "integer", "description": "Minimum window length (residues, default 10)", "default": 10},
+        },
+    },
+)
+async def predict_fusion_sites_tool(args):
+    if not PROTEIN_ANALYSIS_AVAILABLE:
+        return _error("Protein Analysis module not available.")
+    aa_seq = args.get("protein_sequence")
+    if not aa_seq and args.get("dna_sequence"):
+        dna = clean_sequence(args["dna_sequence"])
+        aa_seq = _translate_dna(dna)
+    if not aa_seq:
+        return _error("Provide either protein_sequence (AA) or dna_sequence (CDS).")
+    aa_seq = aa_seq.upper().strip()
+    min_window = args.get("min_window", 10)
+    sites = _find_fusion_sites(aa_seq, min_window=min_window)
+    if not sites:
+        return _text(
+            f"No disordered regions ≥{min_window} residues found "
+            f"({len(aa_seq)} aa). Protein may be highly structured; "
+            f"terminal fusion is likely the only option."
+        )
+    lines = [
+        f"Found {len(sites)} candidate fusion site(s) in protein "
+        f"({len(aa_seq)} aa):\n"
+    ]
+    for i, s in enumerate(sites[:5], 1):
+        lines.append(
+            f"  {i}. Residues {s['start']+1}-{s['end']} "
+            f"({s['length']} aa, disorder {s['mean_disorder']:.2f}) "
+            f"— ...{s['context']}..."
+        )
+    lines.append(
+        "\nNote: Sequence-based heuristic. Verify against AlphaFold2 "
+        "for high-stakes designs."
+    )
+    return _text("\n".join(lines))
+
+
+@tool(
+    "lookup_known_mutations",
+    "Look up curated GoF/LoF mutations for common oncogenes and tumor "
+    "suppressors (BRAF, KRAS, TP53, EGFR, PTEN, PIK3CA, IDH1/2, etc.). "
+    "Returns mutation notation, phenotype, PMID. Use when user wants a "
+    "constitutively active / dominant-negative / kinase-dead version.",
+    {
+        "type": "object",
+        "properties": {
+            "gene_symbol": {"type": "string", "description": "Gene symbol (e.g., 'BRAF', 'TP53')"},
+            "mutation_type": {"type": "string", "description": "Filter: 'GoF' or 'LoF'", "enum": ["GoF", "LoF"]},
+        },
+        "required": ["gene_symbol"],
+    },
+)
+async def lookup_known_mutations_tool(args):
+    if not MUTATIONS_AVAILABLE:
+        return _error("Mutation Design module not available.")
+    muts = _lookup_known_mutations(args["gene_symbol"], args.get("mutation_type"))
+    if not muts:
+        ft = f" ({args['mutation_type']})" if args.get("mutation_type") else ""
+        return _text(
+            f"No curated{ft} mutations for '{args['gene_symbol']}'. "
+            f"DB covers BRAF, KRAS, EGFR, PIK3CA, IDH1/2, NRAS, CTNNB1, "
+            f"AKT1, MYC, TP53, PTEN, RB1, FBXW7. For other genes, ask "
+            f"user for a specific mutation or offer premature-stop LoF."
+        )
+    lines = [
+        f"Curated mutations for {args['gene_symbol'].upper()}"
+        f"{' (' + args['mutation_type'] + ')' if args.get('mutation_type') else ''}:\n"
+    ]
+    for m in muts:
+        ref = f" [{m['reference']}]" if m.get("reference") else ""
+        lines.append(f"  • {m['mutation']} ({m['type']}): {m['phenotype']}{ref}")
+        if m.get("codon_change"):
+            lines.append(f"    Codon: {m['codon_change']}")
+    return _text("\n".join(lines))
+
+
+@tool(
+    "apply_mutation",
+    "Apply a deterministic point mutation or premature stop to a CDS. "
+    "Swaps ONE codon at the specified AA position for the preferred human "
+    "codon for the target AA. Rest of sequence preserved exactly. "
+    "SAFETY: Targeted single-codon editing only — no sequence invented.",
+    {
+        "type": "object",
+        "properties": {
+            "dna_sequence": {"type": "string", "description": "Input CDS DNA (in-frame from position 0)"},
+            "method": {"type": "string", "enum": ["point_mutation", "premature_stop"], "default": "point_mutation"},
+            "mutation": {"type": "string", "description": "Standard notation like 'V600E'"},
+            "aa_position": {"type": "integer", "description": "1-indexed AA position (alt to 'mutation')"},
+            "new_aa": {"type": "string", "description": "Target AA single-letter code (with aa_position)"},
+            "position_fraction": {"type": "number", "description": "For premature_stop: stop position (0-1)", "default": 0.1},
+        },
+        "required": ["dna_sequence"],
+    },
+)
+async def apply_mutation_tool(args):
+    if not MUTATIONS_AVAILABLE:
+        return _error("Mutation Design module not available.")
+    dna = clean_sequence(args["dna_sequence"])
+    method = args.get("method", "point_mutation")
+
+    if method == "premature_stop":
+        frac = args.get("position_fraction", 0.1)
+        r = _design_premature_stop(dna, position_fraction=frac)
+        return _text(
+            f"Premature stop introduced at AA position {r['stop_position_aa']} "
+            f"(DNA {r['stop_position_dna']}). "
+            f"Original: {r['original_codon']} ({r['original_aa']}) → TGA.\n\n"
+            f"Mutated sequence ({len(r['sequence'])} bp):\n{r['sequence']}"
+        )
+
+    aa_pos = args.get("aa_position")
+    new_aa = args.get("new_aa")
+    expected_orig = None
+    if args.get("mutation"):
+        parsed = _parse_mutation_notation(args["mutation"])
+        if not parsed:
+            return _error(f"Cannot parse mutation notation '{args['mutation']}'.")
+        aa_pos = parsed["position"]
+        new_aa = parsed["new_aa"]
+        expected_orig = parsed["original_aa"]
+
+    if aa_pos is None or not new_aa:
+        return _error("Provide 'mutation' (e.g., 'V600E') or aa_position + new_aa.")
+
+    r = _apply_point_mutation(dna, aa_position=aa_pos, new_aa=new_aa)
+
+    warn = ""
+    if expected_orig and r["original_aa"] != expected_orig:
+        warn = (
+            f"\n⚠️ Notation expects '{expected_orig}' at position {aa_pos} "
+            f"but sequence has '{r['original_aa']}'. Verify transcript/position."
+        )
+
+    return _text(
+        f"Point mutation: {r['original_aa']}{aa_pos}{r['new_aa']} "
+        f"({r['original_codon']} → {r['new_codon']} at DNA {r['dna_position']}).{warn}\n\n"
+        f"Mutated sequence ({len(r['sequence'])} bp):\n{r['sequence']}"
+    )
+
+
+@tool(
+    "fetch_promoter_region",
+    "Fetch the native upstream genomic region of a gene from NCBI (~2kb 5' "
+    "of TSS). Use ONLY for bespoke promoters when user explicitly chose "
+    "option (c) — native upstream fetch. Warn user this is endogenous "
+    "regulatory region, NOT validated minimal promoter.",
+    {
+        "type": "object",
+        "properties": {
+            "gene_id": {"type": "string", "description": "NCBI Gene ID (e.g., '7157' for TP53)"},
+            "gene_symbol": {"type": "string", "description": "Gene symbol (resolved to gene_id)"},
+            "organism": {"type": "string", "description": "Organism for symbol resolution"},
+            "bp_upstream": {"type": "integer", "description": "bp upstream to fetch (100-10000)", "default": 2000},
+        },
+    },
+)
+async def fetch_promoter_region_tool(args):
+    if not GENOMIC_UPSTREAM_AVAILABLE:
+        return _error("Genomic upstream fetch not available (needs Biopython + NCBI).")
+    gene_id = args.get("gene_id")
+    bp_upstream = args.get("bp_upstream", 2000)
+
+    if not gene_id and args.get("gene_symbol"):
+        if not NCBI_AVAILABLE:
+            return _error("NCBI gene search not available.")
+        genes = _search_gene_fn(args["gene_symbol"], args.get("organism"))
+        if not genes:
+            return _error(f"Gene '{args['gene_symbol']}' not found on NCBI.")
+        if len(genes) > 1 and not args.get("organism"):
+            orgs = {g.get("organism", "") for g in genes}
+            if len(orgs) > 1:
+                return _error(
+                    f"'{args['gene_symbol']}' ambiguous across species: "
+                    f"{', '.join(sorted(orgs))}. Specify organism."
+                )
+        gene_id = genes[0]["gene_id"]
+
+    if not gene_id:
+        return _error("Provide gene_id or gene_symbol.")
+
+    r = _fetch_genomic_upstream(gene_id=gene_id, bp_upstream=bp_upstream)
+    if not r:
+        return _error(
+            f"Could not fetch upstream region for gene_id={gene_id}. "
+            f"Gene may lack annotated genomic coords, or NCBI unavailable."
+        )
+    return _text(
+        f"Native upstream region for {r['gene_symbol']} (gene_id={r['gene_id']}):\n"
+        f"  Organism: {r.get('organism', '?')}\n"
+        f"  Chromosome: {r.get('chromosome_accession', '?')}\n"
+        f"  Strand: {r.get('strand', '?')}\n"
+        f"  Length: {r['length']} bp\n\n"
+        f"⚠️ {r['warning']}\n\n"
+        f"Sequence ({r['length']} bp):\n{r['sequence']}"
+    )
+
+
 # ── Server factory ─────────────────────────────────────────────────────
 
 # Collect all tool objects
@@ -884,6 +1184,12 @@ ALL_TOOLS = [
     fetch_gene_tool,
     get_cell_line_info_tool,
     fuse_inserts_tool,
+    # Phase-2 advanced design tools
+    score_construct_confidence_tool,
+    predict_fusion_sites_tool,
+    lookup_known_mutations_tool,
+    apply_mutation_tool,
+    fetch_promoter_region_tool,
 ]
 
 ALL_TOOL_NAMES = [t.name for t in ALL_TOOLS]

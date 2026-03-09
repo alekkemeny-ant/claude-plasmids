@@ -71,6 +71,7 @@ from library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    extract_insert_from_plasmid as _extract_insert_from_plasmid,
 )
 
 try:
@@ -305,6 +306,26 @@ TOOLS = [
                 "gene_symbol": {"type": "string", "description": "Gene symbol (e.g., 'TP53')"},
                 "organism": {"type": "string", "description": "Organism (e.g., 'human', 'mouse')"},
             },
+        },
+    },
+    {
+        "name": "extract_insert_from_plasmid",
+        "description": (
+            "Extract a CDS insert from a full plasmid sequence by name. "
+            "Uses pLannotate to annotate the plasmid and locate the feature. "
+            "Use this when an insert cannot be found in the local library or NCBI — "
+            "for example, when the user provides a plasmid sequence or an Addgene plasmid "
+            "has been fetched and contains the gene of interest."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within."},
+                "insert_name": {"type": "string", "description": "Name of the gene or feature to extract (case-insensitive)."},
+                "start": {"type": "integer", "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly."},
+                "end": {"type": "integer", "description": "0-based end coordinate (exclusive). If provided along with start, skips annotation and slices directly."},
+            },
+            "required": ["plasmid_sequence", "insert_name"],
         },
     },
     {
@@ -686,6 +707,21 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 out += "This is correct for a protein fusion — translation initiates from the first ATG only.\n"
             out += f"\nFused sequence ({len(fused)} bp):\n{fused}"
             return out
+
+        elif name == "extract_insert_from_plasmid":
+            result = _extract_insert_from_plasmid(
+                plasmid_sequence=args["plasmid_sequence"],
+                insert_name=args["insert_name"],
+                start=args.get("start"),
+                end=args.get("end"),
+            )
+            if not result:
+                return f"Could not extract '{args['insert_name']}' from the provided plasmid sequence."
+            return (
+                f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
+                f"Source: {result['source']}\n\n"
+                f"DNA Sequence:\n{result['sequence']}"
+            )
 
         else:
             return f"Unknown tool: {name}"

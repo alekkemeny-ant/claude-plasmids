@@ -32,6 +32,7 @@ from .library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    extract_insert_from_plasmid as _extract_insert_from_plasmid,
 )
 from .assembler import (
     assemble_construct as _assemble_construct,
@@ -186,6 +187,37 @@ async def get_insert(args):
     if ins.get("sequence"):
         out += f"\n\nDNA Sequence ({len(ins['sequence'])} bp):\n{ins['sequence']}"
     return _text(out)
+
+
+@tool(
+    "extract_insert_from_plasmid",
+    "Extract a CDS insert from a full plasmid sequence by name. Uses pLannotate to annotate the plasmid and locate the feature. Use this when an insert cannot be found in the local library or NCBI — for example, when the user provides a plasmid sequence or an Addgene plasmid has been fetched and contains the gene of interest.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within."},
+            "insert_name": {"type": "string", "description": "Name of the gene or feature to extract (case-insensitive)."},
+            "start": {"type": "integer", "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly."},
+            "end": {"type": "integer", "description": "0-based end coordinate (exclusive). If provided along with start, skips annotation and slices directly."},
+        },
+        "required": ["plasmid_sequence", "insert_name"],
+    },
+)
+async def extract_insert_from_plasmid_tool(args):
+    result = _extract_insert_from_plasmid(
+        plasmid_sequence=args["plasmid_sequence"],
+        insert_name=args["insert_name"],
+        start=args.get("start"),
+        end=args.get("end"),
+    )
+    if not result:
+        return _text(f"Could not extract '{args['insert_name']}' from the provided plasmid sequence.")
+    seq = result["sequence"]
+    return _text(
+        f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
+        f"Source: {result['source']}\n\n"
+        f"DNA Sequence:\n{seq}"
+    )
 
 
 @tool(
@@ -785,6 +817,7 @@ ALL_TOOLS = [
     search_gene_tool,
     fetch_gene_tool,
     fuse_inserts_tool,
+    extract_insert_from_plasmid_tool,
 ]
 
 ALL_TOOL_NAMES = [t.name for t in ALL_TOOLS]

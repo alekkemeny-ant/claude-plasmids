@@ -251,6 +251,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 | `search_inserts` | Search inserts by name/category |
 | `get_backbone` | Get full backbone info (optionally with sequence) |
 | `get_insert` | Get full insert info with sequence (auto-fallback to NCBI) |
+| `extract_insert_from_plasmid` | Extract a CDS from a full plasmid sequence by name (pLannotate-based fallback) |
 | `get_insertion_site` | Get MCS position for a backbone |
 
 ### NCBI Gene Integration
@@ -291,6 +292,8 @@ User wants to build a construct
   │   │   ├─ Species not specified? → ask user: "Which species — human, mouse, etc.?"
   │   │   ├─ Multiple variants found? → present options and ask user to choose (e.g., H2B subtypes)
   │   │   └─ Single unambiguous match → proceed
+  │   ├─ Addgene plasmid fetched and contains the gene?
+  │   │   └─ extract_insert_from_plasmid(plasmid_sequence, insert_name)
   │   ├─ User provided raw sequence? → validate_sequence
   │   └─ None of the above? → ask user for sequence
   ├─ Is this a fusion / tagged protein?

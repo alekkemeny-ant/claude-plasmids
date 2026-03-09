@@ -63,6 +63,7 @@ from .library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    extract_insert_from_plasmid as _extract_insert_from_plasmid,
 )
 
 logger = logging.getLogger(__name__)
@@ -450,6 +451,38 @@ async def list_tools() -> list[Tool]:
                         "description": "Organism (e.g., 'human', 'mouse')"
                     }
                 }
+            }
+        ),
+        Tool(
+            name="extract_insert_from_plasmid",
+            description=(
+                "Extract a CDS insert from a full plasmid sequence by name. "
+                "Uses pLannotate to annotate the plasmid and locate the feature. "
+                "Use this when an insert cannot be found in the local library or NCBI — "
+                "for example, when the user provides a plasmid sequence or an Addgene plasmid "
+                "has been fetched and contains the gene of interest."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "plasmid_sequence": {
+                        "type": "string",
+                        "description": "Full plasmid DNA sequence to search within."
+                    },
+                    "insert_name": {
+                        "type": "string",
+                        "description": "Name of the gene or feature to extract (case-insensitive)."
+                    },
+                    "start": {
+                        "type": "integer",
+                        "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly."
+                    },
+                    "end": {
+                        "type": "integer",
+                        "description": "0-based end coordinate (exclusive). If provided along with start, skips annotation and slices directly."
+                    },
+                },
+                "required": ["plasmid_sequence", "insert_name"]
             }
         ),
         Tool(
@@ -1052,6 +1085,23 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=output)]
         except ValueError as e:
             return [TextContent(type="text", text=f"Fusion error: {str(e)}")]
+
+    elif name == "extract_insert_from_plasmid":
+        result = _extract_insert_from_plasmid(
+            plasmid_sequence=arguments["plasmid_sequence"],
+            insert_name=arguments["insert_name"],
+            start=arguments.get("start"),
+            end=arguments.get("end"),
+        )
+        if not result:
+            return [TextContent(type="text", text=f"Could not extract '{arguments['insert_name']}' from the provided plasmid sequence.")]
+        seq = result["sequence"]
+        output = (
+            f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
+            f"Source: {result['source']}\n\n"
+            f"DNA Sequence:\n{seq}"
+        )
+        return [TextContent(type="text", text=output)]
 
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]

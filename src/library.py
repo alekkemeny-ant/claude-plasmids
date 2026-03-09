@@ -573,4 +573,90 @@ def search_all_sources(
                 results["errors"][name] = str(e)
                 logger.warning(f"Concurrent search error ({name}): {e}")
 
-    return results
+
+def extract_insert_from_plasmid(
+    plasmid_sequence: str,
+    insert_name: str,
+    start: Optional[int] = None,
+    end: Optional[int] = None,
+) -> Optional[dict]:
+    """Extract an insert CDS from a plasmid sequence.
+
+    If start and end are provided, slices the sequence directly at those
+    0-based coordinates. Otherwise, runs pLannotate to annotate the plasmid
+    and finds the feature whose name best matches insert_name.
+
+    Args:
+        plasmid_sequence: Full plasmid DNA sequence string.
+        insert_name: Name of the gene/feature to extract (case-insensitive).
+        start: 0-based start coordinate (optional, skips annotation if given).
+        end: 0-based end coordinate (optional, skips annotation if given).
+
+    Returns:
+        Insert dict with keys id, name, sequence, size_bp, source — or None if
+        not found.
+    """
+    plasmid_sequence = re.sub(r'\s', '', plasmid_sequence.upper())
+    breakpoint()
+    # ── Explicit coordinates: slice directly ──────────────────────────────
+    if start is not None and end is not None:
+        seq = plasmid_sequence[start:end]
+        if not seq:
+            logger.warning(f"extract_insert_from_plasmid: empty slice [{start}:{end}]")
+            return None
+        return {
+            "id": insert_name,
+            "name": insert_name,
+            "sequence": seq,
+            "size_bp": len(seq),
+            "source": "extracted_from_plasmid",
+        }
+
+    # ── pLannotate annotation: find feature by name ───────────────────────
+    try:
+        from plannotate.annotate import annotate
+    except ImportError:
+        logger.error(
+            "pLannotate is not installed. Cannot annotate plasmid to extract insert. "
+            "Run: conda install -c bioconda plannotate"
+        )
+        return None
+
+    # Ensure conda env bin dir is on PATH so pLannotate can find blastn/cmscan
+    import os, sys
+    conda_bin = str(Path(sys.executable).parent)
+    if conda_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
+
+    breakpoint()
+    df = annotate(plasmid_sequence, linear=False)
+
+    if df.empty:
+        logger.info(f"extract_insert_from_plasmid: pLannotate found no features in plasmid")
+        return None
+
+    # Case-insensitive match: prefer exact, then partial
+    name_lower = insert_name.lower()
+    exact = df[df["Feature"].str.lower() == name_lower]
+    match = exact if not exact.empty else df[df["Feature"].str.lower().str.contains(name_lower, na=False)]
+
+    if match.empty:
+        logger.info(
+            f"extract_insert_from_plasmid: no feature matching '{insert_name}' found. "
+            f"Available: {df['Feature'].tolist()}"
+        )
+        return None
+
+    # Use the highest-scoring (first) match
+    row = match.iloc[0]
+    feat_start = int(row["qstart"])
+    feat_end = int(row["qend"])
+    seq = plasmid_sequence[feat_start:feat_end]
+
+    return {
+        "id": insert_name,
+        "name": str(row["Feature"]),
+        "sequence": seq,
+        "size_bp": len(seq),
+        "source": "extracted_from_plasmid",
+    }

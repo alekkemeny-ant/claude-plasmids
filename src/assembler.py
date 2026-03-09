@@ -8,8 +8,11 @@ on verified sequences.
 """
 
 import logging
+import os
 import re
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 import io
 from typing import Optional
 from Bio import SeqIO

@@ -54,7 +54,8 @@ Use tools to obtain both sequences. Follow this resolution order:
 **For the backbone:**
 1. Search with `search_backbones` or `get_backbone`. If the backbone isn't in the local library, it will automatically be fetched from Addgene (sequence + feature annotations) and cached locally.
 2. Confirm the backbone has a full sequence. If not, tell the user.
-3. You can also use `search_addgene` and `get_addgene_plasmid` to browse Addgene directly if needed.
+3. Call `get_insertion_site` to retrieve the MCS start/end positions for this backbone. Store this position — it will be used as the default insertion point in Step 3.
+4. You can also use `search_addgene` and `get_addgene_plasmid` to browse Addgene directly if needed.
 
 **For the insert:**
 1. Search the local library: `search_inserts` or `get_insert`
@@ -70,7 +71,7 @@ Use tools to obtain both sequences. Follow this resolution order:
 **STOP and confirm with the user** before proceeding to assembly. Present a design summary:
 - Backbone name, size, promoter, resistance markers
 - Insert name, size, start/stop codons present
-- Insertion position (MCS start, unless user specifies otherwise)
+- Insertion position (MCS start from `get_insertion_site`, unless user specifies otherwise)
 - Any fusions, tags, or linkers being used
 
 Then explicitly ask: **"Would you like to proceed with this design, or would you like to modify anything?"** Do NOT continue to Step 3 until the user confirms they want to proceed.
@@ -283,6 +284,7 @@ User wants to build a construct
   │   ├─ Yes → proceed
   │   └─ No → get_backbone(include_sequence=true)
   │           (auto-fetches from Addgene if not in local library)
+  ├─ get_insertion_site(backbone_id=...) → record MCS start position
   ├─ Do I have the insert sequence?
   │   ├─ In local library? → get_insert (also tries NCBI fallback)
   │   ├─ Gene name given? → search_gene → fetch_gene (NCBI CDS)
@@ -303,9 +305,6 @@ User wants to build a construct
   │       │   ├─ User provides linker → fuse_inserts([...], linker="<user sequence>")
   │       │   └─ Default → fuse_inserts([...]) (omit linker param)
   │       └─ Use fused sequence for assembly
-  ├─ Do I know the insertion position?
-  │   ├─ Yes → proceed
-  │   └─ No → get_insertion_site → use MCS start
   ├─ Assemble: assemble_construct(...)
   ├─ Validate: validate_construct(...)
   └─ Export: export_construct(...)

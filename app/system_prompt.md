@@ -78,13 +78,15 @@ Use tools to obtain both sequences. Follow this resolution order:
 2. Use `fuse_inserts` to create the fused CDS with proper codon management
 3. Use the fused sequence as the insert for assembly
 
-**STOP and confirm with the user** before proceeding to assembly. Present a design summary:
+**Design Summary** — present before assembly:
 - Backbone name, size, promoter, resistance markers
 - Insert name, size, start/stop codons present
 - Insertion position (MCS start, unless user specifies otherwise)
 - Any fusions, tags, or linkers being used
 
-Then explicitly ask: **"Would you like to proceed with this design, or would you like to modify anything?"** Do NOT continue to Step 3 until the user confirms they want to proceed.
+**Proceed or confirm — intent-gated:**
+- **If the user's prompt explicitly asked for assembly** (verbs like *"assemble"*, *"build"*, *"return the sequence"*, *"give me the construct"*, *"output the DNA"*) → the summary is informational. **Proceed directly to Step 3.** Do not ask for confirmation — the user already delegated the action.
+- **Otherwise** (exploratory requests like *"can you design..."*, *"what would it look like..."*, *"help me think about..."*) → ask: *"Would you like to proceed with this design, or would you like to modify anything?"* and wait for confirmation before Step 3.
 
 ### Step 3: Assemble the Construct
 

@@ -66,6 +66,19 @@ except ImportError:
         FPBASE_AVAILABLE = False
 
 
+# ── Read-only mode (for evals / parallel-safe operation) ───────────────
+# When enabled, library lookups still work (incl. Addgene/NCBI/FPbase fallbacks)
+# but results are NOT written back to library/*.json. Prevents eval side-effects
+# and eliminates the unprotected read-modify-write race under parallelism.
+_LIBRARY_READONLY = False
+
+
+def set_library_readonly(readonly: bool = True) -> None:
+    """Disable writes to library/*.json. Call before running evals."""
+    global _LIBRARY_READONLY
+    _LIBRARY_READONLY = readonly
+
+
 def load_backbones() -> dict:
     """Load backbone library from JSON file."""
     with open(LIBRARY_PATH / "backbones.json", "r") as f:
@@ -428,9 +441,10 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
             return backbone
 
         # Exact-name match: cache to local library for future fast lookups
-        data["backbones"].append(backbone)
-        with open(LIBRARY_PATH / "backbones.json", "w") as f:
-            json.dump(data, f, indent=2)
+        if not _LIBRARY_READONLY:
+            data["backbones"].append(backbone)
+            with open(LIBRARY_PATH / "backbones.json", "w") as f:
+                json.dump(data, f, indent=2)
 
         logger.info(
             f"Cached Addgene #{addgene_id} as '{backbone['id']}' "
@@ -554,7 +568,7 @@ def get_insert_by_id(insert_id: str, organism: Optional[str] = None) -> Optional
                 }
                 # Cache to local library (FPbase DNA is canonical)
                 existing_ids = {i["id"] for i in data["inserts"]}
-                if insert["id"] not in existing_ids:
+                if insert["id"] not in existing_ids and not _LIBRARY_READONLY:
                     data["inserts"].append(insert)
                     with open(LIBRARY_PATH / "inserts.json", "w") as f:
                         json.dump(data, f, indent=2)
@@ -608,7 +622,7 @@ def get_insert_by_id(insert_id: str, organism: Optional[str] = None) -> Optional
 
         # Cache to local library (skip if gene already cached)
         existing_ids = {i["id"] for i in data["inserts"]}
-        if insert["id"] not in existing_ids:
+        if insert["id"] not in existing_ids and not _LIBRARY_READONLY:
             data["inserts"].append(insert)
             with open(LIBRARY_PATH / "inserts.json", "w") as f:
                 json.dump(data, f, indent=2)

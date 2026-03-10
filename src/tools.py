@@ -13,6 +13,7 @@ Usage:
     # Pass to ClaudeAgentOptions(mcp_servers={"plasmid-library": server_config})
 """
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Optional
@@ -367,11 +368,13 @@ async def export_construct(args):
             desc = f"{iname} in {bname}, {len(seq)} bp" if bname else f"{len(seq)} bp"
             return _text(format_as_fasta(seq, cname, desc))
         elif fmt in ("genbank", "gb"):
-            return _text(format_as_genbank(
+            result = await asyncio.to_thread(
+                format_as_genbank,
                 sequence=seq, name=cname, backbone_name=bname,
                 insert_name=iname, insert_position=ipos, insert_length=ilen,
                 reverse_complement_insert=rc_insert,
-            ))
+            )
+            return _text(result)
         else:
             return _error(f"Unknown format: {fmt}")
     except Exception as e:

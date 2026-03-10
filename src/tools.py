@@ -486,9 +486,9 @@ async def export_construct(args):
         "properties": {
             "construct_sequence": {"type": "string", "description": "Assembled construct to validate"},
             "backbone_id": {"type": "string", "description": "Expected backbone ID"},
-            "insert_id": {"type": "string", "description": "Expected insert ID"},
+            "insert_id": {"type": "string", "description": "Expected insert ID — use ONLY for single (non-fusion) inserts. For fusions, use insert_sequence with the full fused sequence instead."},
             "backbone_sequence": {"type": "string", "description": "Expected backbone sequence"},
-            "insert_sequence": {"type": "string", "description": "Expected insert sequence"},
+            "insert_sequence": {"type": "string", "description": "Expected insert sequence. For fusions, pass the complete fused_sequence from fuse_inserts — never a single component ID."},
             "expected_insert_position": {"type": "integer", "description": "Expected insert position"},
         },
         "required": ["construct_sequence"],

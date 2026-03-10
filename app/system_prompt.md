@@ -150,12 +150,24 @@ assemble_construct(
 
 ### Step 4: Validate the Result
 
-Call `validate_construct` on the assembled sequence to verify correctness:
+Call `validate_construct` on the assembled sequence to verify correctness.
+
+**Simple insert** (single gene, no fusion):
 ```
 validate_construct(
   construct_sequence="<assembled sequence>",
   backbone_id="pcDNA3.1(+)",
   insert_id="EGFP",
+  expected_insert_position=895
+)
+```
+
+**Fusion or tagged construct** — ALWAYS use `insert_sequence` with the full fused sequence, never `insert_id` of a single component. Using a component ID (e.g., `insert_id="EGFP"`) will look for EGFP at position 895, but the EGFP portion starts much later in the fusion, causing false position/size/backbone failures:
+```
+validate_construct(
+  construct_sequence="<assembled sequence>",
+  backbone_id="pcDNA3.1(+)",
+  insert_sequence="<exact fused_sequence from fuse_inserts output>",
   expected_insert_position=895
 )
 ```

@@ -114,9 +114,10 @@ assemble_construct(
 )
 ```
 
-**With a protein-protein fusion (e.g., H2B-EGFP) — use default linker:**
+**With a protein-protein fusion (e.g., H2B-EGFP) — ask about linker first:**
+Before calling `fuse_inserts`, ask: "Do you have a preferred linker sequence, or should I use the default (GGGGS)×4?" Then proceed based on the answer:
 ```
-# Protein fusions: omit linker to use default (GGGGS)x4 + Kozak
+# User chose default linker: omit linker param
 fuse_inserts(inserts=[
   {"insert_id": "H2B"},
   {"insert_id": "EGFP"}
@@ -192,10 +193,11 @@ export_construct(
 Present the user with:
 1. A summary of the construct (backbone, insert, total size, key features)
 2. The validation report (all checks passed / any warnings)
-3. The exported sequence in their requested format. 
+3. The exported sequence in their requested format.
+References: call `get_references` and list all sequence sources used.
 
 
-**Do not describe the output file format or download instructions.** Only present the construct summary, validation report, and exported sequence.
+**Do not describe the output file format or download instructions.** 
 
 ## Protein Tagging & Fusions
 
@@ -209,8 +211,8 @@ Use `linker=""` when fusing a short epitope tag (FLAG, HA, His6, Myc, V5) to a p
 
 Example: `fuse_inserts(inserts=[{"insert_id": "FLAG_tag"}, {"insert_id": "EGFP"}], linker="")`
 
-### Protein-protein fusions (two proteins) → default linker
-When fusing two proteins (e.g., H2B-EGFP, GeneX-mCherry), omit the `linker` parameter to use the default `(GGGGS)x4` flexible linker. This linker prevents steric interference between the two folded protein domains.
+### Protein-protein fusions (two proteins) → ask about linker first
+When fusing two proteins (e.g., H2B-EGFP, GeneX-mCherry), **always ask the user before proceeding**: "Do you have a preferred linker sequence, or should I use the default (GGGGS)×4 flexible linker?" Only proceed once the user has answered. The default `(GGGGS)x4` linker prevents steric interference between folded protein domains but the user may have a specific linker in mind.
 
 - **Fusion notation**: N-to-C order — "H2B-eGFP" means H2B is N-terminal, eGFP is C-terminal.
 

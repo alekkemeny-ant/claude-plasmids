@@ -60,6 +60,11 @@ try:
     NCBI_AVAILABLE = True
 except ImportError:
     NCBI_AVAILABLE = False
+try:
+    from literature import fetch_oa_fulltext as _fetch_oa_fulltext
+    LITERATURE_AVAILABLE = True
+except ImportError:
+    LITERATURE_AVAILABLE = False
 from library import (
     get_backbone_by_id,
     get_insert_by_id,
@@ -328,6 +333,17 @@ TOOLS = [
                 "linker": {"type": "string", "description": "Optional linker DNA between fusion partners"},
             },
             "required": ["inserts"],
+        },
+    },
+    {
+        "name": "fetch_oa_fulltext",
+        "description": "Look up a paper by DOI on Unpaywall to find open-access full-text URLs. Use when the user references a paper and you need to find its methods section for plasmid construction details. Returns PDF URL and OA status.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doi": {"type": "string", "description": "DOI (e.g., '10.1038/nature12373')"},
+            },
+            "required": ["doi"],
         },
     },
 ]
@@ -686,6 +702,30 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 out += "This is correct for a protein fusion — translation initiates from the first ATG only.\n"
             out += f"\nFused sequence ({len(fused)} bp):\n{fused}"
             return out
+
+        elif name == "fetch_oa_fulltext":
+            if not LITERATURE_AVAILABLE:
+                return "Literature integration not available."
+            result = _fetch_oa_fulltext(args["doi"])
+            if not result.get("found"):
+                return f"Unpaywall lookup failed: {result.get('error', 'unknown')}"
+            if not result.get("is_oa"):
+                return (
+                    f"Paper found but no open-access copy available.\n"
+                    f"Title: {result.get('title')}\n"
+                    f"Journal: {result.get('journal')} ({result.get('year')})"
+                )
+            lines = [
+                "Open-access copy found:",
+                f"  Title: {result.get('title')}",
+                f"  Journal: {result.get('journal')} ({result.get('year')})",
+                f"  Host: {result.get('host_type')} (license: {result.get('license') or 'unspecified'})",
+            ]
+            if result.get("pdf_url"):
+                lines.append(f"  PDF: {result['pdf_url']}")
+            if result.get("landing_url"):
+                lines.append(f"  Landing page: {result['landing_url']}")
+            return "\n".join(lines)
 
         else:
             return f"Unknown tool: {name}"

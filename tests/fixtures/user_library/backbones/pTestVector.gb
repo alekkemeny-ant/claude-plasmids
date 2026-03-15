@@ -1,0 +1,17 @@
+LOCUS       pTestVector              300 bp    DNA     circular SYN 01-JAN-2026
+DEFINITION  Test vector for BYOL unit tests.
+FEATURES             Location/Qualifiers
+     promoter        10..50
+                     /label="CMV promoter"
+     misc_feature    60..120
+                     /label="MCS"
+                     /note="multiple cloning site for test vector"
+     rep_origin      complement(200..280)
+                     /label="pUC ori"
+ORIGIN
+        1 atcgatcgat cgatcgatcg atcgatcgat cgatcgatcg atcgatcgat cgatcgatcg
+       61 ggatccgaat tcaagcttgg taccgagctc ggatccgaat tcaagcttgg taccgagctc
+      121 atcgatcgat cgatcgatcg atcgatcgat cgatcgatcg atcgatcgat cgatcgatcg
+      181 atcgatcgat cgatcgatcg atcgatcgat cgatcgatcg atcgatcgat cgatcgatcg
+      241 atcgatcgat cgatcgatcg atcgatcgat cgatcgatcg atcgatcgat cgatcgatcg
+//

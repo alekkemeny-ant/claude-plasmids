@@ -36,6 +36,19 @@ echo "ANTHROPIC_API_KEY=sk-ant-..." > app/.env
 
 You can get an API key at https://console.anthropic.com.
 
+### Optional capabilities
+
+Additional env vars enable optional data sources:
+
+| Env var | Effect | Availability |
+|---|---|---|
+| `PLASMID_USER_LIBRARY` | Path to a directory of user-provided GenBank files (`backbones/*.gb`, `inserts/*.gb`). Entries appear with `user:` ID prefix. | CLI + Web UI |
+| `BENCHLING_SUBDOMAIN` | Your Benchling workspace subdomain. Enables read+write access via Benchling's remote MCP. | CLI only¹ |
+| `PLASMID_ENABLE_PUBMED` | Default `1`. Set `0` to disable PubMed MCP (literature search + PMC full text). | CLI only¹ |
+| `UNPAYWALL_EMAIL` | Your email. Enables `fetch_oa_fulltext` for open-access papers outside PMC. | CLI + Web UI |
+
+¹ The web UI uses the raw Anthropic API (not the Agent SDK) and cannot attach external MCP servers. Benchling and PubMed tools are only available via `python app/agent.py` or the evals harness.
+
 ### 4. Start the web UI
 
 ```bash

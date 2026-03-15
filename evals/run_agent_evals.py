@@ -50,7 +50,7 @@ from claude_agent_sdk import (
     PermissionResultAllow,
 )
 from claude_agent_sdk.types import UserMessage
-from src.tools import create_plasmid_tools, ALL_TOOL_NAMES
+from src.tools import build_mcp_servers
 from src.library import get_backbone_by_id, get_insert_by_id
 from src.assembler import find_mcs_insertion_point
 from evals.rubric import score_construct, RubricResult
@@ -937,12 +937,12 @@ async def run_agent(
     response, which is fed back to the agent via client.query().
     """
     trace = AgentTrace(prompt=prompt)
-    server_config = create_plasmid_tools()
 
+    # build_mcp_servers() includes plasmid-library + optional Benchling/PubMed.
+    # allowed_tools omitted — would block external MCP tools. can_use_tool gates.
     options = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
-        mcp_servers={"plasmid-library": server_config},
-        allowed_tools=ALL_TOOL_NAMES,
+        mcp_servers=build_mcp_servers(),
         permission_mode="acceptEdits",
         model=model,
         max_turns=max_turns,

@@ -42,17 +42,58 @@ except ImportError:
     except ImportError:
         NCBI_AVAILABLE = False
 
+# Optional user library (BYOL — bring your own library)
+try:
+    from .user_library import load_user_backbones, load_user_inserts
+    USER_LIBRARY_AVAILABLE = True
+except ImportError:
+    try:
+        from user_library import load_user_backbones, load_user_inserts
+        USER_LIBRARY_AVAILABLE = True
+    except ImportError:
+        USER_LIBRARY_AVAILABLE = False
 
-def load_backbones() -> dict:
-    """Load backbone library from JSON file."""
+
+def _load_builtin_backbones() -> dict:
+    """Load built-in backbone library from JSON file (no user-library merge).
+
+    This is the cache-write-safe loader. The Addgene auto-cache path uses
+    this to re-read fresh from disk before appending, ensuring user-library
+    entries (merged in by load_backbones) never leak into backbones.json.
+    """
     with open(LIBRARY_PATH / "backbones.json", "r") as f:
         return json.load(f)
 
 
-def load_inserts() -> dict:
-    """Load insert library from JSON file."""
+def _load_builtin_inserts() -> dict:
+    """Load built-in insert library from JSON file (no user-library merge)."""
     with open(LIBRARY_PATH / "inserts.json", "r") as f:
         return json.load(f)
+
+
+def load_backbones() -> dict:
+    """Load backbone library: built-in + user library (if configured).
+
+    User entries (from $PLASMID_USER_LIBRARY/backbones/) are appended with
+    `user:` ID prefix. Callers that persist to disk must use
+    _load_builtin_backbones instead to avoid writing user entries.
+    """
+    data = _load_builtin_backbones()
+    if USER_LIBRARY_AVAILABLE:
+        user_entries = load_user_backbones()
+        if user_entries:
+            data["backbones"] = data["backbones"] + user_entries
+    return data
+
+
+def load_inserts() -> dict:
+    """Load insert library: built-in + user library (if configured)."""
+    data = _load_builtin_inserts()
+    if USER_LIBRARY_AVAILABLE:
+        user_entries = load_user_inserts()
+        if user_entries:
+            data["inserts"] = data["inserts"] + user_entries
+    return data
 
 
 def normalize_name(name: str) -> str:
@@ -246,10 +287,13 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
 
         backbone = plasmid.to_backbone_dict()
 
-        # Cache to local library for future fast lookups
-        data["backbones"].append(backbone)
+        # Cache to local library for future fast lookups.
+        # Re-read built-in from disk — `data` above came from load_backbones()
+        # which may include merged user-library entries we must not persist.
+        builtin = _load_builtin_backbones()
+        builtin["backbones"].append(backbone)
         with open(LIBRARY_PATH / "backbones.json", "w") as f:
-            json.dump(data, f, indent=2)
+            json.dump(builtin, f, indent=2)
 
         logger.info(
             f"Cached Addgene #{addgene_id} as '{backbone['id']}' "
@@ -329,12 +373,15 @@ def get_insert_by_id(insert_id: str) -> Optional[dict]:
             "source": "NCBI",
         }
 
-        # Cache to local library (skip if gene already cached)
-        existing_ids = {i["id"] for i in data["inserts"]}
+        # Cache to local library (skip if gene already cached).
+        # Re-read built-in from disk — `data` above came from load_inserts()
+        # which may include merged user-library entries we must not persist.
+        builtin = _load_builtin_inserts()
+        existing_ids = {i["id"] for i in builtin["inserts"]}
         if insert["id"] not in existing_ids:
-            data["inserts"].append(insert)
+            builtin["inserts"].append(insert)
             with open(LIBRARY_PATH / "inserts.json", "w") as f:
-                json.dump(data, f, indent=2)
+                json.dump(builtin, f, indent=2)
 
         logger.info(
             f"Cached NCBI gene '{result['symbol']}' "

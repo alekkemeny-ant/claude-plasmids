@@ -938,8 +938,12 @@ async def run_agent(
     """
     trace = AgentTrace(prompt=prompt)
 
-    # build_mcp_servers() includes plasmid-library + optional Benchling/PubMed.
-    # allowed_tools omitted — would block external MCP tools. can_use_tool gates.
+    # Evals must be deterministic and network-independent. Force external MCP
+    # servers OFF regardless of ambient env — PubMed defaults on otherwise and
+    # would make eval scores vary with network availability.
+    os.environ["PLASMID_ENABLE_PUBMED"] = "0"
+    os.environ.pop("BENCHLING_SUBDOMAIN", None)
+
     options = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
         mcp_servers=build_mcp_servers(),

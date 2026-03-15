@@ -7,10 +7,10 @@ Each tool wraps existing functions from library.py, assembler.py, and
 addgene_integration.py.
 
 Usage:
-    from src.tools import create_plasmid_tools
+    from src.tools import build_mcp_servers
 
-    server_config = create_plasmid_tools()
-    # Pass to ClaudeAgentOptions(mcp_servers={"plasmid-library": server_config})
+    # Includes plasmid-library + optional Benchling/PubMed (env-gated)
+    options = ClaudeAgentOptions(mcp_servers=build_mcp_servers(), ...)
 """
 
 import json

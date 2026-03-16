@@ -39,6 +39,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
+    assemble_golden_gate as _assemble_golden_gate,
+    GG_ENZYMES,
     reverse_complement,
     find_mcs_insertion_point,
     resolve_insertion_point,
@@ -533,6 +535,45 @@ TOOLS = [
                 "organism": {"type": "string", "description": "Organism for symbol→ID resolution (e.g., 'human')"},
                 "bp_upstream": {"type": "integer", "description": "How many bp upstream to fetch (100-10000, default 2000)", "default": 2000},
             },
+        },
+    },
+    {
+        "name": "assemble_golden_gate",
+        "description": (
+            "Perform in-silico Golden Gate assembly. "
+            "Digests the backbone vector at its Type IIS restriction enzyme sites "
+            "to open the cloning window (discarding the dropout cassette). "
+            "Each part is excised from its carrier vector using the same enzyme. "
+            "Parts are ligated in the order dictated by complementary 4-nt overhangs. "
+            "Use this for Allen Institute modular expression system parts or any "
+            "standard Golden Gate workflow. "
+            "Parts must have category='part_in_vector' and a 'plasmid_sequence' field."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "backbone_id": {
+                    "type": "string",
+                    "description": "Library ID of the backbone vector (must contain Type IIS sites).",
+                },
+                "part_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Library IDs of the parts to assemble, in approximate order. "
+                        "Exact order is inferred from overhang matching."
+                    ),
+                },
+                "enzyme_name": {
+                    "type": "string",
+                    "enum": list(GG_ENZYMES.keys()),
+                    "description": (
+                        "Type IIS restriction enzyme used for the assembly "
+                        "(Esp3I, BsmBI, BsaI, or BbsI). Defaults to Esp3I."
+                    ),
+                },
+            },
+            "required": ["backbone_id", "part_ids"],
         },
     },
     {
@@ -1397,6 +1438,67 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 f"{result['sequence']}"
             )
             return out
+
+        elif name == "assemble_golden_gate":
+            backbone_id = args["backbone_id"]
+            part_ids = args["part_ids"]
+            enzyme_name = args.get("enzyme_name", "Esp3I")
+
+            backbone = get_backbone_by_id(backbone_id)
+            if not backbone:
+                return f"Backbone {backbone_id!r} not found in library."
+            bb_seq = backbone.get("plasmid_sequence") or backbone.get("sequence", "")
+            if not bb_seq:
+                return f"Backbone {backbone_id!r} has no plasmid_sequence."
+
+            parts = []
+            for pid in part_ids:
+                part = get_insert_by_id(pid)
+                if not part:
+                    return f"Part {pid!r} not found in library."
+                ps = part.get("plasmid_sequence") or part.get("sequence", "")
+                if not ps:
+                    return (
+                        f"Part {pid!r} has no plasmid_sequence. "
+                        "Golden Gate requires the full carrier vector sequence."
+                    )
+                parts.append({
+                    "name": part.get("name", pid),
+                    "plasmid_sequence": ps,
+                    "overhang_l": part.get("overhang_l"),
+                    "overhang_r": part.get("overhang_r"),
+                })
+
+            result = _assemble_golden_gate(
+                backbone_plasmid_seq=bb_seq,
+                parts=parts,
+                enzyme_name=enzyme_name,
+            )
+
+            if not result.success:
+                return "Golden Gate assembly failed:\n" + "\n".join(
+                    f"  • {e}" for e in result.errors
+                )
+
+            warnings_block = ""
+            if result.warnings:
+                warnings_block = "\n\nWarnings:\n" + "\n".join(
+                    f"  ⚠ {w}" for w in result.warnings
+                )
+
+            junctions = " → ".join(result.junction_overhangs)
+            order_str = " → ".join(result.assembly_order) if result.assembly_order else "(backbone only)"
+
+            return (
+                f"Golden Gate assembly successful ({enzyme_name}).\n\n"
+                f"Assembly order : {order_str}\n"
+                f"Junctions (4-nt): {junctions}\n"
+                f"Total size     : {result.total_size_bp} bp\n\n"
+                # NOTE: full sequence must be returned here so the agent can pass it
+                # directly to validate_construct and export_construct. Do NOT truncate.
+                f"Assembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
+                + warnings_block
+            )
 
         elif name == "log_experimental_outcome":
             # This tool needs session context to store the outcome. The

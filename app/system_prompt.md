@@ -226,6 +226,58 @@ The `fuse_inserts` tool automatically handles codons at junctions:
   - Non-last sequences: stop codon removed
   - Last sequence: kept intact (ATG removed for protein fusions, not if the protein is C-terminal to a tag, stop codon preserved)
 
+## Golden Gate Assembly
+
+Use this workflow when the user wants to assemble a construct using Type IIS restriction enzyme-based cloning (Golden Gate, Modular Cloning, or the Allen Institute modular expression system).
+
+### When to use Golden Gate
+- User explicitly asks for Golden Gate, MoClo, or Type IIS assembly
+- User references Allen Institute modular parts (library prefix AICS_P, AICS_O, AICS_T)
+- Backbone vector is a Golden Gate-ready vector (contains Esp3I/BsaI/BbsI sites flanking a dropout cassette)
+- Parts are stored as `category: "part_in_vector"` in the insert library
+
+### Golden Gate Workflow
+
+**Step 1 — Identify the enzyme**
+Ask the user which enzyme they are using, or read it from the backbone metadata (`assembly_enzyme` field). Common choices:
+- **Esp3I / BsmBI** (CGTCTC) — Allen Institute modular system
+- **BsaI** (GGTCTC) — Level 0/1 MoClo
+- **BbsI** (GAAGAC) — some Golden Gate kits
+
+**Step 2 — Confirm the backbone**
+Use `get_backbone` to retrieve the vector. Confirm it contains the correct enzyme recognition sites and has a dropout cassette (negative selection). The backbone's `assembly_enzyme` field should match the chosen enzyme.
+
+**Step 3 — Identify the parts**
+For each part the user specifies, use `get_insert` (or `search_inserts` with `category=part_in_vector`) to retrieve the full entry. Each part must have a `plasmid_sequence` field — this is the carrier vector used to cut out the insert.
+
+For Allen Institute modular parts:
+- **Promoters** (AICS_P): overhang pair Alpha→K
+- **ORFs** (AICS_O): overhang pair K→Y
+- **Terminators** (AICS_T): overhang pair Gamma→Delta
+
+**Step 4 — Assemble**
+Call `assemble_golden_gate(backbone_id=..., part_ids=[...], enzyme_name=...)`. The tool:
+1. Digests the backbone at its two Type IIS sites to open the cloning window (discarding the dropout cassette)
+2. Digests each part's carrier vector at its two sites to release the insert with flanking overhangs
+3. Orders parts by overhang complementarity (Alpha→K→Y, etc.)
+4. Ligates everything into the final construct
+
+**Step 5 — Validate and export**
+Use `validate_construct` on the assembled sequence, then `export_construct` (GenBank recommended to preserve features).
+
+### Allen Institute Modular System — Overhang Reference
+
+| Part type | Library prefix | Left overhang | Right overhang |
+|-----------|---------------|---------------|----------------|
+| Promoter  | AICS_P | Alpha         | K              |
+| ORF       | AICS_O | K             | Y              |
+| Terminator| AICS_T | Gamma         | Delta          |
+
+### Caveats
+- The dropout cassette (usually mCherry or ccdB) is automatically discarded — it does not appear in the assembled sequence.
+- If overhang matching fails (warning in tool output), the user-provided `part_ids` order is used. Report this to the user.
+- Do **not** use `assemble_construct` or `fuse_inserts` for Golden Gate assemblies. Those tools are for simple insertion or fusion protein design only.
+
 ## Expression Plasmid Biology Reference
 
 Use this knowledge to make design decisions and catch errors — but always use the tools for actual sequence operations.
@@ -308,7 +360,8 @@ Use this knowledge to make design decisions and catch errors — but always use 
 | Tool | Purpose |
 |------|---------|
 | `fuse_inserts` | Fuse multiple CDS sequences (for tagging/fusions) |
-| `assemble_construct` | Splice insert into backbone at specified position |
+| `assemble_construct` | Splice insert into backbone at specified position (MCS cloning) |
+| `assemble_golden_gate` | Golden Gate assembly from backbone + parts-in-vector (Type IIS) |
 | `validate_sequence` | Validate a DNA sequence (basic checks) |
 | `validate_construct` | Full rubric validation of an assembled construct |
 | `score_construct_confidence` | Design Confidence Score (0-100) — cryptic polyA/splice, CAI, Kozak, GC, linker adequacy |
@@ -439,6 +492,11 @@ When a session has prior experimental outcomes logged (shown in your context as 
 
 ```
 User wants to build a construct
+  ├─ Is this a Golden Gate / MoClo / Type IIS assembly?
+  │   ├─ Yes → follow Golden Gate Workflow (see ## Golden Gate Assembly section)
+  │   │         assemble_golden_gate(backbone_id=..., part_ids=[...], enzyme_name=...)
+  │   │         → validate_construct → export_construct
+  │   └─ No → continue with MCS cloning below
   ├─ Do I have the backbone sequence?
   │   ├─ Yes → proceed
   │   └─ No → get_backbone(include_sequence=true)

@@ -44,6 +44,8 @@ from .assembler import (
     format_as_fasta,
     format_as_genbank,
     DEFAULT_FUSION_LINKER as _DEFAULT_FUSION_LINKER,
+    assemble_golden_gate as _assemble_golden_gate,
+    GG_ENZYMES,
 )
 
 # NCBI integration (optional)
@@ -1161,6 +1163,112 @@ async def fetch_promoter_region_tool(args):
     )
 
 
+# ── Golden Gate Assembly Tool ───────────────────────────────────────────────
+
+@tool(
+    "assemble_golden_gate",
+    (
+        "Perform in-silico Golden Gate assembly. "
+        "The backbone plasmid is digested with a Type IIS restriction enzyme "
+        "to open the cloning window (removing a dropout cassette if present). "
+        "Each part is excised from its carrier vector using the same enzyme. "
+        "Parts are ligated into the backbone in the order dictated by "
+        "complementary 4-nt overhangs. "
+        "Use this for Allen Institute modular expression system parts (Esp3I/BsaI/BbsI) or "
+        "any standard Golden Gate workflow. "
+        "Parts must be stored with category='part_in_vector' and carry a "
+        "'plasmid_sequence' field."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "backbone_id": {
+                "type": "string",
+                "description": "Library ID of the backbone vector (must contain Type IIS sites).",
+            },
+            "part_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Library IDs of the parts to assemble, in approximate order. "
+                    "Exact order will be inferred from overhang matching."
+                ),
+            },
+            "enzyme_name": {
+                "type": "string",
+                "enum": list(GG_ENZYMES.keys()),
+                "description": (
+                    "Type IIS restriction enzyme used for the assembly. "
+                    "Esp3I and BsmBI share the same recognition site (CGTCTC). "
+                    "Defaults to Esp3I if not specified."
+                ),
+            },
+        },
+        "required": ["backbone_id", "part_ids"],
+    },
+)
+async def assemble_golden_gate_tool(args):
+    backbone_id = args["backbone_id"]
+    part_ids = args["part_ids"]
+    enzyme_name = args.get("enzyme_name", "Esp3I")
+
+    # Fetch backbone
+    backbone = get_backbone_by_id(backbone_id)
+    if not backbone:
+        return _error(f"Backbone {backbone_id!r} not found in library.")
+
+    bb_seq = backbone.get("plasmid_sequence") or backbone.get("sequence", "")
+    if not bb_seq:
+        return _error(f"Backbone {backbone_id!r} has no plasmid_sequence.")
+
+    # Fetch parts
+    parts = []
+    for pid in part_ids:
+        part = get_insert_by_id(pid)
+        if not part:
+            return _error(f"Part {pid!r} not found in library.")
+        ps = part.get("plasmid_sequence") or part.get("sequence", "")
+        if not ps:
+            return _error(
+                f"Part {pid!r} has no plasmid_sequence. "
+                f"Golden Gate requires the full carrier vector sequence."
+            )
+        parts.append({
+            "name": part.get("name", pid),
+            "plasmid_sequence": ps,
+            "overhang_l": part.get("overhang_l"),
+            "overhang_r": part.get("overhang_r"),
+        })
+
+    # Run assembly
+    result = _assemble_golden_gate(
+        backbone_plasmid_seq=bb_seq,
+        parts=parts,
+        enzyme_name=enzyme_name,
+    )
+
+    if not result.success:
+        return _error(
+            f"Golden Gate assembly failed:\n" + "\n".join(f"  • {e}" for e in result.errors)
+        )
+
+    warnings_block = ""
+    if result.warnings:
+        warnings_block = "\n\nWarnings:\n" + "\n".join(f"  ⚠ {w}" for w in result.warnings)
+
+    junctions = " → ".join(result.junction_overhangs)
+    order_str = " → ".join(result.assembly_order) if result.assembly_order else "(backbone only)"
+
+    return _text(
+        f"Golden Gate assembly successful ({enzyme_name}).\n\n"
+        f"Assembly order : {order_str}\n"
+        f"Junctions (4-nt): {junctions}\n"
+        f"Total size     : {result.total_size_bp} bp\n\n"
+        f"Assembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
+        + warnings_block
+    )
+
+
 # ── Server factory ─────────────────────────────────────────────────────
 
 # Collect all tool objects
@@ -1190,6 +1298,8 @@ ALL_TOOLS = [
     lookup_known_mutations_tool,
     apply_mutation_tool,
     fetch_promoter_region_tool,
+    # Golden Gate assembly
+    assemble_golden_gate_tool,
 ]
 
 ALL_TOOL_NAMES = [t.name for t in ALL_TOOLS]

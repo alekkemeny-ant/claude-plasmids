@@ -1355,6 +1355,72 @@ AGENT_CASES = [
             "pcDNA3.1(+)."
         ),
     ),
+
+    # ── A9: Golden Gate assembly (Allen Institute modular system) ─────────
+    AgentTestCase(
+        id="A9-001",
+        name="Golden Gate: X0001 backbone + three AICS parts (explicit IDs)",
+        prompt=(
+            "Using Golden Gate assembly, design a vector using the backbone X0001 "
+            "with inserts AICS_SynP000X, AICS_SynP000Y, AICS_SynP000Z. "
+            "Assemble the construct and export the final sequence."
+        ),
+        description=(
+            "Explicit Golden Gate request with backbone and part IDs. "
+            "Agent must call assemble_golden_gate (not assemble_construct) with "
+            "backbone AICS_X0001_pTwist_Kan_B and the three part carrier vectors. "
+            "Expected assembly: SynP000X → SynP000Y → SynP000Z, 5383 bp total, "
+            "Esp3I enzyme, junctions CACC / CTGG / ATCC / AACG."
+        ),
+        # For multi-part GG assembly there is no single insert_id; grading is
+        # transcript-based. backbone_id and expected_insert_id are set to the
+        # primary components for bookkeeping purposes only.
+        expected_backbone_id="AICS_X0001_pTwist_Kan_B",
+        expected_insert_id="AICS_SynP000X",
+        expected_total_size=5383,
+        grading_mode="transcript",
+        transcript_assertions=[
+            "5383",           # correct assembled size reported
+            "Golden Gate",    # GG assembly method identified
+            "AICS_SynP000X",  # all three parts addressed
+            "AICS_SynP000Y",
+            "AICS_SynP000Z",
+        ],
+        tools_should_not_use=["assemble_construct"],  # must use GG path, not standard
+        tags=["golden_gate", "allen_institute", "modular_system", "multi_part"],
+    ),
+    AgentTestCase(
+        id="A9-002",
+        name="Golden Gate: compound construct name (ABC_XYZ-XXYYY_LMN_OhP)",
+        prompt=(
+            "Using Golden Gate assembly, design the following vector: ABC_XYZ-XXYYY_LMN_OhP."
+        ),
+        description=(
+            "Name-based Golden Gate request. The construct name encodes the three Allen "
+            "Institute modular parts by their display names: "
+            "  ABC_XYZ  → AICS_SynP000X, "
+            "  XXYYY    → AICS_SynP000Y, "
+            "  LMN_OhP  → AICS_SynP000Z. "
+            "Agent must parse the compound name, resolve each component to its library "
+            "ID, identify an appropriate X0001 backbone, call assemble_golden_gate, "
+            "and export the assembled sequence. "
+            "Expected assembly: 5383 bp total, same junctions as A9-001."
+        ),
+        expected_backbone_id="AICS_X0001_pTwist_Kan_B",
+        expected_insert_id="AICS_SynP000X",
+        expected_total_size=5383,
+        grading_mode="transcript",
+        transcript_assertions=[
+            "5383",       # correct assembled size
+            "Golden Gate",
+            "ABC_XYZ",    # agent acknowledges the part names from the construct label
+            "XXYYY",
+            "LMN_OhP",
+        ],
+        tools_should_not_use=["assemble_construct"],
+        tags=["golden_gate", "allen_institute", "modular_system", "multi_part",
+              "name_resolution"],
+    ),
 ]
 
 

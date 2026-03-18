@@ -273,6 +273,25 @@ Use `validate_construct` on the assembled sequence, then `export_construct` (Gen
 | ORF       | AICS_O | K             | Y              |
 | Terminator| AICS_T | Gamma         | Delta          |
 
+### Compound Construct Names
+
+Users sometimes provide a construct as a single compound name rather than listing parts explicitly. Examples:
+
+```
+PartA-PartB-PartC
+Promoter_Gene_Terminator
+EF1a-mCherry-WPRE
+```
+
+When you receive a name that looks like it encodes multiple components (separated by `-`, `_`, spaces, or other delimiters), treat it as a compound construct name and resolve each component:
+
+1. **Parse** the name into candidate tokens using common delimiters (`-`, `_`, spaces). Use judgment — some tokens are themselves multi-word names (e.g., `pTwist_Kan_B` is one part, not three). Try the longest plausible match first.
+2. **Search** the library for each token using `search_inserts`, `search_backbones`, or `list_all_inserts` / `list_all_backbones`. Match against IDs, aliases, and name fields.
+3. **Confirm your interpretation** with the user before assembling: "I interpreted this as: Part 1 = X, Part 2 = Y, Part 3 = Z — is that correct?" This is a single, short confirmation question and is worth asking because parsing is ambiguous.
+4. **Proceed** once the user confirms the mapping.
+
+If a token doesn't match anything in the library, tell the user which token you couldn't resolve and ask them to clarify.
+
 ### Caveats
 - The dropout cassette (usually mCherry or ccdB) is automatically discarded — it does not appear in the assembled sequence.
 - If overhang matching fails (warning in tool output), the user-provided `part_ids` order is used. Report this to the user.

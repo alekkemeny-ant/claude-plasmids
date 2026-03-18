@@ -72,6 +72,32 @@ except ImportError:
 # and eliminates the unprotected read-modify-write race under parallelism.
 _LIBRARY_READONLY = False
 
+# ── Test fixture injection ───────────────────────────────────────────────
+# Extra entries registered via register_test_fixtures() are appended to
+# load_backbones() / load_inserts() results at runtime.  Intended for eval
+# and test cases that need sequences not present in the curated library.
+# Call clear_test_fixtures() after the case to avoid cross-contamination.
+_EXTRA_BACKBONES: list[dict] = []
+_EXTRA_INSERTS: list[dict] = []
+
+
+def register_test_fixtures(backbones: list[dict] = (), inserts: list[dict] = ()) -> None:
+    """Append extra backbone/insert entries for the duration of an eval run.
+
+    Entries are added to the in-memory lists checked by load_backbones() and
+    load_inserts(); the on-disk JSON files are never touched.
+    """
+    global _EXTRA_BACKBONES, _EXTRA_INSERTS
+    _EXTRA_BACKBONES = list(backbones)
+    _EXTRA_INSERTS = list(inserts)
+
+
+def clear_test_fixtures() -> None:
+    """Remove all fixture entries registered via register_test_fixtures()."""
+    global _EXTRA_BACKBONES, _EXTRA_INSERTS
+    _EXTRA_BACKBONES = []
+    _EXTRA_INSERTS = []
+
 
 def set_library_readonly(readonly: bool = True) -> None:
     """Disable writes to library/*.json. Call before running evals."""
@@ -80,15 +106,21 @@ def set_library_readonly(readonly: bool = True) -> None:
 
 
 def load_backbones() -> dict:
-    """Load backbone library from JSON file."""
+    """Load backbone library from JSON file, plus any registered test fixtures."""
     with open(LIBRARY_PATH / "backbones.json", "r") as f:
-        return json.load(f)
+        data = json.load(f)
+    if _EXTRA_BACKBONES:
+        data["backbones"] = data["backbones"] + _EXTRA_BACKBONES
+    return data
 
 
 def load_inserts() -> dict:
-    """Load insert library from JSON file."""
+    """Load insert library from JSON file, plus any registered test fixtures."""
     with open(LIBRARY_PATH / "inserts.json", "r") as f:
-        return json.load(f)
+        data = json.load(f)
+    if _EXTRA_INSERTS:
+        data["inserts"] = data["inserts"] + _EXTRA_INSERTS
+    return data
 
 
 def normalize_name(name: str) -> str:

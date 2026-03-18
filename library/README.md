@@ -138,6 +138,47 @@ If no category is specified and the file is linear, the entry is loaded without 
 
 ---
 
+## Inspecting your loaded library
+
+There are two ways to see which entries were loaded.
+
+### CLI — `--list-library`
+
+Run this before (or instead of) starting the server to print a summary of all user library entries:
+
+```bash
+PLASMID_USER_LIBRARY=/path/to/my_library python app/app.py --list-library
+```
+
+Example output:
+
+```
+User library: /path/to/my_library
+  3 backbone(s), 5 insert(s)
+
+Backbones:
+  user:pLAB_V001                           pLAB_V001
+    Esp3I | AmpR | PuroR
+  user:pLAB_V002                           pLAB_V002
+    BbsI | KanR | BlastR
+
+Inserts:
+  user:LAB_Part001                         Kozak-GFP-Variant-Alpha
+    part_in_vector | Esp3I | 732 bp
+  user:LAB_Part002                         SV40-NLS-Peptide
+    epitope_tag | Esp3I | 42 bp
+```
+
+### Web UI — "Your Library" sidebar panel
+
+When `PLASMID_USER_LIBRARY` is set, a **Your Library** section appears at the bottom of the sidebar. Click the header to expand it, then click any entry to see its full metadata inline (enzyme, overhangs, resistance markers, size, description, etc.).
+
+![Your Library panel shows backbones and inserts loaded from the user library, with clickable rows that expand to show all metadata fields.]
+
+The panel is read-only — it reflects what was loaded at startup. Restart the app after adding or removing files.
+
+---
+
 ## Tips
 
 - **LOCUS name = CSV id.** The `id`/`ID` column in both CSVs must exactly match the LOCUS name declared in the corresponding `.gb` file, not the filename. Check the first line of your GenBank file: `LOCUS  <name>  ...`

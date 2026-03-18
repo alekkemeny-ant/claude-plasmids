@@ -1257,6 +1257,60 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .session-item:hover .delete-btn { opacity: 1; }
   .delete-btn:hover { color: var(--brand-orange); }
   .no-sessions { text-align: center; font-size: 12px; color: var(--sand-400); margin-top: 16px; }
+  .user-library-panel {
+    border-top: 1px solid var(--sand-200); padding: 8px;
+    flex-shrink: 0;
+  }
+  .user-library-toggle {
+    width: 100%; text-align: left; padding: 8px 12px;
+    border: none; background: none; border-radius: 8px;
+    color: var(--sand-500); font-size: 12px; font-weight: 600;
+    cursor: pointer; display: flex; align-items: center;
+    justify-content: space-between; gap: 6px;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    font-family: inherit; transition: background 0.15s;
+  }
+  .user-library-toggle:hover { background: var(--sand-100); color: var(--sand-700); }
+  .user-library-toggle .chevron { transition: transform 0.2s; font-style: normal; }
+  .user-library-toggle.open .chevron { transform: rotate(180deg); }
+  .user-library-body { display: none; padding: 0 4px 4px; }
+  .user-library-body.open {
+    display: block; max-height: 240px; overflow-y: auto;
+    scrollbar-width: thin; scrollbar-color: transparent transparent;
+  }
+  .user-library-body.open:hover { scrollbar-color: var(--sand-300) transparent; }
+  .user-library-section { margin-bottom: 8px; }
+  .user-library-section-title {
+    font-size: 11px; color: var(--sand-400); font-weight: 600;
+    padding: 4px 8px 2px; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .user-library-entry {
+    padding: 4px 8px; border-radius: 6px; font-size: 12px;
+    color: var(--sand-600); line-height: 1.4; cursor: pointer;
+    transition: background 0.12s;
+  }
+  .user-library-entry:hover { background: var(--sand-100); }
+  .user-library-entry.expanded { background: var(--sand-100); }
+  .user-library-entry .entry-header { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+  .user-library-entry .entry-name { font-weight: 500; color: var(--sand-700); }
+  .user-library-entry .entry-meta { color: var(--sand-400); font-size: 11px; }
+  .user-library-entry .entry-chevron {
+    color: var(--sand-300); font-size: 10px; flex-shrink: 0;
+    transition: transform 0.15s; font-style: normal;
+  }
+  .user-library-entry.expanded .entry-chevron { transform: rotate(180deg); }
+  .entry-detail {
+    display: none; margin-top: 4px; padding: 6px 0 2px;
+    border-top: 1px solid var(--sand-200);
+  }
+  .entry-detail.open { display: block; }
+  .entry-detail-row {
+    display: flex; gap: 6px; font-size: 11px; line-height: 1.5;
+    color: var(--sand-500);
+  }
+  .entry-detail-row .dk { color: var(--sand-400); flex-shrink: 0; min-width: 72px; }
+  .entry-detail-row .dv { color: var(--sand-700); word-break: break-all; }
+  .user-library-empty { font-size: 12px; color: var(--sand-400); padding: 4px 8px; }
   .sidebar-reopen-btn {
     position: absolute; top: 68px; left: 12px; z-index: 10;
     width: 32px; height: 32px; border: none; background: none;
@@ -1503,6 +1557,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
     <div class="sessions-list" id="sessions-list">
       <p class="no-sessions">No conversations yet</p>
+    </div>
+    <div class="user-library-panel" id="user-library-panel" style="display:none">
+      <button class="user-library-toggle" id="user-library-toggle" onclick="toggleUserLibrary()">
+        <span>Your Library</span>
+        <em class="chevron">&#8964;</em>
+      </button>
+      <div class="user-library-body" id="user-library-body"></div>
     </div>
   </div>
 
@@ -1815,6 +1876,95 @@ function hideWelcome() {
 function toggleSidebar() {
   sidebarEl.classList.toggle('collapsed');
   reopenBtn.classList.toggle('visible', sidebarEl.classList.contains('collapsed'));
+}
+
+// ── User Library Panel ──
+const _ulEntries = {};   // id → full entry object
+
+function _ulDetailRows(entry, isInsert) {
+  const fields = isInsert ? [
+    ['ID', entry.id],
+    ['Category', entry.category],
+    ['Enzyme', entry.assembly_enzyme],
+    ['Overhangs', entry.overhang_left && entry.overhang_right ? entry.overhang_left + ' / ' + entry.overhang_right : null],
+    ['Insert size', entry.insert_size_bp ? entry.insert_size_bp + ' bp' : null],
+    ['Vector size', entry.size_bp ? entry.size_bp + ' bp' : null],
+    ['Resistance', entry.bacterial_resistance],
+    ['Description', entry.description],
+  ] : [
+    ['ID', entry.id],
+    ['Enzyme', entry.assembly_enzyme],
+    ['Overhangs 1', entry.overhang_left && entry.overhang_right ? entry.overhang_left + ' / ' + entry.overhang_right : null],
+    ['Overhangs 2', entry.overhang_left_2 && entry.overhang_right_2 ? entry.overhang_left_2 + ' / ' + entry.overhang_right_2 : null],
+    ['Next enzyme', entry.next_step_enzyme],
+    ['E. coli', entry.ecoli_strain],
+    ['Resistance', entry.bacterial_resistance],
+    ['Mammalian', entry.mammalian_selection],
+    ['Size', entry.size_bp ? entry.size_bp + ' bp' : null],
+    ['Description', entry.description],
+  ];
+  return fields.filter(function(f) { return f[1]; }).map(function(f) {
+    return '<div class="entry-detail-row"><span class="dk">' + escapeHtml(f[0]) + '</span><span class="dv">' + escapeHtml(String(f[1])) + '</span></div>';
+  }).join('');
+}
+
+function _ulBuildEntries(items, isInsert) {
+  return items.map(function(entry) {
+    const eid = entry.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+    _ulEntries[eid] = {entry: entry, isInsert: isInsert};
+    const meta = isInsert
+      ? [entry.category, entry.assembly_enzyme, entry.insert_size_bp ? entry.insert_size_bp + ' bp' : null].filter(Boolean).join(' · ')
+      : [entry.assembly_enzyme, entry.bacterial_resistance].filter(Boolean).join(' · ');
+    return '<div class="user-library-entry" id="ule-' + eid + '" onclick="toggleULEntry(\'' + eid + '\')">' +
+      '<div class="entry-header">' +
+        '<div><div class="entry-name">' + escapeHtml(entry.name || entry.id) + '</div>' +
+        (meta ? '<div class="entry-meta">' + escapeHtml(meta) + '</div>' : '') + '</div>' +
+        '<em class="entry-chevron">&#8964;</em>' +
+      '</div>' +
+      '<div class="entry-detail" id="uld-' + eid + '"></div>' +
+    '</div>';
+  }).join('');
+}
+
+async function loadUserLibrary() {
+  try {
+    const r = await fetch('/api/user-library');
+    const data = await r.json();
+    const panel = document.getElementById('user-library-panel');
+    if (!data.configured) return;
+    panel.style.display = '';
+    const body = document.getElementById('user-library-body');
+    let html = '';
+    if (data.backbones && data.backbones.length) {
+      html += '<div class="user-library-section"><div class="user-library-section-title">Backbones</div>' +
+        _ulBuildEntries(data.backbones, false) + '</div>';
+    }
+    if (data.inserts && data.inserts.length) {
+      html += '<div class="user-library-section"><div class="user-library-section-title">Inserts</div>' +
+        _ulBuildEntries(data.inserts, true) + '</div>';
+    }
+    if (!html) html = '<div class="user-library-empty">No entries loaded.</div>';
+    body.innerHTML = html;
+  } catch {}
+}
+
+function toggleULEntry(eid) {
+  const row = document.getElementById('ule-' + eid);
+  const detail = document.getElementById('uld-' + eid);
+  const isOpen = detail.classList.contains('open');
+  if (!isOpen && !detail.innerHTML) {
+    const rec = _ulEntries[eid];
+    detail.innerHTML = _ulDetailRows(rec.entry, rec.isInsert);
+  }
+  detail.classList.toggle('open', !isOpen);
+  row.classList.toggle('expanded', !isOpen);
+}
+
+function toggleUserLibrary() {
+  const btn = document.getElementById('user-library-toggle');
+  const body = document.getElementById('user-library-body');
+  btn.classList.toggle('open');
+  body.classList.toggle('open');
 }
 
 // ── Markdown rendering ──
@@ -2199,6 +2349,7 @@ inputEl.addEventListener('keydown', function(e) {
 checkHealth();
 setInterval(checkHealth, 5000);
 loadSessions();
+loadUserLibrary();
 setInterval(loadSessions, 5000);
 // Restore active session on page load
 if (currentSessionId) {
@@ -2249,6 +2400,47 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self._send_json(session["display_messages"])
             else:
                 self._send_json([], 404)
+
+        elif path == "/api/user-library":
+            from library import load_backbones, load_inserts
+            bb = [b for b in load_backbones()["backbones"] if b.get("source") == "user_library"]
+            ins = [i for i in load_inserts()["inserts"] if i.get("source") == "user_library"]
+            self._send_json({
+                "configured": bool(os.environ.get("PLASMID_USER_LIBRARY")),
+                "backbones": [
+                    {k: v for k, v in {
+                        "id": b["id"],
+                        "name": b.get("name"),
+                        "description": b.get("description"),
+                        "assembly_enzyme": b.get("assembly_enzyme"),
+                        "bacterial_resistance": b.get("bacterial_resistance"),
+                        "mammalian_selection": b.get("mammalian_selection"),
+                        "ecoli_strain": b.get("ecoli_strain"),
+                        "next_step_enzyme": b.get("next_step_enzyme"),
+                        "overhang_left": b.get("overhang_left"),
+                        "overhang_right": b.get("overhang_right"),
+                        "overhang_left_2": b.get("overhang_left_2"),
+                        "overhang_right_2": b.get("overhang_right_2"),
+                        "size_bp": b.get("size_bp"),
+                    }.items() if v is not None}
+                    for b in bb
+                ],
+                "inserts": [
+                    {k: v for k, v in {
+                        "id": i["id"],
+                        "name": i.get("name"),
+                        "description": i.get("description"),
+                        "category": i.get("category"),
+                        "assembly_enzyme": i.get("assembly_enzyme"),
+                        "overhang_left": i.get("overhang_left"),
+                        "overhang_right": i.get("overhang_right"),
+                        "insert_size_bp": i.get("insert_size_bp"),
+                        "size_bp": i.get("size_bp"),
+                        "bacterial_resistance": i.get("bacterial_resistance"),
+                    }.items() if v is not None}
+                    for i in ins
+                ],
+            })
 
         else:
             self.send_error(404)
@@ -2413,12 +2605,53 @@ def _run_with_reload(port: int):
             return
 
 
+def _cmd_list_library():
+    """Print user library entries loaded from $PLASMID_USER_LIBRARY."""
+    lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+    if not lib_dir:
+        print("PLASMID_USER_LIBRARY is not set.")
+        return
+    from library import load_backbones, load_inserts
+    backbones = [b for b in load_backbones()["backbones"] if b.get("source") == "user_library"]
+    inserts = [i for i in load_inserts()["inserts"] if i.get("source") == "user_library"]
+    print(f"User library: {lib_dir}")
+    print(f"  {len(backbones)} backbone(s), {len(inserts)} insert(s)\n")
+    if backbones:
+        print("Backbones:")
+        for b in backbones:
+            meta = " | ".join(filter(None, [
+                b.get("assembly_enzyme"),
+                b.get("bacterial_resistance"),
+                b.get("mammalian_selection"),
+            ]))
+            print(f"  {b['id']:<40} {b.get('name', '')}")
+            if meta:
+                print(f"    {meta}")
+    if inserts:
+        print("\nInserts:")
+        for i in inserts:
+            size = f"{i['insert_size_bp']} bp" if i.get("insert_size_bp") else (f"{i['size_bp']} bp" if i.get("size_bp") else "")
+            meta = " | ".join(filter(None, [
+                i.get("category"),
+                i.get("assembly_enzyme"),
+                size,
+            ]))
+            print(f"  {i['id']:<40} {i.get('name', '')}")
+            if meta:
+                print(f"    {meta}")
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Plasmid Designer Web UI")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)))
     parser.add_argument("--reload", action="store_true", help="Auto-reload on file changes")
+    parser.add_argument("--list-library", action="store_true", help="Print user library entries and exit")
     args = parser.parse_args()
+
+    if args.list_library:
+        _cmd_list_library()
+        return
 
     if args.reload:
         _run_with_reload(args.port)

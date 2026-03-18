@@ -1433,7 +1433,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
     <div class="header-title">
       <h1>Plasmid Designer</h1>
-      <p>Allen Institute for Neural Dynamics</p>
+      <p>Allen Institute: OCTO AI</p>
     </div>
   </div>
   <div>

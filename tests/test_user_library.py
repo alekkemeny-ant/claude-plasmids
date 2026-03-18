@@ -133,10 +133,37 @@ def test_search_backbones_finds_user_entry(user_library_env):
 def test_insert_csv_enriches_name_and_aliases(user_library_env):
     from src.user_library import load_user_inserts
     ins = load_user_inserts()[0]
+    # name comes from CSV Description column
     assert ins["name"] == "MyGene-Test-Insert"
-    assert "MyGene" in ins["aliases"]
-    assert "Test" in ins["aliases"]
-    assert "Insert" in ins["aliases"]
+    # aliases come from the locus ID: 'myGene' has no hyphens so no ID-based split
+    # (simple IDs produce no aliases beyond the existing filename-stem alias)
+
+
+def test_insert_csv_aliases_from_compound_id(tmp_path, monkeypatch):
+    """Compound locus IDs like LAB_P001_MyPromoter-Kozak produce two aliases."""
+    subdir = tmp_path / "inserts"
+    subdir.mkdir()
+    (subdir / "LAB_P001_MyPromoter-Kozak.gbk").write_text(
+        "LOCUS       LAB_P001_MyPromoter-Kozak  180 bp    DNA     linear   SYN 01-JAN-2026\n"
+        "DEFINITION  Compound ID test insert.\n"
+        "FEATURES             Location/Qualifiers\n"
+        "     CDS             1..180\n"
+        "                     /label=\"test CDS\"\n"
+        "ORIGIN\n"
+        "        1 atgaaagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtta\n"
+        "       61 gcgttagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtta\n"
+        "      121 gcgttagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtaa\n"
+        "//\n"
+    )
+    csv_text = "id\tDescription\nLAB_P001_MyPromoter-Kozak\tMyPromoter-Kozak Description\n"
+    (tmp_path / "inserts_description.csv").write_text(csv_text)
+    monkeypatch.setenv("PLASMID_USER_LIBRARY", str(tmp_path))
+    from src.user_library import load_user_inserts
+    entries = load_user_inserts()
+    assert len(entries) == 1
+    aliases = entries[0]["aliases"]
+    assert "LAB_P001" in aliases
+    assert "MyPromoter-Kozak" in aliases
 
 
 def test_insert_csv_sets_enzyme_and_overhangs(user_library_env):

@@ -107,14 +107,23 @@ def _load_backbone_csv(path: Path) -> dict[str, dict[str, str]]:
     return _load_insert_csv(path)   # identical parsing logic; key normalisation handles "ID"
 
 
-def _aliases_from_description(description: str) -> list[str]:
-    """Split a description string into alias tokens.
+def _aliases_from_id(base_id: str) -> list[str]:
+    """Extract aliases from a compound locus/ID string.
 
-    E.g. "Cleavage-FLAG-GS-Aph4" → ["Cleavage", "FLAG", "GS", "Aph4"]
-    Only tokens longer than 1 character are kept.
+    For IDs like 'AICS_SynP0002_Cleavage-FLAG-GS-Aph4', the split point is the
+    first underscore-delimited token that contains a hyphen (start of the
+    human-readable description portion):
+        → ['AICS_SynP0002', 'Cleavage-FLAG-GS-Aph4']
+
+    Simple IDs with no hyphens (e.g. 'myGene', 'pTestVector') return [].
     """
-    tokens = re.split(r"[-_\s]+", description)
-    return [t for t in tokens if len(t) > 1]
+    tokens = base_id.split("_")
+    split_idx = next((i for i, t in enumerate(tokens) if "-" in t), None)
+    if split_idx is None or split_idx == 0:
+        return []
+    code_part = "_".join(tokens[:split_idx])
+    desc_part = "_".join(tokens[split_idx:])
+    return [code_part, desc_part]
 
 
 def _apply_insert_csv_meta(entry: dict[str, Any], row: dict[str, str]) -> None:
@@ -122,10 +131,12 @@ def _apply_insert_csv_meta(entry: dict[str, Any], row: dict[str, str]) -> None:
     description = row.get("Description", "")
     if description:
         entry["name"] = description
-        # Aliases: raw description tokens + any existing aliases
-        token_aliases = _aliases_from_description(description)
+        # Aliases: code part + description part extracted from the locus ID,
+        # e.g. 'AICS_SynP0002_Cleavage-FLAG-GS-Aph4' → ['AICS_SynP0002', 'Cleavage-FLAG-GS-Aph4']
+        base_id = entry["id"].removeprefix(USER_PREFIX)
+        id_aliases = _aliases_from_id(base_id)
         existing = entry.get("aliases", [])
-        entry["aliases"] = list(dict.fromkeys(existing + token_aliases))  # dedupe, preserve order
+        entry["aliases"] = list(dict.fromkeys(existing + id_aliases))  # dedupe, preserve order
 
     enzyme = row.get("TypeIIS cutsite", "")
     if enzyme:

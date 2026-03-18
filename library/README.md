@@ -143,4 +143,5 @@ If no category is specified and the file is linear, the entry is loaded without 
 - **LOCUS name = CSV id.** The `id`/`ID` column in both CSVs must exactly match the LOCUS name declared in the corresponding `.gb` file, not the filename. Check the first line of your GenBank file: `LOCUS  <name>  ...`
 - **CSV rows with no matching file are skipped** with a warning in the logs. This lets you maintain a master CSV across your whole collection and only place the files you want to use in the directory.
 - **Files with no CSV row load fine** — they just use the LOCUS name as the display name and have no enriched metadata.
-- **The built-in library is never modified.** Your entries are loaded at runtime and namespaced under `user:`. Removing files from your directory removes them from the agent instantly on next restart.
+- **The built-in library is never modified.** Your entries are loaded at runtime and namespaced under `user:`. Removing files from your directory removes them from the agent instantly on next restart. Restart the app to load the library if the app is already running.
+

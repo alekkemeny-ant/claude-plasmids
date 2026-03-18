@@ -126,3 +126,118 @@ def test_search_backbones_finds_user_entry(user_library_env):
     results = search_backbones("pTestVector")
     user_results = [r for r in results if r["id"].startswith("user:")]
     assert len(user_results) >= 1
+
+
+# ── CSV metadata overlay ──
+
+def test_insert_csv_enriches_name_and_aliases(user_library_env):
+    from src.user_library import load_user_inserts
+    ins = load_user_inserts()[0]
+    assert ins["name"] == "MyGene-Test-Insert"
+    assert "MyGene" in ins["aliases"]
+    assert "Test" in ins["aliases"]
+    assert "Insert" in ins["aliases"]
+
+
+def test_insert_csv_sets_enzyme_and_overhangs(user_library_env):
+    from src.user_library import load_user_inserts
+    ins = load_user_inserts()[0]
+    assert ins["assembly_enzyme"] == "Esp3I"
+    assert ins["overhang_left"] == "CACC"
+    assert ins["overhang_right"] == "CTGG"
+
+
+def test_insert_csv_size_stored_as_insert_size_bp(user_library_env):
+    from src.user_library import load_user_inserts
+    ins = load_user_inserts()[0]
+    # insert_size_bp (from CSV) is the excised insert size — distinct from
+    # size_bp (from GenBank), which is the full file sequence length.
+    assert ins["insert_size_bp"] == 120
+    assert ins["size_bp"] == 180          # full GenBank sequence untouched
+    assert ins["insert_size_bp"] != ins["size_bp"]
+
+
+def test_insert_csv_sets_selection_and_category(user_library_env):
+    from src.user_library import load_user_inserts
+    ins = load_user_inserts()[0]
+    assert ins["bacterial_resistance"] == "AmpR"
+    assert ins["category"] == "insert"
+
+
+def test_backbone_csv_enriches_metadata(user_library_env):
+    from src.user_library import load_user_backbones
+    bb = load_user_backbones()[0]
+    assert bb["bacterial_resistance"] == "KanR"
+    assert bb["mammalian_selection"] == "PuroR"
+    assert bb["assembly_enzyme"] == "Esp3I"
+    assert bb["ecoli_strain"] == "DH5alpha"
+    assert "next_step_enzyme" not in bb   # empty in fixture — not stored
+    assert bb["overhang_left"] == "CACC"
+    assert bb["overhang_right"] == "CTGG"
+    assert bb["overhang_left_2"] == "AACG"
+    assert bb["overhang_right_2"] == "GTTT"
+
+
+def test_backbone_csv_builds_description(user_library_env):
+    from src.user_library import load_user_backbones
+    bb = load_user_backbones()[0]
+    desc = bb["description"]
+    assert "KanR" in desc
+    assert "Esp3I" in desc
+    assert "mCherry" in desc
+    assert "pTarget" in desc
+
+
+_MINIMAL_INSERT_GB = (
+    "LOCUS       myGene                   180 bp    DNA     linear   SYN 01-JAN-2026\n"
+    "DEFINITION  Minimal test insert.\n"
+    "FEATURES             Location/Qualifiers\n"
+    "     CDS             1..180\n"
+    "                     /label=\"myGene CDS\"\n"
+    "ORIGIN\n"
+    "        1 atgaaagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtta\n"
+    "       61 gcgttagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtta\n"
+    "      121 gcgttagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtaa\n"
+    "//\n"
+)
+
+
+def test_csv_absent_loads_genbank_only(tmp_path, monkeypatch):
+    """Entries load fine when no CSV is present."""
+    subdir = tmp_path / "inserts"
+    subdir.mkdir()
+    (subdir / "myGene.gbk").write_text(_MINIMAL_INSERT_GB)
+    monkeypatch.setenv("PLASMID_USER_LIBRARY", str(tmp_path))
+    from src.user_library import load_user_inserts
+    entries = load_user_inserts()
+    assert len(entries) == 1
+    assert entries[0]["name"] == "myGene"      # falls back to locus name
+    assert "assembly_enzyme" not in entries[0]
+    assert "insert_size_bp" not in entries[0]
+
+
+def test_csv_row_with_no_matching_gb_is_skipped(tmp_path, monkeypatch, caplog):
+    """A CSV row whose id has no .gb file is warned about and ignored."""
+    import logging
+    subdir = tmp_path / "inserts"
+    subdir.mkdir()
+    (subdir / "realPart.gbk").write_text(
+        "LOCUS       realPart                 180 bp    DNA     linear   SYN 01-JAN-2026\n"
+        "DEFINITION  Minimal test insert.\n"
+        "FEATURES             Location/Qualifiers\n"
+        "     CDS             1..180\n"
+        "                     /label=\"realPart CDS\"\n"
+        "ORIGIN\n"
+        "        1 atgaaagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtta\n"
+        "       61 gcgttagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtta\n"
+        "      121 gcgttagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtaa\n"
+        "//\n"
+    )
+    csv_text = "id\tDescription\nrealPart\tReal Part\nghostPart\tGhost Part\n"
+    (tmp_path / "inserts_description.csv").write_text(csv_text)
+    monkeypatch.setenv("PLASMID_USER_LIBRARY", str(tmp_path))
+    with caplog.at_level(logging.WARNING, logger="src.user_library"):
+        from src.user_library import load_user_inserts
+        entries = load_user_inserts()
+    assert len(entries) == 1
+    assert any("ghostPart" in r.message for r in caplog.records)

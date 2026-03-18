@@ -1,0 +1,2 @@
+ID	E coli strain	Antibiotic resistance	Neg selection marker	Assembly enzyme	Overhang pair 1	Next step enzyme	Overhang pair 2	Downstream	Mammalian selection marker
+pTestVector	DH5alpha	KanR	mCherry	Esp3I	CACC-CTGG		AACG-GTTT	pTarget	PuroR

@@ -170,8 +170,8 @@ def test_insert_csv_sets_enzyme_and_overhangs(user_library_env):
     from src.user_library import load_user_inserts
     ins = load_user_inserts()[0]
     assert ins["assembly_enzyme"] == "Esp3I"
-    assert ins["overhang_left"] == "CACC"
-    assert ins["overhang_right"] == "CTGG"
+    assert ins["overhang_l"] == "CACC"
+    assert ins["overhang_r"] == "CTGG"
 
 
 def test_insert_csv_size_stored_as_insert_size_bp(user_library_env):

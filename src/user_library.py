@@ -144,11 +144,11 @@ def _apply_insert_csv_meta(entry: dict[str, Any], row: dict[str, str]) -> None:
 
     overhang_l = row.get("Overhang L", "")
     if overhang_l:
-        entry["overhang_left"] = overhang_l
+        entry["overhang_l"] = overhang_l
 
     overhang_r = row.get("Overhang R", "")
     if overhang_r:
-        entry["overhang_right"] = overhang_r
+        entry["overhang_r"] = overhang_r
 
     # CSV Size = insert size after excision (NOT the full carrier vector size).
     # size_bp (from GenBank) stays as the full plasmid size.

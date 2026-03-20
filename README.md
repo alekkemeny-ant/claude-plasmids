@@ -240,7 +240,7 @@ Design multiple plasmids at once by uploading a CSV of descriptions.
 
 ### Web UI
 
-Click **Batch CSV** at the bottom of the sidebar, then upload a CSV file. Each row runs through the full agent loop independently. A live progress panel shows the status of every row and provides per-file download buttons as results come in.
+Drag and drop your design CSV (see below for expected format) into the chat pane to upload your file. Each row runs through the full agent loop independently. A live progress panel shows the status of every row and provides per-file download buttons as results come in.
 
 ### CLI
 

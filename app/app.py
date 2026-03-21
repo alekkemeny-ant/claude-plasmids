@@ -52,6 +52,10 @@ from assembler import (
 # Stores plot JSON from the most recent genbank export, read by the SSE handler
 _last_plot_json: Optional[str] = None
 
+# Sequence cache — keyed strings so the model can reference sequences by key
+# instead of copying long DNA strings verbatim between tool calls.
+_sequence_cache: dict[str, str] = {}
+
 try:
     from ncbi_integration import (
         search_gene as _search_gene_fn,
@@ -203,7 +207,8 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "sequence": {"type": "string", "description": "Assembled construct DNA sequence"},
+                "sequence": {"type": "string", "description": "Assembled construct DNA sequence (omit if using sequence_cache_key)"},
+                "sequence_cache_key": {"type": "string", "description": "Cache key returned by get_addgene_plasmid or other tools — use this instead of copying long sequences verbatim"},
                 "output_format": {"type": "string", "description": "Output format", "enum": ["raw", "fasta", "genbank"]},
                 "construct_name": {"type": "string", "description": "Name for the construct", "default": "construct"},
                 "backbone_name": {"type": "string", "description": "Backbone name for annotation", "default": ""},
@@ -211,8 +216,9 @@ TOOLS = [
                 "insert_position": {"type": "integer", "description": "Insert start position", "default": 0},
                 "insert_length": {"type": "integer", "description": "Insert length in bp", "default": 0},
                 "reverse_complement_insert": {"type": "boolean", "description": "True if insert was inserted in reverse complement orientation", "default": False},
+                "linear": {"type": "boolean", "description": "Set to true for linear DNA fragments (e.g. extracted inserts). Defaults to false (circular plasmid).", "default": False},
             },
-            "required": ["sequence", "output_format"],
+            "required": ["output_format"],
         },
     },
     {
@@ -469,6 +475,8 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             bb_name = backbone_data["name"] if backbone_data else "custom"
             ins_name = insert_data["name"] if insert_data else "custom"
 
+            assembly_key = f"assembly:{bb_name}:{ins_name}"
+            _sequence_cache[assembly_key] = result.sequence
             out = f"Assembly Successful: {ins_name} in {bb_name}\n"
             out += f"Total size: {result.total_size_bp} bp\n"
             out += f"Insert position: {result.insert_position}\n"
@@ -479,13 +487,26 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"Reading frame ok: {'Yes' if result.insert_length_valid else 'No'}\n"
             if result.warnings:
                 out += "Warnings:\n" + "\n".join(f"- {w}" for w in result.warnings) + "\n"
-            out += f"\nAssembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
+            out += (
+                f"\nAssembled sequence ({result.total_size_bp} bp) — cached as \"{assembly_key}\".\n"
+                f"To export, call export_construct with sequence_cache_key=\"{assembly_key}\" "
+                f"instead of copying the raw sequence."
+            )
             return out
 
         elif name == "export_construct":
             global _last_plot_json
             _last_plot_json = None
-            seq = clean_sequence(args["sequence"])
+            cache_key = args.get("sequence_cache_key")
+            if cache_key:
+                raw = _sequence_cache.get(cache_key)
+                if not raw:
+                    return f"No cached sequence for key '{cache_key}'."
+                seq = clean_sequence(raw)
+            elif args.get("sequence"):
+                seq = clean_sequence(args["sequence"])
+            else:
+                return "Provide either 'sequence' or 'sequence_cache_key'."
             fmt = args["output_format"]
             cname = args.get("construct_name", "construct")
             bname = args.get("backbone_name", "")
@@ -493,6 +514,7 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             ipos = args.get("insert_position", 0)
             ilen = args.get("insert_length", 0)
             rc_insert = args.get("reverse_complement_insert", False)
+            linear = args.get("linear", False)
 
             if fmt == "raw":
                 return seq
@@ -503,9 +525,10 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 gbk, plot_json = export_genbank_with_plot(
                     sequence=seq, name=cname, backbone_name=bname,
                     insert_name=iname, insert_position=ipos, insert_length=ilen,
-                    reverse_complement_insert=rc_insert,
+                    reverse_complement_insert=rc_insert, linear=linear,
                 )
-                _last_plot_json = plot_json
+                if not linear:
+                    _last_plot_json = plot_json
                 return gbk
             else:
                 return f"Unknown format: {fmt}"
@@ -583,11 +606,17 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 return f"Could not fetch Addgene #{args['addgene_id']}"
             if tracker:
                 tracker.add_addgene_plasmid(plasmid.__dict__)
+            cache_key = f"addgene:{args['addgene_id']}"
             out = f"Addgene #{args['addgene_id']}: {plasmid.name}\n"
             out += f"Size: {plasmid.size_bp} bp\n"
             out += f"Resistance: {plasmid.bacterial_resistance}\n"
             if plasmid.sequence:
-                out += f"Sequence: {len(plasmid.sequence)} bp available"
+                _sequence_cache[cache_key] = plasmid.sequence
+                out += (
+                    f"Sequence: {len(plasmid.sequence)} bp — cached as \"{cache_key}\".\n"
+                    f"To export, call export_construct with sequence_cache_key=\"{cache_key}\" "
+                    f"instead of copying the raw sequence."
+                )
             else:
                 out += "Sequence: not available"
             return out
@@ -668,6 +697,21 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"\nCDS Sequence ({result['length']} bp):\n{result['sequence']}"
             return out
 
+        elif name == "extract_insert_from_plasmid":
+            result = _extract_insert_from_plasmid(
+                plasmid_sequence=args["plasmid_sequence"],
+                insert_name=args["insert_name"],
+                start=args.get("start"),
+                end=args.get("end"),
+            )
+            if not result:
+                return f"Could not extract '{args['insert_name']}' from the provided plasmid sequence."
+            return (
+                f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
+                f"Source: {result['source']}\n\n"
+                f"DNA Sequence:\n{result['sequence']}"
+            )
+
         elif name == "fuse_inserts":
             sequences = []
             atg_removals = []
@@ -707,21 +751,6 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 out += "This is correct for a protein fusion — translation initiates from the first ATG only.\n"
             out += f"\nFused sequence ({len(fused)} bp):\n{fused}"
             return out
-
-        elif name == "extract_insert_from_plasmid":
-            result = _extract_insert_from_plasmid(
-                plasmid_sequence=args["plasmid_sequence"],
-                insert_name=args["insert_name"],
-                start=args.get("start"),
-                end=args.get("end"),
-            )
-            if not result:
-                return f"Could not extract '{args['insert_name']}' from the provided plasmid sequence."
-            return (
-                f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
-                f"Source: {result['source']}\n\n"
-                f"DNA Sequence:\n{result['sequence']}"
-            )
 
         else:
             return f"Unknown tool: {name}"
@@ -1539,7 +1568,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <div class="input-meta">
           <select id="model-select" class="model-select">
             <option value="claude-opus-4-6">Opus 4.6</option>
-            <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
+            <option value="claude-sonnet-4-6">Sonnet 4.6</option>
             <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
           </select>
         </div>
@@ -2012,15 +2041,18 @@ function startToolBlock(toolName) {
 }
 
 function addPlasmidPlot(plotJson) {
+  var bokehItem = plotJson.plot !== undefined ? plotJson.plot : plotJson;
+  var isLinear = plotJson.linear === true;
+  var label = isLinear ? 'Linear DNA Map' : 'Plasmid Map';
   const plotId = 'plot-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
   const div = document.createElement('div');
   div.className = 'msg assistant';
   div.innerHTML = '<div class="msg-bubble-assistant" style="margin-top:8px;padding:12px;width:100%;max-width:640px;">' +
-    '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Plasmid Map</div>' +
+    '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">' + label + '</div>' +
     '<div id="' + plotId + '" style="width:100%;"></div>' +
   '</div>';
   getInner().appendChild(div);
-  Bokeh.embed.embed_item(plotJson, plotId);
+  Bokeh.embed.embed_item(bokehItem, plotId);
   scrollToBottom();
 }
 

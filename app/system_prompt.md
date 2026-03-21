@@ -62,6 +62,7 @@ Use tools to obtain both sequences. Follow this resolution order:
 2. If not in the local library → use `search_gene` to find it on NCBI, then `fetch_gene` to get the CDS
 3. If the user provides a raw sequence, validate it with `validate_sequence`
 4. `get_insert` will also auto-fallback to NCBI if the insert isn't in the local library
+5. If the insert cannot be found in the library or NCBI, but a full plasmid sequence is available (user-provided or fetched from Addgene) → use `extract_insert_from_plasmid` to locate and extract the CDS by name using pLannotate annotation
 
 **For protein fusions / tagging:**
 1. Retrieve all component sequences (tag + gene) using the steps above
@@ -164,6 +165,8 @@ export_construct(
   insert_length=720
 )
 ```
+
+**Topology**: By default, exported sequences are recorded as circular (plasmid). If exporting a linear fragment — such as a CDS extracted with `extract_insert_from_plasmid` — pass `linear=true` to `export_construct`.
 
 Present the user with:
 1. A summary of the construct (backbone, insert, total size, key features)

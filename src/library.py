@@ -597,7 +597,6 @@ def extract_insert_from_plasmid(
         not found.
     """
     plasmid_sequence = re.sub(r'\s', '', plasmid_sequence.upper())
-    breakpoint()
     # ── Explicit coordinates: slice directly ──────────────────────────────
     if start is not None and end is not None:
         seq = plasmid_sequence[start:end]
@@ -628,7 +627,6 @@ def extract_insert_from_plasmid(
     if conda_bin not in os.environ.get("PATH", ""):
         os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
 
-    breakpoint()
     df = annotate(plasmid_sequence, linear=False)
 
     if df.empty:
@@ -649,9 +647,7 @@ def extract_insert_from_plasmid(
 
     # Use the highest-scoring (first) match
     row = match.iloc[0]
-    feat_start = int(row["qstart"])
-    feat_end = int(row["qend"])
-    seq = plasmid_sequence[feat_start:feat_end]
+    seq = row.qseq
 
     return {
         "id": insert_name,

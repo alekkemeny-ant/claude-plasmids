@@ -1,0 +1,11 @@
+LOCUS       myGene                   180 bp    DNA     linear   SYN 01-JAN-2026
+DEFINITION  Test insert for BYOL unit tests.
+FEATURES             Location/Qualifiers
+     CDS             1..180
+                     /label="myGene CDS"
+                     /product="test protein"
+ORIGIN
+        1 atgaaagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtta
+       61 gcgttagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtta
+      121 gcgttagcgt tagcgttagc gttagcgtta gcgttagcgt tagcgttagc gttagcgtaa
+//

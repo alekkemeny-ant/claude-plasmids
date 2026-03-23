@@ -35,7 +35,7 @@ from claude_agent_sdk import (
     ToolResultBlock,
     PermissionResultAllow,
 )
-from src.tools import create_plasmid_tools, ALL_TOOL_NAMES, set_tracker, get_tracker
+from src.tools import build_mcp_servers, set_tracker, get_tracker
 from src.references import ReferenceTracker
 
 # Load system prompt
@@ -50,19 +50,20 @@ async def _auto_approve(tool_name, tool_input, context):
 
 async def run_plasmid_agent(
     user_prompt: str,
-    model: str = "claude-opus-4-5-20251101",
+    model: str = "claude-opus-4-6",
     max_turns: int = 15,
     verbose: bool = False,
 ):
     """Run the plasmid design agent on a single prompt."""
     tracker = ReferenceTracker()
     set_tracker(tracker)
-    server_config = create_plasmid_tools()
 
+    # build_mcp_servers() includes plasmid-library + optional Benchling/PubMed.
+    # allowed_tools is intentionally omitted: it only knows in-process tool
+    # names and would silently block external MCP tools. can_use_tool gates.
     options = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
-        mcp_servers={"plasmid-library": server_config},
-        allowed_tools=ALL_TOOL_NAMES,
+        mcp_servers=build_mcp_servers(),
         permission_mode="acceptEdits",
         model=model,
         max_turns=max_turns,
@@ -97,7 +98,7 @@ async def main():
 
     parser = argparse.ArgumentParser(description="Plasmid Design Agent (Claude Agent SDK)")
     parser.add_argument("prompt", nargs="?", help="Design prompt")
-    parser.add_argument("--model", default="claude-opus-4-5-20251101", help="Model to use (default: claude-opus-4-5-20251101)")
+    parser.add_argument("--model", default="claude-opus-4-6", help="Model to use (default: claude-opus-4-6)")
     parser.add_argument("--max-turns", type=int, default=15, help="Max agent turns")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show tool calls")
     args = parser.parse_args()

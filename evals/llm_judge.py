@@ -151,7 +151,7 @@ ALL_DIMENSIONS = [
 class LLMJudge:
     """Evaluates agent transcripts using an LLM judge."""
 
-    def __init__(self, model: str = "claude-sonnet-4-5-20250929"):
+    def __init__(self, model: str = "claude-sonnet-4-6"):
         self.model = model
         self.client = anthropic.Anthropic()
 

@@ -67,6 +67,7 @@ Use tools to obtain both sequences. Follow this resolution order:
 2. Confirm the backbone has a full sequence. If not, tell the user.
 3. Call `get_insertion_site` to retrieve the MCS start/end positions for this backbone. Store this position — it will be used as the default insertion point in Step 3.
 4. You can also use `search_addgene` and `get_addgene_plasmid` to browse Addgene directly if needed.
+5. **User library**: IDs starting with `user:` (e.g., `user:pMyVector`) come from GenBank files the user placed in their local library directory. These are equally valid sources — treat them like any other backbone. The same applies to inserts with `user:` prefix.
 
 **For the insert:**
 1. Search the local library: `search_inserts` or `get_insert`
@@ -546,3 +547,18 @@ User wants to build a construct
   ├─ Validate: validate_construct(...)
   └─ Export: export_construct(...)
 ```
+
+## Optional Data Sources (if available)
+
+These tools are only available in some deployments. If they appear in your tool list, use them as described; if not, proceed without them.
+
+### Benchling
+If Benchling tools are available (`mcp__benchling__*`), the user has connected their Benchling workspace:
+- **Fetch**: when the user references a Benchling entry (by URL or ID), use Benchling tools to retrieve the sequence directly — treat it like any other backbone/insert source.
+- **Write back**: after exporting a construct, offer to save it to Benchling. Only do this if the user confirms.
+
+### Literature (PubMed + Unpaywall)
+When the user references a paper ("the vector from Chen et al. 2023", a DOI, a PubMed ID):
+1. **PubMed tools first** (`mcp__pubmed__search_articles`, `mcp__pubmed__get_full_text_article`): search by citation, get full text from PubMed Central. Scan the Methods section for plasmid names, Addgene IDs, or backbone descriptions.
+2. **`fetch_oa_fulltext` as fallback**: if PubMed can't fetch full text (paper isn't in PMC), try this — it finds open-access copies via Unpaywall. Returns a PDF URL you can reference to the user.
+3. Once you identify a plasmid name/ID from the paper, resolve it through the normal backbone/insert workflow (`get_backbone`, `search_addgene`, etc.).

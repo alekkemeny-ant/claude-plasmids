@@ -50,7 +50,7 @@ from claude_agent_sdk import (
     PermissionResultAllow,
 )
 from claude_agent_sdk.types import UserMessage
-from src.tools import create_plasmid_tools, ALL_TOOL_NAMES
+from src.tools import build_mcp_servers, create_plasmid_tools, ALL_TOOL_NAMES
 from src.library import (
     get_backbone_by_id,
     get_insert_by_id,
@@ -1625,12 +1625,16 @@ async def run_agent(
     response, which is fed back to the agent via client.query().
     """
     trace = AgentTrace(prompt=prompt)
-    server_config = create_plasmid_tools()
+
+    # Evals must be deterministic and network-independent. Force external MCP
+    # servers OFF regardless of ambient env — PubMed defaults on otherwise and
+    # would make eval scores vary with network availability.
+    os.environ["PLASMID_ENABLE_PUBMED"] = "0"
+    os.environ.pop("BENCHLING_SUBDOMAIN", None)
 
     options = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
-        mcp_servers={"plasmid-library": server_config},
-        allowed_tools=ALL_TOOL_NAMES,
+        mcp_servers=build_mcp_servers(),
         permission_mode="acceptEdits",
         model=model,
         max_turns=max_turns,

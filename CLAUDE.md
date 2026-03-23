@@ -8,9 +8,11 @@ Claude-powered plasmid designer built as a collaboration between Anthropic and t
 src/                        # Core modules
 ├── assembler.py            # Deterministic sequence assembly engine
 ├── library.py              # Backbone/insert library search + Addgene/NCBI fallback
+├── user_library.py         # BYOL — load user-provided GenBank files ($PLASMID_USER_LIBRARY)
 ├── ncbi_integration.py     # NCBI Entrez gene search + CDS retrieval
+├── literature.py           # Unpaywall open-access full-text lookup
 ├── server.py               # MCP server (imports from library.py)
-├── tools.py                # Standalone tool definitions for Agent SDK
+├── tools.py                # Tool definitions + build_mcp_servers() for Agent SDK
 └── addgene_integration.py  # Addgene web scraping, GenBank parsing, API client
 
 app/                        # Web UI + agent
@@ -32,6 +34,8 @@ evals/                      # Evaluation infrastructure
 tests/                      # Test suite
 ├── test_assembler.py       # Assembly engine tests
 ├── test_library.py         # Library function tests
+├── test_user_library.py    # BYOL tests (incl. cache-isolation invariant)
+├── test_literature.py      # Unpaywall lookup tests (mocked)
 └── test_pipeline.py        # Pipeline integration tests (rubric-scored)
 ```
 

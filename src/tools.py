@@ -7,16 +7,17 @@ Each tool wraps existing functions from library.py, assembler.py, and
 addgene_integration.py.
 
 Usage:
-    from src.tools import create_plasmid_tools
+    from src.tools import build_mcp_servers
 
-    server_config = create_plasmid_tools()
-    # Pass to ClaudeAgentOptions(mcp_servers={"plasmid-library": server_config})
+    # Includes plasmid-library + optional Benchling/PubMed (env-gated)
+    options = ClaudeAgentOptions(mcp_servers=build_mcp_servers(), ...)
 """
 
 import asyncio
 import json
+import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
@@ -113,6 +114,14 @@ try:
     ADDGENE_AVAILABLE = True
 except ImportError:
     ADDGENE_AVAILABLE = False
+
+# Literature integration (optional — requires `requests`, which is a core dep,
+# but gate anyway for symmetry with other optional integrations)
+try:
+    from .literature import fetch_oa_fulltext as _fetch_oa_fulltext
+    LITERATURE_AVAILABLE = True
+except ImportError:
+    LITERATURE_AVAILABLE = False
 
 LIBRARY_PATH = Path(__file__).parent.parent / "library"
 
@@ -1274,6 +1283,49 @@ async def assemble_golden_gate_tool(args):
 
 # ── Server factory ─────────────────────────────────────────────────────
 
+@tool(
+    "fetch_oa_fulltext",
+    "Look up a paper by DOI on Unpaywall to find open-access full-text URLs. "
+    "Use this as a FALLBACK when PubMed's get_full_text_article fails — "
+    "Unpaywall covers OA papers outside PubMed Central (journal-hosted OA, "
+    "preprint servers, institutional repositories). Returns PDF URL, landing "
+    "page URL, and OA status. Requires UNPAYWALL_EMAIL env var.",
+    {
+        "type": "object",
+        "properties": {
+            "doi": {
+                "type": "string",
+                "description": "DOI of the paper (e.g., '10.1038/nature12373' or 'https://doi.org/10.1038/nature12373')",
+            },
+        },
+        "required": ["doi"],
+    },
+)
+async def fetch_oa_fulltext_tool(args):
+    if not LITERATURE_AVAILABLE:
+        return _error("Literature integration not available (requests not installed)")
+    result = _fetch_oa_fulltext(args["doi"])
+    if not result.get("found"):
+        return _text(f"Unpaywall lookup failed: {result.get('error', 'unknown')}")
+    if not result.get("is_oa"):
+        return _text(
+            f"Paper found but no open-access copy available.\n"
+            f"Title: {result.get('title')}\n"
+            f"Journal: {result.get('journal')} ({result.get('year')})"
+        )
+    lines = [
+        f"Open-access copy found:",
+        f"  Title: {result.get('title')}",
+        f"  Journal: {result.get('journal')} ({result.get('year')})",
+        f"  Host: {result.get('host_type')} (license: {result.get('license') or 'unspecified'})",
+    ]
+    if result.get("pdf_url"):
+        lines.append(f"  PDF: {result['pdf_url']}")
+    if result.get("landing_url"):
+        lines.append(f"  Landing page: {result['landing_url']}")
+    return _text("\n".join(lines))
+
+
 # Collect all tool objects
 ALL_TOOLS = [
     search_backbones,
@@ -1303,6 +1355,8 @@ ALL_TOOLS = [
     fetch_promoter_region_tool,
     # Golden Gate assembly
     assemble_golden_gate_tool,
+    # Literature
+    fetch_oa_fulltext_tool,
 ]
 
 ALL_TOOL_NAMES = [t.name for t in ALL_TOOLS]
@@ -1318,3 +1372,43 @@ def create_plasmid_tools():
         name="plasmid-library",
         tools=ALL_TOOLS,
     )
+
+
+# ── External MCP server URLs ──
+# Benchling: remote MCP, OAuth, subdomain-per-workspace
+_BENCHLING_MCP_URL_TMPL = "https://{subdomain}.mcp.benchling.com/2025-06-18/mcp"
+# PubMed: hosted on Cloud Run, no auth (source: anthropics/life-sciences/pubmed)
+_PUBMED_MCP_URL = "https://pubmed.mcp.claude.com/mcp"
+
+
+def build_mcp_servers() -> dict[str, Any]:
+    """Build the full mcp_servers dict for ClaudeAgentOptions.
+
+    Always includes the in-process plasmid-library server. Conditionally
+    adds external HTTP MCP servers based on env vars:
+      - BENCHLING_SUBDOMAIN: if set, adds Benchling remote MCP (read+write)
+      - PLASMID_ENABLE_PUBMED: if not "0", adds PubMed MCP (default: on)
+
+    NOTE: External MCP servers only work in Agent SDK callsites (app/agent.py,
+    evals). The web UI (app/app.py) uses the raw Anthropic client and cannot
+    consume McpHttpServerConfig — those tools are unavailable there.
+
+    NOTE: When using this, do NOT set allowed_tools in ClaudeAgentOptions.
+    The explicit allowlist only contains in-process tool names and would
+    silently block all external MCP tools. Rely on can_use_tool for gating.
+    """
+    servers: dict[str, Any] = {"plasmid-library": create_plasmid_tools()}
+
+    if subdomain := os.environ.get("BENCHLING_SUBDOMAIN"):
+        servers["benchling"] = {
+            "type": "http",
+            "url": _BENCHLING_MCP_URL_TMPL.format(subdomain=subdomain),
+        }
+
+    if os.environ.get("PLASMID_ENABLE_PUBMED", "1") != "0":
+        servers["pubmed"] = {
+            "type": "http",
+            "url": _PUBMED_MCP_URL,
+        }
+
+    return servers

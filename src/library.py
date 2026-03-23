@@ -48,6 +48,17 @@ except ImportError:
     except ImportError:
         NCBI_AVAILABLE = False
 
+# Optional user library (BYOL — bring your own library)
+try:
+    from .user_library import load_user_backbones, load_user_inserts
+    USER_LIBRARY_AVAILABLE = True
+except ImportError:
+    try:
+        from user_library import load_user_backbones, load_user_inserts
+        USER_LIBRARY_AVAILABLE = True
+    except ImportError:
+        USER_LIBRARY_AVAILABLE = False
+
 # Optional FPbase integration (fluorescent proteins — engineered, not in NCBI Gene)
 try:
     from .fpbase_integration import (
@@ -105,21 +116,49 @@ def set_library_readonly(readonly: bool = True) -> None:
     _LIBRARY_READONLY = readonly
 
 
-def load_backbones() -> dict:
-    """Load backbone library from JSON file, plus any registered test fixtures."""
+def _load_builtin_backbones() -> dict:
+    """Load built-in backbone library from JSON file (no runtime extensions).
+
+    This is the cache-write-safe loader. The Addgene auto-cache path uses
+    this to re-read fresh from disk before appending, ensuring neither
+    user-library entries nor test fixtures leak into backbones.json.
+    """
     with open(LIBRARY_PATH / "backbones.json", "r") as f:
-        data = json.load(f)
+        return json.load(f)
+
+
+def _load_builtin_inserts() -> dict:
+    """Load built-in insert library from JSON file (no runtime extensions)."""
+    with open(LIBRARY_PATH / "inserts.json", "r") as f:
+        return json.load(f)
+
+
+def load_backbones() -> dict:
+    """Load backbone library: built-in + test fixtures + user library.
+
+    User entries (from $PLASMID_USER_LIBRARY/backbones/) are appended with
+    `user:` ID prefix. Callers that persist to disk must use
+    _load_builtin_backbones instead to avoid writing runtime-only entries.
+    """
+    data = _load_builtin_backbones()
     if _EXTRA_BACKBONES:
         data["backbones"] = data["backbones"] + _EXTRA_BACKBONES
+    if USER_LIBRARY_AVAILABLE:
+        user_entries = load_user_backbones()
+        if user_entries:
+            data["backbones"] = data["backbones"] + user_entries
     return data
 
 
 def load_inserts() -> dict:
-    """Load insert library from JSON file, plus any registered test fixtures."""
-    with open(LIBRARY_PATH / "inserts.json", "r") as f:
-        data = json.load(f)
+    """Load insert library: built-in + test fixtures + user library."""
+    data = _load_builtin_inserts()
     if _EXTRA_INSERTS:
         data["inserts"] = data["inserts"] + _EXTRA_INSERTS
+    if USER_LIBRARY_AVAILABLE:
+        user_entries = load_user_inserts()
+        if user_entries:
+            data["inserts"] = data["inserts"] + user_entries
     return data
 
 
@@ -472,11 +511,14 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
             )
             return backbone
 
-        # Exact-name match: cache to local library for future fast lookups
+        # Exact-name match: cache to local library for future fast lookups.
+        # Re-read built-in from disk — `data` above came from load_backbones()
+        # which may include user-library entries or test fixtures we must not persist.
         if not _LIBRARY_READONLY:
-            data["backbones"].append(backbone)
+            builtin = _load_builtin_backbones()
+            builtin["backbones"].append(backbone)
             with open(LIBRARY_PATH / "backbones.json", "w") as f:
-                json.dump(data, f, indent=2)
+                json.dump(builtin, f, indent=2)
 
         logger.info(
             f"Cached Addgene #{addgene_id} as '{backbone['id']}' "
@@ -652,12 +694,16 @@ def get_insert_by_id(insert_id: str, organism: Optional[str] = None) -> Optional
             "source": "NCBI",
         }
 
-        # Cache to local library (skip if gene already cached)
-        existing_ids = {i["id"] for i in data["inserts"]}
-        if insert["id"] not in existing_ids and not _LIBRARY_READONLY:
-            data["inserts"].append(insert)
-            with open(LIBRARY_PATH / "inserts.json", "w") as f:
-                json.dump(data, f, indent=2)
+        # Cache to local library (skip if gene already cached).
+        # Re-read built-in from disk — `data` above came from load_inserts()
+        # which may include user-library entries or test fixtures we must not persist.
+        if not _LIBRARY_READONLY:
+            builtin = _load_builtin_inserts()
+            existing_ids = {i["id"] for i in builtin["inserts"]}
+            if insert["id"] not in existing_ids:
+                builtin["inserts"].append(insert)
+                with open(LIBRARY_PATH / "inserts.json", "w") as f:
+                    json.dump(builtin, f, indent=2)
 
         logger.info(
             f"Cached NCBI gene '{result['symbol']}' "

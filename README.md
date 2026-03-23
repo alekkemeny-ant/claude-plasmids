@@ -246,3 +246,38 @@ python -m src.server
 ## Backbone Library
 
 21 curated backbones including pcDNA3.1(+/-), pUC19, pEGFP-N1, pGEX-4T-1, pBABE-puro, pAAV-CMV, pLKO.1-puro, pCDNA3, and more. When a backbone isn't found locally, it is automatically fetched from Addgene — the GenBank file is parsed for sequence, feature annotations (promoters, resistance genes, origins, polyA signals, MCS), and cached in `backbones.json` for future fast lookups. Backbones with feature annotations get full biological sanity checks in the rubric.
+
+## Batch Design
+
+Design multiple plasmids at once by uploading a CSV of descriptions.
+
+### Web UI
+
+Drag and drop your design CSV (see below for expected format) into the chat pane to upload your file. Each row runs through the full agent loop independently. A live progress panel shows the status of every row and provides per-file download buttons as results come in.
+
+### CLI
+
+```bash
+python app/batch.py designs.csv
+python app/batch.py designs.csv --output ./outputs/
+python app/batch.py designs.csv --output ./outputs/ --model claude-sonnet-4-6
+```
+
+The CSV must have a `description` column. Two optional columns control output:
+
+| column | required | description |
+|---|---|---|
+| `description` | yes | free-text design prompt |
+| `name` | no | output filename prefix (default: `plasmid_001`, `plasmid_002`, …) |
+| `output_format` | no | `genbank` / `fasta` / `both` (default: `genbank`) |
+
+Example CSV:
+
+```csv
+description,name,output_format
+"Express EGFP in HEK293 cells using pcDNA3.1(+)",egfp_hek293,genbank
+"Put mCherry into a lentiviral backbone",mcherry_lenti,both
+"Tag GAPDH with FLAG at the C-terminus",gapdh_flag,fasta
+```
+
+Rows run sequentially to avoid API rate limits. Output files are saved to the output directory; if no export is produced the agent's text response is saved as `<name>_output.txt` for inspection.

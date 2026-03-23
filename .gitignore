@@ -35,3 +35,10 @@ library/backbones.json
 
 # pytest
 .pytest_cache/
+
+# Playwright
+node_modules/
+playwright-report/
+.playwright-mcp/
+test-results/
+*.png

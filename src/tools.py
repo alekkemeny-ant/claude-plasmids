@@ -7,16 +7,17 @@ Each tool wraps existing functions from library.py, assembler.py, and
 addgene_integration.py.
 
 Usage:
-    from src.tools import create_plasmid_tools
+    from src.tools import build_mcp_servers
 
-    server_config = create_plasmid_tools()
-    # Pass to ClaudeAgentOptions(mcp_servers={"plasmid-library": server_config})
+    # Includes plasmid-library + optional Benchling/PubMed (env-gated)
+    options = ClaudeAgentOptions(mcp_servers=build_mcp_servers(), ...)
 """
 
 import asyncio
 import json
+import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
@@ -33,6 +34,7 @@ from .library import (
     format_backbone_summary,
     format_insert_summary,
     extract_insert_from_plasmid as _extract_insert_from_plasmid,
+    infer_species_from_cell_line,
 )
 from .assembler import (
     assemble_construct as _assemble_construct,
@@ -45,6 +47,8 @@ from .assembler import (
     format_as_fasta,
     format_as_genbank,
     DEFAULT_FUSION_LINKER as _DEFAULT_FUSION_LINKER,
+    assemble_golden_gate as _assemble_golden_gate,
+    GG_ENZYMES,
 )
 
 # NCBI integration (optional)
@@ -57,6 +61,50 @@ try:
 except ImportError:
     NCBI_AVAILABLE = False
 
+# Genomic upstream fetch for bespoke promoters (newer, may not exist)
+try:
+    from .ncbi_integration import fetch_genomic_upstream as _fetch_genomic_upstream
+    GENOMIC_UPSTREAM_AVAILABLE = True
+except ImportError:
+    GENOMIC_UPSTREAM_AVAILABLE = False
+
+# Bespoke promoter detection
+try:
+    from .library import is_known_promoter as _is_known_promoter  # noqa: F401
+    PROMOTER_DETECTION_AVAILABLE = True
+except ImportError:
+    PROMOTER_DETECTION_AVAILABLE = False
+
+# ── Phase-2 advanced design modules ──
+# Design Confidence Score
+try:
+    from .confidence import compute_confidence, format_confidence_report
+    CONFIDENCE_AVAILABLE = True
+except ImportError:
+    CONFIDENCE_AVAILABLE = False
+
+# Protein analysis (disorder-based fusion sites)
+try:
+    from .protein_analysis import (
+        translate as _translate_dna,
+        find_fusion_sites as _find_fusion_sites,
+    )
+    PROTEIN_ANALYSIS_AVAILABLE = True
+except ImportError:
+    PROTEIN_ANALYSIS_AVAILABLE = False
+
+# Smart mutations (curated GoF/LoF + deterministic edits)
+try:
+    from .mutations import (
+        lookup_known_mutations as _lookup_known_mutations,
+        apply_point_mutation as _apply_point_mutation,
+        design_premature_stop as _design_premature_stop,
+        parse_mutation_notation as _parse_mutation_notation,
+    )
+    MUTATIONS_AVAILABLE = True
+except ImportError:
+    MUTATIONS_AVAILABLE = False
+
 # Addgene integration (optional)
 try:
     from .addgene_integration import (
@@ -67,6 +115,14 @@ try:
     ADDGENE_AVAILABLE = True
 except ImportError:
     ADDGENE_AVAILABLE = False
+
+# Literature integration (optional — requires `requests`, which is a core dep,
+# but gate anyway for symmetry with other optional integrations)
+try:
+    from .literature import fetch_oa_fulltext as _fetch_oa_fulltext
+    LITERATURE_AVAILABLE = True
+except ImportError:
+    LITERATURE_AVAILABLE = False
 
 LIBRARY_PATH = Path(__file__).parent.parent / "library"
 
@@ -154,9 +210,20 @@ async def search_backbones(args):
 async def get_backbone(args):
     bb = get_backbone_by_id(args["backbone_id"])
     if not bb:
-        return _text(f"Backbone '{args['backbone_id']}' not found in library.")
+        return _text(f"Backbone '{args['backbone_id']}' not found in library or on Addgene.")
     _record("add_backbone", bb)
     out = format_backbone_summary(bb)
+    if bb.get("unconfirmed"):
+        out += (
+            "\n\n⚠️ **Unconfirmed Addgene match** — fuzzy-matched from search, "
+            "NOT cached. Confirm with user before proceeding.\n"
+        )
+        alts = bb.get("addgene_search_alternatives", [])
+        if alts:
+            out += "\nOther Addgene search results:\n"
+            for a in alts:
+                out += f"  - {a.get('name')} (Addgene #{a.get('addgene_id')})\n"
+        out += "\nIf correct, call import_addgene_to_library with the confirmed addgene_id."
     if args.get("include_sequence") and bb.get("sequence"):
         out += f"\n\nDNA Sequence ({len(bb['sequence'])} bp):\n{bb['sequence'][:200]}... [{len(bb['sequence'])} bp total]"
     return _text(out)
@@ -183,19 +250,57 @@ async def search_inserts(args):
 
 @tool(
     "get_insert",
-    "Get complete information about a specific insert, including its DNA sequence.",
+    "Get complete information about a specific insert including its DNA sequence. Fallback chain: local library → FPbase (FPs) → NCBI Gene. Returns disambiguation list if the query is ambiguous (gene family or multiple species).",
     {
         "type": "object",
         "properties": {
-            "insert_id": {"type": "string", "description": "Insert ID or name"},
+            "insert_id": {"type": "string", "description": "Insert ID, gene symbol, or FP name"},
+            "organism": {"type": "string", "description": "Species for NCBI fallback (e.g., 'human', 'mouse')"},
         },
         "required": ["insert_id"],
     },
 )
 async def get_insert(args):
-    ins = get_insert_by_id(args["insert_id"])
+    ins = get_insert_by_id(args["insert_id"], organism=args.get("organism"))
     if not ins:
-        return _text(f"Insert '{args['insert_id']}' not found in library.")
+        return _text(
+            f"Insert '{args['insert_id']}' not found in local library, "
+            f"FPbase, or NCBI Gene. Provide the DNA sequence directly or "
+            f"check spelling/species."
+        )
+    if ins.get("needs_disambiguation"):
+        reason = ins.get("reason", "")
+        if reason == "gene_family":
+            out = (
+                f"⚠️ **Ambiguous gene family**: '{args['insert_id']}' is a "
+                f"family name, not a specific gene. Specify which member:\n\n"
+            )
+            for m in ins.get("members", []):
+                out += f"  - {m}\n"
+            out += "\nAsk the user which one, then retry with the specific name."
+            return _text(out)
+        if reason == "fpbase_no_dna":
+            out = (
+                f"✅ Found on FPbase: **{ins.get('fpbase_name')}** "
+                f"({ins.get('aa_length', '?')} aa, {ins.get('fpbase_url')})\n\n"
+                f"❌ **No DNA sequence available on FPbase** — only the AA "
+                f"sequence. I cannot synthesize DNA. Ask the user for the "
+                f"coding sequence (from the publication, Addgene, or their "
+                f"codon-optimized version), then pass it as insert_sequence."
+            )
+            return _text(out)
+        # multiple_species
+        out = (
+            f"⚠️ **Ambiguous gene**: '{args['insert_id']}' matched multiple "
+            f"species. Specify which:\n\n"
+        )
+        for opt in ins.get("options", []):
+            out += (
+                f"  - {opt.get('symbol')} ({opt.get('organism')}) — "
+                f"{opt.get('full_name')}\n    gene_id: {opt.get('gene_id')}\n"
+            )
+        out += "\nRetry with organism set, or pass gene_id directly."
+        return _text(out)
     _record("add_insert", ins)
     out = format_insert_summary(ins)
     if ins.get("sequence"):
@@ -336,6 +441,12 @@ async def assemble_construct(args):
     if not insert_seq and args.get("insert_id"):
         insert_data = get_insert_by_id(args["insert_id"])
         if insert_data:
+            if insert_data.get("needs_disambiguation"):
+                return _error(
+                    f"Insert '{args['insert_id']}' is ambiguous "
+                    f"({insert_data.get('reason', 'multiple matches')}). "
+                    f"Resolve with get_insert first, then retry with the specific ID."
+                )
             insert_seq = insert_data.get("sequence")
     if not insert_seq:
         return _error("Error: No insert sequence available. Provide insert_id or insert_sequence.")
@@ -452,9 +563,9 @@ async def export_construct(args):
         "properties": {
             "construct_sequence": {"type": "string", "description": "Assembled construct to validate"},
             "backbone_id": {"type": "string", "description": "Expected backbone ID"},
-            "insert_id": {"type": "string", "description": "Expected insert ID"},
+            "insert_id": {"type": "string", "description": "Expected insert ID — use ONLY for single (non-fusion) inserts. For fusions, use insert_sequence with the full fused sequence instead."},
             "backbone_sequence": {"type": "string", "description": "Expected backbone sequence"},
-            "insert_sequence": {"type": "string", "description": "Expected insert sequence"},
+            "insert_sequence": {"type": "string", "description": "Expected insert sequence. For fusions, pass the complete fused_sequence from fuse_inserts — never a single component ID."},
             "expected_insert_position": {"type": "integer", "description": "Expected insert position"},
         },
         "required": ["construct_sequence"],
@@ -731,6 +842,19 @@ async def fetch_gene_tool(args):
     )
     if not result:
         return _text("Could not fetch gene sequence from NCBI.")
+    if result.get("needs_disambiguation"):
+        out = (
+            f"⚠️ **Ambiguous gene**: '{args.get('gene_symbol', '?')}' matched "
+            f"{len(result.get('options', []))} entries across multiple species. "
+            f"Specify organism:\n\n"
+        )
+        for opt in result.get("options", []):
+            out += (
+                f"  - {opt.get('symbol')} ({opt.get('organism')}) — "
+                f"{opt.get('full_name')}\n    gene_id: {opt.get('gene_id')}\n"
+            )
+        out += "\nRetry with organism set, or pass gene_id directly."
+        return _text(out)
     _record("add_ncbi_gene", result)
     out = f"Gene: {result['symbol']} ({result['organism']})\n"
     out += f"Accession: {result['accession']}\n"
@@ -738,6 +862,33 @@ async def fetch_gene_tool(args):
     out += f"CDS length: {result['length']} bp\n"
     out += f"\nCDS Sequence ({result['length']} bp):\n{result['sequence']}"
     return _text(out)
+
+
+@tool(
+    "get_cell_line_info",
+    "Look up the species for a common cell line name (e.g., HEK293 → human, RAW 264.7 → mouse). Use when the user mentions a cell line but not a species. IMPORTANT: this infers the CELL LINE's species — the user might want a DIFFERENT species' gene.",
+    {
+        "type": "object",
+        "properties": {
+            "cell_line": {"type": "string", "description": "Cell line name (e.g., 'HEK293', 'RAW 264.7')"},
+        },
+        "required": ["cell_line"],
+    },
+)
+async def get_cell_line_info_tool(args):
+    cl = args["cell_line"]
+    species = infer_species_from_cell_line(cl)
+    if species:
+        return _text(
+            f"Cell line '{cl}' is from species: **{species}**\n"
+            f"Note: confirm with user before assuming the gene of interest is "
+            f"also {species} — they may want a different species' gene "
+            f"expressed in {cl} cells."
+        )
+    return _text(
+        f"Cell line '{cl}' not found in known cell lines database. "
+        f"Ask the user what species it is."
+    )
 
 
 @tool(
@@ -778,7 +929,12 @@ async def fuse_inserts_tool(args):
         if not seq and item.get("insert_id"):
             ins = get_insert_by_id(item["insert_id"])
             if not ins:
-                return _error(f"Insert '{item['insert_id']}' not found in library.")
+                return _error(f"Insert '{item['insert_id']}' not found in library, FPbase, or NCBI.")
+            if ins.get("needs_disambiguation"):
+                return _error(
+                    f"Cannot fuse: insert '{item['insert_id']}' is ambiguous. "
+                    f"Resolve with get_insert first, then retry."
+                )
             seq = ins.get("sequence")
             name = name or ins.get("name", item["insert_id"])
             _record("add_insert", ins)
@@ -832,7 +988,412 @@ async def fuse_inserts_tool(args):
     return _text(out)
 
 
+# ── Phase-2 Advanced Design tools ──────────────────────────────────────
+
+
+@tool(
+    "score_construct_confidence",
+    "Compute a Design Confidence Score (0-100) for an insert/CDS. Checks "
+    "cryptic polyA/splice signals, CAI, Kozak, GC, linker adequacy, repeat "
+    "runs, promoter count. Use before presenting a final design.",
+    {
+        "type": "object",
+        "properties": {
+            "insert_sequence": {"type": "string", "description": "Insert/CDS DNA sequence to analyze"},
+            "backbone_id": {"type": "string", "description": "Optional backbone ID (for promoter-count check)"},
+            "fusion_parts": {
+                "type": "array",
+                "description": "Optional fusion part metadata for linker adequacy check",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "aa_length": {"type": "integer"},
+                        "is_linker": {"type": "boolean"},
+                    },
+                },
+            },
+        },
+        "required": ["insert_sequence"],
+    },
+)
+async def score_construct_confidence_tool(args):
+    if not CONFIDENCE_AVAILABLE:
+        return _error("Design Confidence module not available.")
+    insert_seq = clean_sequence(args["insert_sequence"])
+    backbone = None
+    if args.get("backbone_id"):
+        backbone = get_backbone_by_id(args["backbone_id"])
+    report = compute_confidence(
+        insert_seq=insert_seq,
+        backbone=backbone,
+        fusion_parts=args.get("fusion_parts"),
+    )
+    return _text(format_confidence_report(report))
+
+
+@tool(
+    "predict_fusion_sites",
+    "Predict disordered regions in a protein as candidate fusion-insertion "
+    "sites. Use for internal/loop fusions or troubleshooting failed terminal "
+    "fusions. Accepts AA sequence or DNA CDS (translated). Returns ranked "
+    "disordered windows. Sequence-based heuristic — verify against AlphaFold2 "
+    "for high-stakes designs.",
+    {
+        "type": "object",
+        "properties": {
+            "protein_sequence": {"type": "string", "description": "Amino-acid sequence (single-letter code)"},
+            "dna_sequence": {"type": "string", "description": "Alternative: DNA CDS (translated in frame 0)"},
+            "min_window": {"type": "integer", "description": "Minimum window length (residues, default 10)", "default": 10},
+        },
+    },
+)
+async def predict_fusion_sites_tool(args):
+    if not PROTEIN_ANALYSIS_AVAILABLE:
+        return _error("Protein Analysis module not available.")
+    aa_seq = args.get("protein_sequence")
+    if not aa_seq and args.get("dna_sequence"):
+        dna = clean_sequence(args["dna_sequence"])
+        aa_seq = _translate_dna(dna)
+    if not aa_seq:
+        return _error("Provide either protein_sequence (AA) or dna_sequence (CDS).")
+    aa_seq = aa_seq.upper().strip()
+    min_window = args.get("min_window", 10)
+    sites = _find_fusion_sites(aa_seq, min_window=min_window)
+    if not sites:
+        return _text(
+            f"No disordered regions ≥{min_window} residues found "
+            f"({len(aa_seq)} aa). Protein may be highly structured; "
+            f"terminal fusion is likely the only option."
+        )
+    lines = [
+        f"Found {len(sites)} candidate fusion site(s) in protein "
+        f"({len(aa_seq)} aa):\n"
+    ]
+    for i, s in enumerate(sites[:5], 1):
+        lines.append(
+            f"  {i}. Residues {s['start']+1}-{s['end']} "
+            f"({s['length']} aa, disorder {s['mean_disorder']:.2f}) "
+            f"— ...{s['context']}..."
+        )
+    lines.append(
+        "\nNote: Sequence-based heuristic. Verify against AlphaFold2 "
+        "for high-stakes designs."
+    )
+    return _text("\n".join(lines))
+
+
+@tool(
+    "lookup_known_mutations",
+    "Look up curated GoF/LoF mutations for common oncogenes and tumor "
+    "suppressors (BRAF, KRAS, TP53, EGFR, PTEN, PIK3CA, IDH1/2, etc.). "
+    "Returns mutation notation, phenotype, PMID. Use when user wants a "
+    "constitutively active / dominant-negative / kinase-dead version.",
+    {
+        "type": "object",
+        "properties": {
+            "gene_symbol": {"type": "string", "description": "Gene symbol (e.g., 'BRAF', 'TP53')"},
+            "mutation_type": {"type": "string", "description": "Filter: 'GoF' or 'LoF'", "enum": ["GoF", "LoF"]},
+        },
+        "required": ["gene_symbol"],
+    },
+)
+async def lookup_known_mutations_tool(args):
+    if not MUTATIONS_AVAILABLE:
+        return _error("Mutation Design module not available.")
+    muts = _lookup_known_mutations(args["gene_symbol"], args.get("mutation_type"))
+    if not muts:
+        ft = f" ({args['mutation_type']})" if args.get("mutation_type") else ""
+        return _text(
+            f"No curated{ft} mutations for '{args['gene_symbol']}'. "
+            f"DB covers BRAF, KRAS, EGFR, PIK3CA, IDH1/2, NRAS, CTNNB1, "
+            f"AKT1, MYC, TP53, PTEN, RB1, FBXW7. For other genes, ask "
+            f"user for a specific mutation or offer premature-stop LoF."
+        )
+    lines = [
+        f"Curated mutations for {args['gene_symbol'].upper()}"
+        f"{' (' + args['mutation_type'] + ')' if args.get('mutation_type') else ''}:\n"
+    ]
+    for m in muts:
+        ref = f" [{m['reference']}]" if m.get("reference") else ""
+        lines.append(f"  • {m['mutation']} ({m['type']}): {m['phenotype']}{ref}")
+        if m.get("codon_change"):
+            lines.append(f"    Codon: {m['codon_change']}")
+    return _text("\n".join(lines))
+
+
+@tool(
+    "apply_mutation",
+    "Apply a deterministic point mutation or premature stop to a CDS. "
+    "Swaps ONE codon at the specified AA position for the preferred human "
+    "codon for the target AA. Rest of sequence preserved exactly. "
+    "SAFETY: Targeted single-codon editing only — no sequence invented.",
+    {
+        "type": "object",
+        "properties": {
+            "dna_sequence": {"type": "string", "description": "Input CDS DNA (in-frame from position 0)"},
+            "method": {"type": "string", "enum": ["point_mutation", "premature_stop"], "default": "point_mutation"},
+            "mutation": {"type": "string", "description": "Standard notation like 'V600E'"},
+            "aa_position": {"type": "integer", "description": "1-indexed AA position (alt to 'mutation')"},
+            "new_aa": {"type": "string", "description": "Target AA single-letter code (with aa_position)"},
+            "position_fraction": {"type": "number", "description": "For premature_stop: stop position (0-1)", "default": 0.1},
+        },
+        "required": ["dna_sequence"],
+    },
+)
+async def apply_mutation_tool(args):
+    if not MUTATIONS_AVAILABLE:
+        return _error("Mutation Design module not available.")
+    dna = clean_sequence(args["dna_sequence"])
+    method = args.get("method", "point_mutation")
+
+    if method == "premature_stop":
+        frac = args.get("position_fraction", 0.1)
+        r = _design_premature_stop(dna, position_fraction=frac)
+        return _text(
+            f"Premature stop introduced at AA position {r['stop_position_aa']} "
+            f"(DNA {r['stop_position_dna']}). "
+            f"Original: {r['original_codon']} ({r['original_aa']}) → TGA.\n\n"
+            f"Mutated sequence ({len(r['sequence'])} bp):\n{r['sequence']}"
+        )
+
+    aa_pos = args.get("aa_position")
+    new_aa = args.get("new_aa")
+    expected_orig = None
+    if args.get("mutation"):
+        parsed = _parse_mutation_notation(args["mutation"])
+        if not parsed:
+            return _error(f"Cannot parse mutation notation '{args['mutation']}'.")
+        aa_pos = parsed["position"]
+        new_aa = parsed["new_aa"]
+        expected_orig = parsed["original_aa"]
+
+    if aa_pos is None or not new_aa:
+        return _error("Provide 'mutation' (e.g., 'V600E') or aa_position + new_aa.")
+
+    r = _apply_point_mutation(dna, aa_position=aa_pos, new_aa=new_aa)
+
+    warn = ""
+    if expected_orig and r["original_aa"] != expected_orig:
+        warn = (
+            f"\n⚠️ Notation expects '{expected_orig}' at position {aa_pos} "
+            f"but sequence has '{r['original_aa']}'. Verify transcript/position."
+        )
+
+    return _text(
+        f"Point mutation: {r['original_aa']}{aa_pos}{r['new_aa']} "
+        f"({r['original_codon']} → {r['new_codon']} at DNA {r['dna_position']}).{warn}\n\n"
+        f"Mutated sequence ({len(r['sequence'])} bp):\n{r['sequence']}"
+    )
+
+
+@tool(
+    "fetch_promoter_region",
+    "Fetch the native upstream genomic region of a gene from NCBI (~2kb 5' "
+    "of TSS). Use ONLY for bespoke promoters when user explicitly chose "
+    "option (c) — native upstream fetch. Warn user this is endogenous "
+    "regulatory region, NOT validated minimal promoter.",
+    {
+        "type": "object",
+        "properties": {
+            "gene_id": {"type": "string", "description": "NCBI Gene ID (e.g., '7157' for TP53)"},
+            "gene_symbol": {"type": "string", "description": "Gene symbol (resolved to gene_id)"},
+            "organism": {"type": "string", "description": "Organism for symbol resolution"},
+            "bp_upstream": {"type": "integer", "description": "bp upstream to fetch (100-10000)", "default": 2000},
+        },
+    },
+)
+async def fetch_promoter_region_tool(args):
+    if not GENOMIC_UPSTREAM_AVAILABLE:
+        return _error("Genomic upstream fetch not available (needs Biopython + NCBI).")
+    gene_id = args.get("gene_id")
+    bp_upstream = args.get("bp_upstream", 2000)
+
+    if not gene_id and args.get("gene_symbol"):
+        if not NCBI_AVAILABLE:
+            return _error("NCBI gene search not available.")
+        genes = _search_gene_fn(args["gene_symbol"], args.get("organism"))
+        if not genes:
+            return _error(f"Gene '{args['gene_symbol']}' not found on NCBI.")
+        if len(genes) > 1 and not args.get("organism"):
+            orgs = {g.get("organism", "") for g in genes}
+            if len(orgs) > 1:
+                return _error(
+                    f"'{args['gene_symbol']}' ambiguous across species: "
+                    f"{', '.join(sorted(orgs))}. Specify organism."
+                )
+        gene_id = genes[0]["gene_id"]
+
+    if not gene_id:
+        return _error("Provide gene_id or gene_symbol.")
+
+    r = _fetch_genomic_upstream(gene_id=gene_id, bp_upstream=bp_upstream)
+    if not r:
+        return _error(
+            f"Could not fetch upstream region for gene_id={gene_id}. "
+            f"Gene may lack annotated genomic coords, or NCBI unavailable."
+        )
+    return _text(
+        f"Native upstream region for {r['gene_symbol']} (gene_id={r['gene_id']}):\n"
+        f"  Organism: {r.get('organism', '?')}\n"
+        f"  Chromosome: {r.get('chromosome_accession', '?')}\n"
+        f"  Strand: {r.get('strand', '?')}\n"
+        f"  Length: {r['length']} bp\n\n"
+        f"⚠️ {r['warning']}\n\n"
+        f"Sequence ({r['length']} bp):\n{r['sequence']}"
+    )
+
+
+# ── Golden Gate Assembly Tool ───────────────────────────────────────────────
+
+@tool(
+    "assemble_golden_gate",
+    (
+        "Perform in-silico Golden Gate assembly. "
+        "The backbone plasmid is digested with a Type IIS restriction enzyme "
+        "to open the cloning window (removing a dropout cassette if present). "
+        "Each part is excised from its carrier vector using the same enzyme. "
+        "Parts are ligated into the backbone in the order dictated by "
+        "complementary 4-nt overhangs. "
+        "Use this for Allen Institute modular expression system parts (Esp3I/BsaI/BbsI) or "
+        "any standard Golden Gate workflow. "
+        "Parts must be stored with category='part_in_vector' and carry a "
+        "'plasmid_sequence' field."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "backbone_id": {
+                "type": "string",
+                "description": "Library ID of the backbone vector (must contain Type IIS sites).",
+            },
+            "part_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Library IDs of the parts to assemble, in approximate order. "
+                    "Exact order will be inferred from overhang matching."
+                ),
+            },
+            "enzyme_name": {
+                "type": "string",
+                "enum": list(GG_ENZYMES.keys()),
+                "description": (
+                    "Type IIS restriction enzyme used for the assembly. "
+                    "Esp3I and BsmBI share the same recognition site (CGTCTC). "
+                    "Defaults to Esp3I if not specified."
+                ),
+            },
+        },
+        "required": ["backbone_id", "part_ids"],
+    },
+)
+async def assemble_golden_gate_tool(args):
+    backbone_id = args["backbone_id"]
+    part_ids = args["part_ids"]
+    enzyme_name = args.get("enzyme_name", "Esp3I")
+
+    # Fetch backbone
+    backbone = get_backbone_by_id(backbone_id)
+    if not backbone:
+        return _error(f"Backbone {backbone_id!r} not found in library.")
+
+    bb_seq = backbone.get("plasmid_sequence") or backbone.get("sequence", "")
+    if not bb_seq:
+        return _error(f"Backbone {backbone_id!r} has no plasmid_sequence.")
+
+    # Fetch parts
+    parts = []
+    for pid in part_ids:
+        part = get_insert_by_id(pid)
+        if not part:
+            return _error(f"Part {pid!r} not found in library.")
+        ps = part.get("plasmid_sequence") or part.get("sequence", "")
+        if not ps:
+            return _error(
+                f"Part {pid!r} has no plasmid_sequence. "
+                f"Golden Gate requires the full carrier vector sequence."
+            )
+        parts.append({
+            "name": part.get("name", pid),
+            "plasmid_sequence": ps,
+            "overhang_l": part.get("overhang_l"),
+            "overhang_r": part.get("overhang_r"),
+        })
+
+    # Run assembly
+    result = _assemble_golden_gate(
+        backbone_plasmid_seq=bb_seq,
+        parts=parts,
+        enzyme_name=enzyme_name,
+    )
+
+    if not result.success:
+        return _error(
+            f"Golden Gate assembly failed:\n" + "\n".join(f"  • {e}" for e in result.errors)
+        )
+
+    warnings_block = ""
+    if result.warnings:
+        warnings_block = "\n\nWarnings:\n" + "\n".join(f"  ⚠ {w}" for w in result.warnings)
+
+    junctions = " → ".join(result.junction_overhangs)
+    order_str = " → ".join(result.assembly_order) if result.assembly_order else "(backbone only)"
+
+    return _text(
+        f"Golden Gate assembly successful ({enzyme_name}).\n\n"
+        f"Assembly order : {order_str}\n"
+        f"Junctions (4-nt): {junctions}\n"
+        f"Total size     : {result.total_size_bp} bp\n\n"
+        f"Assembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
+        + warnings_block
+    )
+
+
 # ── Server factory ─────────────────────────────────────────────────────
+
+@tool(
+    "fetch_oa_fulltext",
+    "Look up a paper by DOI on Unpaywall to find open-access full-text URLs. "
+    "Use this as a FALLBACK when PubMed's get_full_text_article fails — "
+    "Unpaywall covers OA papers outside PubMed Central (journal-hosted OA, "
+    "preprint servers, institutional repositories). Returns PDF URL, landing "
+    "page URL, and OA status. Requires UNPAYWALL_EMAIL env var.",
+    {
+        "type": "object",
+        "properties": {
+            "doi": {
+                "type": "string",
+                "description": "DOI of the paper (e.g., '10.1038/nature12373' or 'https://doi.org/10.1038/nature12373')",
+            },
+        },
+        "required": ["doi"],
+    },
+)
+async def fetch_oa_fulltext_tool(args):
+    if not LITERATURE_AVAILABLE:
+        return _error("Literature integration not available (requests not installed)")
+    result = _fetch_oa_fulltext(args["doi"])
+    if not result.get("found"):
+        return _text(f"Unpaywall lookup failed: {result.get('error', 'unknown')}")
+    if not result.get("is_oa"):
+        return _text(
+            f"Paper found but no open-access copy available.\n"
+            f"Title: {result.get('title')}\n"
+            f"Journal: {result.get('journal')} ({result.get('year')})"
+        )
+    lines = [
+        f"Open-access copy found:",
+        f"  Title: {result.get('title')}",
+        f"  Journal: {result.get('journal')} ({result.get('year')})",
+        f"  Host: {result.get('host_type')} (license: {result.get('license') or 'unspecified'})",
+    ]
+    if result.get("pdf_url"):
+        lines.append(f"  PDF: {result['pdf_url']}")
+    if result.get("landing_url"):
+        lines.append(f"  Landing page: {result['landing_url']}")
+    return _text("\n".join(lines))
+
 
 # Collect all tool objects
 ALL_TOOLS = [
@@ -853,8 +1414,19 @@ ALL_TOOLS = [
     search_all_tool,
     search_gene_tool,
     fetch_gene_tool,
+    get_cell_line_info_tool,
     fuse_inserts_tool,
     extract_insert_from_plasmid_tool,
+    # Phase-2 advanced design tools
+    score_construct_confidence_tool,
+    predict_fusion_sites_tool,
+    lookup_known_mutations_tool,
+    apply_mutation_tool,
+    fetch_promoter_region_tool,
+    # Golden Gate assembly
+    assemble_golden_gate_tool,
+    # Literature
+    fetch_oa_fulltext_tool,
 ]
 
 ALL_TOOL_NAMES = [t.name for t in ALL_TOOLS]
@@ -870,3 +1442,43 @@ def create_plasmid_tools():
         name="plasmid-library",
         tools=ALL_TOOLS,
     )
+
+
+# ── External MCP server URLs ──
+# Benchling: remote MCP, OAuth, subdomain-per-workspace
+_BENCHLING_MCP_URL_TMPL = "https://{subdomain}.mcp.benchling.com/2025-06-18/mcp"
+# PubMed: hosted on Cloud Run, no auth (source: anthropics/life-sciences/pubmed)
+_PUBMED_MCP_URL = "https://pubmed.mcp.claude.com/mcp"
+
+
+def build_mcp_servers() -> dict[str, Any]:
+    """Build the full mcp_servers dict for ClaudeAgentOptions.
+
+    Always includes the in-process plasmid-library server. Conditionally
+    adds external HTTP MCP servers based on env vars:
+      - BENCHLING_SUBDOMAIN: if set, adds Benchling remote MCP (read+write)
+      - PLASMID_ENABLE_PUBMED: if not "0", adds PubMed MCP (default: on)
+
+    NOTE: External MCP servers only work in Agent SDK callsites (app/agent.py,
+    evals). The web UI (app/app.py) uses the raw Anthropic client and cannot
+    consume McpHttpServerConfig — those tools are unavailable there.
+
+    NOTE: When using this, do NOT set allowed_tools in ClaudeAgentOptions.
+    The explicit allowlist only contains in-process tool names and would
+    silently block all external MCP tools. Rely on can_use_tool for gating.
+    """
+    servers: dict[str, Any] = {"plasmid-library": create_plasmid_tools()}
+
+    if subdomain := os.environ.get("BENCHLING_SUBDOMAIN"):
+        servers["benchling"] = {
+            "type": "http",
+            "url": _BENCHLING_MCP_URL_TMPL.format(subdomain=subdomain),
+        }
+
+    if os.environ.get("PLASMID_ENABLE_PUBMED", "1") != "0":
+        servers["pubmed"] = {
+            "type": "http",
+            "url": _PUBMED_MCP_URL,
+        }
+
+    return servers

@@ -19,11 +19,17 @@ LIBRARY_PATH = Path(__file__).parent.parent / "library"
 logger = logging.getLogger(__name__)
 
 # Optional Addgene integration (gracefully degrades if not available)
+# Try relative import first (when loaded as a package), then fall back to
+# absolute import (when src/ is on sys.path directly, as app.py does).
 try:
     from .addgene_integration import AddgeneClient, AddgeneLibraryIntegration
     ADDGENE_AVAILABLE = True
 except ImportError:
-    ADDGENE_AVAILABLE = False
+    try:
+        from addgene_integration import AddgeneClient, AddgeneLibraryIntegration
+        ADDGENE_AVAILABLE = True
+    except ImportError:
+        ADDGENE_AVAILABLE = False
 
 # Optional NCBI integration
 try:
@@ -42,17 +48,118 @@ except ImportError:
     except ImportError:
         NCBI_AVAILABLE = False
 
+# Optional user library (BYOL — bring your own library)
+try:
+    from .user_library import load_user_backbones, load_user_inserts
+    USER_LIBRARY_AVAILABLE = True
+except ImportError:
+    try:
+        from user_library import load_user_backbones, load_user_inserts
+        USER_LIBRARY_AVAILABLE = True
+    except ImportError:
+        USER_LIBRARY_AVAILABLE = False
 
-def load_backbones() -> dict:
-    """Load backbone library from JSON file."""
+# Optional FPbase integration (fluorescent proteins — engineered, not in NCBI Gene)
+try:
+    from .fpbase_integration import (
+        fetch_fpbase_sequence as _fpbase_fetch,
+        looks_like_fp_name as _looks_like_fp,
+    )
+    FPBASE_AVAILABLE = True
+except ImportError:
+    try:
+        from fpbase_integration import (
+            fetch_fpbase_sequence as _fpbase_fetch,
+            looks_like_fp_name as _looks_like_fp,
+        )
+        FPBASE_AVAILABLE = True
+    except ImportError:
+        FPBASE_AVAILABLE = False
+
+
+# ── Read-only mode (for evals / parallel-safe operation) ───────────────
+# When enabled, library lookups still work (incl. Addgene/NCBI/FPbase fallbacks)
+# but results are NOT written back to library/*.json. Prevents eval side-effects
+# and eliminates the unprotected read-modify-write race under parallelism.
+_LIBRARY_READONLY = False
+
+# ── Test fixture injection ───────────────────────────────────────────────
+# Extra entries registered via register_test_fixtures() are appended to
+# load_backbones() / load_inserts() results at runtime.  Intended for eval
+# and test cases that need sequences not present in the curated library.
+# Call clear_test_fixtures() after the case to avoid cross-contamination.
+_EXTRA_BACKBONES: list[dict] = []
+_EXTRA_INSERTS: list[dict] = []
+
+
+def register_test_fixtures(backbones: list[dict] = (), inserts: list[dict] = ()) -> None:
+    """Append extra backbone/insert entries for the duration of an eval run.
+
+    Entries are added to the in-memory lists checked by load_backbones() and
+    load_inserts(); the on-disk JSON files are never touched.
+    """
+    global _EXTRA_BACKBONES, _EXTRA_INSERTS
+    _EXTRA_BACKBONES = list(backbones)
+    _EXTRA_INSERTS = list(inserts)
+
+
+def clear_test_fixtures() -> None:
+    """Remove all fixture entries registered via register_test_fixtures()."""
+    global _EXTRA_BACKBONES, _EXTRA_INSERTS
+    _EXTRA_BACKBONES = []
+    _EXTRA_INSERTS = []
+
+
+def set_library_readonly(readonly: bool = True) -> None:
+    """Disable writes to library/*.json. Call before running evals."""
+    global _LIBRARY_READONLY
+    _LIBRARY_READONLY = readonly
+
+
+def _load_builtin_backbones() -> dict:
+    """Load built-in backbone library from JSON file (no runtime extensions).
+
+    This is the cache-write-safe loader. The Addgene auto-cache path uses
+    this to re-read fresh from disk before appending, ensuring neither
+    user-library entries nor test fixtures leak into backbones.json.
+    """
     with open(LIBRARY_PATH / "backbones.json", "r") as f:
         return json.load(f)
 
 
-def load_inserts() -> dict:
-    """Load insert library from JSON file."""
+def _load_builtin_inserts() -> dict:
+    """Load built-in insert library from JSON file (no runtime extensions)."""
     with open(LIBRARY_PATH / "inserts.json", "r") as f:
         return json.load(f)
+
+
+def load_backbones() -> dict:
+    """Load backbone library: built-in + test fixtures + user library.
+
+    User entries (from $PLASMID_USER_LIBRARY/backbones/) are appended with
+    `user:` ID prefix. Callers that persist to disk must use
+    _load_builtin_backbones instead to avoid writing runtime-only entries.
+    """
+    data = _load_builtin_backbones()
+    if _EXTRA_BACKBONES:
+        data["backbones"] = data["backbones"] + _EXTRA_BACKBONES
+    if USER_LIBRARY_AVAILABLE:
+        user_entries = load_user_backbones()
+        if user_entries:
+            data["backbones"] = data["backbones"] + user_entries
+    return data
+
+
+def load_inserts() -> dict:
+    """Load insert library: built-in + test fixtures + user library."""
+    data = _load_builtin_inserts()
+    if _EXTRA_INSERTS:
+        data["inserts"] = data["inserts"] + _EXTRA_INSERTS
+    if USER_LIBRARY_AVAILABLE:
+        user_entries = load_user_inserts()
+        if user_entries:
+            data["inserts"] = data["inserts"] + user_entries
+    return data
 
 
 def normalize_name(name: str) -> str:
@@ -82,6 +189,146 @@ _PROMOTER_PROPERTIES = {
     "cbh": "strong constitutive",
     "ltr": "moderate constitutive",
 }
+
+# ── Bespoke promoter detection ───────────────────────────────────────────
+#
+# KNOWN_PROMOTERS: if the user requests one of these, it's a standard part
+# available in the library or easily fetchable. Anything NOT in this set is
+# a "bespoke" promoter → agent should offer: (a) research mode, (b) user
+# pastes sequence, or (c) fetch native upstream region from NCBI genomic.
+KNOWN_PROMOTERS: frozenset[str] = frozenset({
+    # Mammalian constitutive
+    "cmv", "ef1a", "ef1alpha", "ef1", "cag", "cagg", "pgk", "sv40", "ubc",
+    "ubiquitin", "cbh", "cba", "rsv",
+    # Mammalian Pol III (for shRNA/gRNA)
+    "u6", "h1", "7sk",
+    # Tissue-specific (common)
+    "synapsin", "syn", "camkii", "camk2a", "gfap", "mbp", "alb", "albumin",
+    # Bacterial
+    "t7", "sp6", "t3", "lac", "tac", "trc", "arap", "arapbad", "arabad",
+    "tet", "ptet", "rhap", "rhab",
+    # Inducible
+    "tre", "tre3g", "tetO",
+    # Viral/LTR
+    "ltr", "5ltr",
+})
+
+
+def is_known_promoter(name: str) -> bool:
+    """Check if a promoter name is a known/standard promoter.
+
+    Normalizes the name (lowercase, strip non-alphanumeric) before lookup.
+    Returns False for anything not in KNOWN_PROMOTERS — this triggers the
+    "bespoke promoter" workflow in the agent.
+    """
+    normalized = re.sub(r'[^a-z0-9]', '', name.lower())
+    return normalized in KNOWN_PROMOTERS
+
+
+# ── Disambiguation aids ──────────────────────────────────────────────────
+#
+# GENE_FAMILIES: ambiguous query → list of specific family members.
+# When a user asks for "TRAF" or "H2B", the agent should present these
+# options rather than auto-picking one.
+GENE_FAMILIES = {
+    "TRAF": [
+        "TRAF1", "TRAF2", "TRAF3", "TRAF4", "TRAF5", "TRAF6", "TRAF7",
+    ],
+    "H2B": [
+        # Human histone H2B has 20+ variants. Most common in cell biology:
+        "H2BC21",  # HIST1H2BJ — broadly expressed, common fusion choice
+        "H2BC11",  # HIST1H2BK
+        "H2BC12",  # HIST1H2BN
+        "H2BC4",   # HIST1H2BC
+        "H2BC5",   # HIST1H2BD
+        "HIST1H2BJ",  # legacy alias for H2BC21
+    ],
+    "RFP": [
+        "mCherry", "tdTomato", "mScarlet", "mScarlet-I", "DsRed",
+        "DsRed2", "mRFP1", "TagRFP", "mKate2",
+    ],
+    "GFP": [
+        "EGFP", "sfGFP", "mNeonGreen", "mClover3", "GFP",
+    ],
+    "YFP": [
+        "EYFP", "Venus", "Citrine", "mVenus",
+    ],
+    "CFP": [
+        "ECFP", "Cerulean", "mTurquoise2", "mCerulean3",
+    ],
+    # TNF receptor associated factor → same as TRAF
+    "TNF RECEPTOR ASSOCIATED FACTOR": [
+        "TRAF1", "TRAF2", "TRAF3", "TRAF4", "TRAF5", "TRAF6", "TRAF7",
+    ],
+}
+
+# CELL_LINE_SPECIES: common cell line name → species.
+# Used so the agent can infer organism when the user only mentions a cell line.
+CELL_LINE_SPECIES = {
+    # Human
+    "HEK293": "human", "HEK293T": "human", "HEK-293": "human",
+    "293T": "human", "293": "human",
+    "HELA": "human", "HeLa": "human",
+    "A549": "human", "U2OS": "human", "U-2 OS": "human",
+    "HCT116": "human", "MCF7": "human", "MCF-7": "human",
+    "JURKAT": "human", "K562": "human", "THP-1": "human", "THP1": "human",
+    "HUH7": "human", "HUH-7": "human", "SH-SY5Y": "human",
+    # Mouse
+    "RAW264": "mouse", "RAW 264.7": "mouse", "RAW264.7": "mouse",
+    "RAW 264": "mouse",
+    "NIH3T3": "mouse", "NIH 3T3": "mouse", "3T3": "mouse",
+    "MEF": "mouse", "C2C12": "mouse", "4T1": "mouse",
+    "B16": "mouse", "CT26": "mouse", "MC38": "mouse",
+    # Hamster
+    "CHO": "hamster", "CHO-K1": "hamster",
+    # Monkey
+    "COS-7": "monkey", "COS7": "monkey", "VERO": "monkey",
+    # Rat
+    "PC12": "rat", "RAT1": "rat",
+    # Dog
+    "MDCK": "dog",
+    # Insect
+    "SF9": "insect", "SF21": "insect", "HIGH FIVE": "insect", "S2": "fly",
+}
+
+
+def check_gene_family_ambiguity(query: str) -> Optional[dict]:
+    """Check if a query is an ambiguous gene-family name.
+
+    Args:
+        query: Gene name the user provided
+
+    Returns:
+        None if unambiguous, or a dict with:
+        - family: the family name matched
+        - members: list of specific family members to present to the user
+    """
+    q_upper = query.strip().upper()
+    for family, members in GENE_FAMILIES.items():
+        if q_upper == family.upper():
+            return {"family": family, "members": members}
+    return None
+
+
+def infer_species_from_cell_line(cell_line: str) -> Optional[str]:
+    """Infer organism species from a cell line name.
+
+    Args:
+        cell_line: Cell line name (e.g., "HEK293", "RAW 264.7")
+
+    Returns:
+        Species string (e.g., "human", "mouse") or None if unknown
+    """
+    cl_upper = cell_line.strip().upper()
+    # Try direct lookup (case-insensitive)
+    for name, species in CELL_LINE_SPECIES.items():
+        if name.upper() == cl_upper:
+            return species
+    # Try substring (e.g., "RAW 264.7 macrophages" -> "RAW 264.7")
+    for name, species in CELL_LINE_SPECIES.items():
+        if name.upper() in cl_upper:
+            return species
+    return None
 
 
 def _backbone_searchable_text(backbone: dict) -> str:
@@ -217,9 +464,11 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
 
         # Pick the best match: prefer exact normalized name match, else first result
         best = results[0]
+        exact_name_match = False
         for r in results:
             if normalize_name(r.get("name", "")) == id_normalized:
                 best = r
+                exact_name_match = True
                 break
 
         addgene_id = best.get("addgene_id")
@@ -246,10 +495,30 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
 
         backbone = plasmid.to_backbone_dict()
 
-        # Cache to local library for future fast lookups
-        data["backbones"].append(backbone)
-        with open(LIBRARY_PATH / "backbones.json", "w") as f:
-            json.dump(data, f, indent=2)
+        # If we only fuzzy-matched the name, do NOT silently cache.
+        # Tag as unconfirmed so the agent can present it to the user first.
+        # The agent should call import_addgene_to_library with the confirmed
+        # addgene_id to commit it.
+        if not exact_name_match:
+            backbone["unconfirmed"] = True
+            backbone["addgene_search_alternatives"] = [
+                {"name": r.get("name"), "addgene_id": r.get("addgene_id")}
+                for r in results[:5]
+            ]
+            logger.info(
+                f"Addgene fuzzy match for '{backbone_id}' → #{addgene_id} "
+                f"({backbone.get('name', '?')}). Returning unconfirmed; not caching."
+            )
+            return backbone
+
+        # Exact-name match: cache to local library for future fast lookups.
+        # Re-read built-in from disk — `data` above came from load_backbones()
+        # which may include user-library entries or test fixtures we must not persist.
+        if not _LIBRARY_READONLY:
+            builtin = _load_builtin_backbones()
+            builtin["backbones"].append(backbone)
+            with open(LIBRARY_PATH / "backbones.json", "w") as f:
+                json.dump(builtin, f, indent=2)
 
         logger.info(
             f"Cached Addgene #{addgene_id} as '{backbone['id']}' "
@@ -264,19 +533,22 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
         return None
 
 
-def get_insert_by_id(insert_id: str) -> Optional[dict]:
+def get_insert_by_id(insert_id: str, organism: Optional[str] = None) -> Optional[dict]:
     """
     Get a specific insert by ID or alias.
 
-    Checks the local library first. If not found and NCBI integration is
-    available, attempts to fetch the gene CDS from NCBI and caches the
-    result in inserts.json for future fast lookups.
+    Fallback chain: Local library → FPbase (for FP-like names) → NCBI Gene.
+
+    When the query is ambiguous (multiple species, gene family), returns a
+    dict with "needs_disambiguation": True and "options" list — the caller
+    should present these to the user rather than proceeding.
 
     Args:
-        insert_id: Insert identifier or alias
+        insert_id: Insert identifier, alias, FP name, or gene symbol
+        organism: Optional organism for NCBI fallback (e.g., "human", "mouse")
 
     Returns:
-        Insert dictionary or None if not found
+        Insert dictionary, disambiguation dict, or None if not found
     """
     data = load_inserts()
     id_normalized = normalize_name(insert_id)
@@ -292,26 +564,119 @@ def get_insert_by_id(insert_id: str) -> Optional[dict]:
     if alias_match is not None:
         return alias_match
 
-    # ── NCBI fallback ──
-    if not NCBI_AVAILABLE:
-        return None
+    # ── Gene family ambiguity check ──
+    # Catch ambiguous family names (TRAF, H2B, RFP, ...) BEFORE hitting
+    # remote databases. NCBI would return something for "H2B" but it'd be
+    # an arbitrary variant — the user needs to choose.
+    family_check = check_gene_family_ambiguity(insert_id)
+    if family_check:
+        logger.info(
+            f"'{insert_id}' is an ambiguous gene family; "
+            f"{len(family_check['members'])} members"
+        )
+        return {
+            "needs_disambiguation": True,
+            "reason": "gene_family",
+            "query": insert_id,
+            "family": family_check["family"],
+            "members": family_check["members"],
+        }
 
-    # Skip NCBI fallback if the query doesn't look like a gene name
+    # Skip remote fallback if the query doesn't look like a gene/FP name
     # (e.g., "pcDNA3.1(+)" contains parens/dots → backbone, not a gene)
     if not re.match(r'^[A-Za-z0-9_\-]+$', insert_id.strip()):
         return None
 
+    alias_candidate = insert_id.strip()
+
+    # ── FPbase fallback (for engineered fluorescent proteins) ──
+    # Try FPbase FIRST when the name looks like an FP (mRuby, mScarlet, etc.)
+    # These are engineered proteins — NCBI Gene won't have them as genes,
+    # and a broader NCBI search can return wildly wrong results.
+    if FPBASE_AVAILABLE and _looks_like_fp(insert_id):
+        try:
+            logger.info(f"Insert '{insert_id}' looks like an FP; trying FPbase...")
+            fp_result = _fpbase_fetch(insert_id)
+            if fp_result:
+                if fp_result.get("no_dna"):
+                    # FPbase found the protein but only has the amino-acid
+                    # sequence, not DNA. We do NOT reverse-translate (that
+                    # would synthesize sequence — against project invariant).
+                    # Return a signal so the agent can tell the user what
+                    # we found and ask for the DNA sequence.
+                    #
+                    # Importantly: return here rather than falling through to
+                    # NCBI. An FP found on FPbase is confirmed engineered —
+                    # NCBI Gene WILL return a wrong result if we try it.
+                    logger.info(
+                        f"FPbase confirmed '{fp_result['name']}' but no DNA; "
+                        f"signaling agent to ask user for sequence"
+                    )
+                    return {
+                        "needs_disambiguation": True,
+                        "reason": "fpbase_no_dna",
+                        "query": insert_id,
+                        "fpbase_name": fp_result["name"],
+                        "fpbase_url": fp_result.get("url"),
+                        "aa_sequence": fp_result.get("aa_sequence"),
+                        "aa_length": fp_result.get("aa_length"),
+                        "ex_max": fp_result.get("ex_max"),
+                        "em_max": fp_result.get("em_max"),
+                    }
+
+                # FPbase has DNA — build insert dict and cache
+                insert = {
+                    "id": fp_result["name"],
+                    "name": fp_result["name"],
+                    "aliases": [alias_candidate] if alias_candidate != fp_result["name"] else [],
+                    "description": (
+                        f"Fluorescent protein from FPbase. "
+                        f"Ex/Em: {fp_result.get('ex_max','?')}/{fp_result.get('em_max','?')} nm. "
+                        f"{fp_result.get('url','')}"
+                    ),
+                    "category": "fluorescent_protein",
+                    "size_bp": fp_result["length"],
+                    "sequence": fp_result["sequence"],
+                    "source": "FPbase",
+                    "fpbase_slug": fp_result.get("slug"),
+                }
+                # Cache to local library (FPbase DNA is canonical)
+                existing_ids = {i["id"] for i in data["inserts"]}
+                if insert["id"] not in existing_ids and not _LIBRARY_READONLY:
+                    data["inserts"].append(insert)
+                    with open(LIBRARY_PATH / "inserts.json", "w") as f:
+                        json.dump(data, f, indent=2)
+                logger.info(
+                    f"Cached FPbase protein '{fp_result['name']}' ({fp_result['length']} bp)"
+                )
+                return insert
+        except Exception as e:
+            logger.warning(f"FPbase fallback failed for '{insert_id}': {e}")
+            # fall through to NCBI
+
+    # ── NCBI Gene fallback ──
+    if not NCBI_AVAILABLE:
+        return None
+
     try:
-        logger.info(f"Insert '{insert_id}' not in local library, searching NCBI...")
-        result = _ncbi_fetch_gene(gene_symbol=insert_id)
-        if not result or not result.get("sequence"):
+        logger.info(f"Insert '{insert_id}' not in library/FPbase, searching NCBI Gene...")
+        result = _ncbi_fetch_gene(gene_symbol=insert_id, organism=organism)
+        if not result:
+            logger.info(f"No NCBI result for '{insert_id}'")
+            return None
+
+        # Check for ambiguity signal from fetch_gene_sequence
+        if result.get("needs_disambiguation"):
+            logger.info(
+                f"NCBI search for '{insert_id}' returned multiple species; "
+                f"disambiguation required"
+            )
+            return result  # pass disambiguation dict up to caller
+
+        if not result.get("sequence"):
             logger.info(f"No NCBI CDS found for '{insert_id}'")
             return None
 
-        # Build insert dict — only store the original query as an alias if
-        # it looks like a plausible gene name (letters/digits/hyphens only,
-        # no parentheses or dots that indicate backbone IDs like "pcDNA3.1(+)")
-        alias_candidate = insert_id.strip()
         store_alias = (
             alias_candidate != result["symbol"]
             and re.match(r'^[A-Za-z0-9_\-]+$', alias_candidate)
@@ -329,12 +694,16 @@ def get_insert_by_id(insert_id: str) -> Optional[dict]:
             "source": "NCBI",
         }
 
-        # Cache to local library (skip if gene already cached)
-        existing_ids = {i["id"] for i in data["inserts"]}
-        if insert["id"] not in existing_ids:
-            data["inserts"].append(insert)
-            with open(LIBRARY_PATH / "inserts.json", "w") as f:
-                json.dump(data, f, indent=2)
+        # Cache to local library (skip if gene already cached).
+        # Re-read built-in from disk — `data` above came from load_inserts()
+        # which may include user-library entries or test fixtures we must not persist.
+        if not _LIBRARY_READONLY:
+            builtin = _load_builtin_inserts()
+            existing_ids = {i["id"] for i in builtin["inserts"]}
+            if insert["id"] not in existing_ids:
+                builtin["inserts"].append(insert)
+                with open(LIBRARY_PATH / "inserts.json", "w") as f:
+                    json.dump(builtin, f, indent=2)
 
         logger.info(
             f"Cached NCBI gene '{result['symbol']}' "
@@ -562,16 +931,25 @@ def search_all_sources(
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(fn): name for name, fn in tasks.items()}
 
-        for future in as_completed(futures, timeout=timeout):
-            name = futures[future]
-            results["sources_searched"].append(name)
-            try:
-                data = future.result()
-                if data is not None:
-                    results[name] = data
-            except Exception as e:
-                results["errors"][name] = str(e)
-                logger.warning(f"Concurrent search error ({name}): {e}")
+        try:
+            for future in as_completed(futures, timeout=timeout):
+                name = futures[future]
+                results["sources_searched"].append(name)
+                try:
+                    data = future.result()
+                    if data is not None:
+                        results[name] = data
+                except Exception as e:
+                    results["errors"][name] = str(e)
+                    logger.warning(f"Concurrent search error ({name}): {e}")
+        except TimeoutError:
+            # as_completed(timeout=...) raises if any future is still pending.
+            # Record which sources didn't finish; return partial results.
+            for future, name in futures.items():
+                if not future.done():
+                    future.cancel()
+                    results["errors"][name] = f"timed out after {timeout}s"
+                    logger.warning(f"Concurrent search ({name}) timed out after {timeout}s")
 
 
 def extract_insert_from_plasmid(

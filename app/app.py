@@ -11,6 +11,8 @@ Usage:
     # Open http://localhost:8000 in your browser
 """
 
+import csv
+import io
 import json
 import os
 import sys
@@ -39,6 +41,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
+    assemble_golden_gate as _assemble_golden_gate,
+    GG_ENZYMES,
     reverse_complement,
     find_mcs_insertion_point,
     resolve_insertion_point,
@@ -533,6 +537,45 @@ TOOLS = [
                 "organism": {"type": "string", "description": "Organism for symbol→ID resolution (e.g., 'human')"},
                 "bp_upstream": {"type": "integer", "description": "How many bp upstream to fetch (100-10000, default 2000)", "default": 2000},
             },
+        },
+    },
+    {
+        "name": "assemble_golden_gate",
+        "description": (
+            "Perform in-silico Golden Gate assembly. "
+            "Digests the backbone vector at its Type IIS restriction enzyme sites "
+            "to open the cloning window (discarding the dropout cassette). "
+            "Each part is excised from its carrier vector using the same enzyme. "
+            "Parts are ligated in the order dictated by complementary 4-nt overhangs. "
+            "Use this for Allen Institute modular expression system parts or any "
+            "standard Golden Gate workflow. "
+            "Parts must have category='part_in_vector' and a 'plasmid_sequence' field."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "backbone_id": {
+                    "type": "string",
+                    "description": "Library ID of the backbone vector (must contain Type IIS sites).",
+                },
+                "part_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Library IDs of the parts to assemble, in approximate order. "
+                        "Exact order is inferred from overhang matching."
+                    ),
+                },
+                "enzyme_name": {
+                    "type": "string",
+                    "enum": list(GG_ENZYMES.keys()),
+                    "description": (
+                        "Type IIS restriction enzyme used for the assembly "
+                        "(Esp3I, BsmBI, BsaI, or BbsI). Defaults to Esp3I."
+                    ),
+                },
+            },
+            "required": ["backbone_id", "part_ids"],
         },
     },
     {
@@ -1398,6 +1441,67 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             )
             return out
 
+        elif name == "assemble_golden_gate":
+            backbone_id = args["backbone_id"]
+            part_ids = args["part_ids"]
+            enzyme_name = args.get("enzyme_name", "Esp3I")
+
+            backbone = get_backbone_by_id(backbone_id)
+            if not backbone:
+                return f"Backbone {backbone_id!r} not found in library."
+            bb_seq = backbone.get("plasmid_sequence") or backbone.get("sequence", "")
+            if not bb_seq:
+                return f"Backbone {backbone_id!r} has no plasmid_sequence."
+
+            parts = []
+            for pid in part_ids:
+                part = get_insert_by_id(pid)
+                if not part:
+                    return f"Part {pid!r} not found in library."
+                ps = part.get("plasmid_sequence") or part.get("sequence", "")
+                if not ps:
+                    return (
+                        f"Part {pid!r} has no plasmid_sequence. "
+                        "Golden Gate requires the full carrier vector sequence."
+                    )
+                parts.append({
+                    "name": part.get("name", pid),
+                    "plasmid_sequence": ps,
+                    "overhang_l": part.get("overhang_l"),
+                    "overhang_r": part.get("overhang_r"),
+                })
+
+            result = _assemble_golden_gate(
+                backbone_plasmid_seq=bb_seq,
+                parts=parts,
+                enzyme_name=enzyme_name,
+            )
+
+            if not result.success:
+                return "Golden Gate assembly failed:\n" + "\n".join(
+                    f"  • {e}" for e in result.errors
+                )
+
+            warnings_block = ""
+            if result.warnings:
+                warnings_block = "\n\nWarnings:\n" + "\n".join(
+                    f"  ⚠ {w}" for w in result.warnings
+                )
+
+            junctions = " → ".join(result.junction_overhangs)
+            order_str = " → ".join(result.assembly_order) if result.assembly_order else "(backbone only)"
+
+            return (
+                f"Golden Gate assembly successful ({enzyme_name}).\n\n"
+                f"Assembly order : {order_str}\n"
+                f"Junctions (4-nt): {junctions}\n"
+                f"Total size     : {result.total_size_bp} bp\n\n"
+                # NOTE: full sequence must be returned here so the agent can pass it
+                # directly to validate_construct and export_construct. Do NOT truncate.
+                f"Assembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
+                + warnings_block
+            )
+
         elif name == "log_experimental_outcome":
             # This tool needs session context to store the outcome. The
             # execute_tool dispatcher doesn't have session access, so we
@@ -1428,6 +1532,9 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
 _sessions: dict[str, dict] = {}
 _cancelled_sessions: set[str] = set()
 _sessions_lock = threading.Lock()
+
+# ── Batch job state ─────────────────────────────────────────────────────
+_batch_jobs: dict[str, dict] = {}
 SESSIONS_FILE = Path(__file__).parent / ".sessions.json"
 
 MODEL = "claude-opus-4-6"
@@ -2049,7 +2156,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .sidebar-reopen-btn.visible { display: flex; }
 
   /* ── Chat Panel ── */
-  .chat-panel { flex: 1; display: flex; flex-direction: column; background: white; min-width: 0; }
+  .chat-panel { flex: 1; display: flex; flex-direction: column; background: white; min-width: 0; position: relative; }
   .messages {
     flex: 1; overflow-y: auto; padding: 24px;
     scrollbar-width: thin; scrollbar-color: transparent transparent;
@@ -2103,6 +2210,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
     color: var(--sand-800); max-width: 80%;
     font-size: 14px; line-height: 1.6;
   }
+  /* Batch cards fill the full message column width */
+  .msg.assistant:has(.batch-card) { width: 100%; }
+  .msg.assistant:has(.batch-card) > .batch-card { max-width: none; }
 
   /* ── Streaming cursor ── */
   .streaming-cursor::after {
@@ -2240,6 +2350,83 @@ HTML_PAGE = r"""<!DOCTYPE html>
     color: var(--brand-orange); border-radius: 8px; padding: 12px 16px;
     font-size: 13px; margin-bottom: 24px;
   }
+
+  /* ── Drop overlay (shown when a CSV is dragged over the chat area) ── */
+  .drop-overlay {
+    display: none; position: absolute; inset: 0; z-index: 50;
+    background: rgba(217,119,87,0.06); border: 3px dashed var(--brand-fig);
+    border-radius: 0; align-items: center; justify-content: flex-end;
+    flex-direction: column; gap: 10px; pointer-events: none; padding-bottom: 144px;
+  }
+  .drop-overlay.active { display: flex; }
+  .drop-overlay-label { font-size: 16px; font-weight: 600; color: var(--brand-fig); }
+  .drop-overlay-sub { font-size: 13px; color: var(--brand-fig-hover); }
+
+  /* ── Batch cards (rendered inline in the chat) ── */
+  .batch-card {
+    border: 1px solid var(--sand-200); border-radius: 10px;
+    overflow: hidden; background: white; width: 100%;
+  }
+  .batch-plot-wrapper { overflow: visible; }
+  .batch-row-header {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 12px 16px; cursor: pointer; user-select: none;
+    transition: background 0.12s;
+  }
+  .batch-row-header:hover { background: var(--sand-50); }
+  .batch-row-status { flex-shrink: 0; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; margin-top: 1px; }
+  .batch-row-body { flex: 1; min-width: 0; }
+  .batch-row-desc { font-size: 13px; color: var(--sand-700); font-weight: 500; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .batch-row-meta { font-size: 12px; color: var(--sand-400); }
+  .batch-row-downloads { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  .batch-row-chevron { flex-shrink: 0; color: var(--sand-300); margin-top: 3px; transition: transform 0.2s; }
+  .batch-row-chevron.open { transform: rotate(90deg); }
+  .batch-row-log {
+    display: none; border-top: 1px solid var(--sand-100);
+    padding: 12px 16px; background: var(--sand-50);
+  }
+  .batch-row-log.open { display: block; }
+  .batch-log-entry { margin-bottom: 8px; font-size: 12px; }
+  .batch-log-tool {
+    border: 1px solid var(--sand-200); border-radius: 6px; overflow: hidden;
+  }
+  .batch-log-tool-header {
+    padding: 4px 8px; background: var(--sand-100);
+    font-weight: 600; color: var(--sand-700);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .batch-log-tool-result {
+    padding: 6px 8px; color: var(--sand-600);
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 140px; overflow-y: auto; line-height: 1.5;
+  }
+  .batch-log-text { color: var(--sand-600); line-height: 1.5; padding: 2px 0; }
+  .batch-log-user {
+    background: var(--sand-100); border-radius: 8px; padding: 6px 10px;
+    color: var(--sand-700); line-height: 1.5;
+  }
+  .batch-log-error { color: var(--brand-orange); line-height: 1.5; }
+  /* Follow-up input inside expanded batch card */
+  .batch-followup {
+    display: flex; gap: 8px; padding: 10px 14px;
+    border-top: 1px solid var(--sand-200); align-items: flex-end;
+  }
+  .batch-followup-input {
+    flex: 1; resize: none; border: 1px solid var(--sand-200); border-radius: 8px;
+    padding: 7px 10px; font-size: 13px; font-family: inherit; outline: none;
+    line-height: 1.4; min-height: 34px; max-height: 100px; overflow-y: auto;
+    background: white;
+  }
+  .batch-followup-input:focus { border-color: var(--brand-fig); }
+  .batch-followup-send {
+    width: 32px; height: 32px; flex-shrink: 0; border-radius: 8px;
+    background: var(--brand-fig); border: none; cursor: pointer; color: white;
+    display: flex; align-items: center; justify-content: center; transition: background 0.15s;
+  }
+  .batch-followup-send:hover { background: var(--brand-fig-hover); }
+  .batch-followup-send:disabled { opacity: 0.35; cursor: not-allowed; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin { animation: spin 1s linear infinite; transform-origin: center; }
 </style>
 </head>
 <body>
@@ -2254,7 +2441,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
     <div class="header-title">
       <h1>Plasmid Designer</h1>
-      <p>Allen Institute for Neural Dynamics</p>
+      <p>Allen Institute - OCTO AI</p>
     </div>
   </div>
   <div>
@@ -2295,7 +2482,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </button>
 
   <!-- Chat panel -->
-  <div class="chat-panel">
+  <div class="chat-panel" id="chat-panel">
+    <!-- Drop overlay: shown when a CSV is dragged over the chat area -->
+    <div class="drop-overlay" id="drop-overlay">
+      <svg width="36" height="36" fill="none" stroke="var(--brand-fig)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+        <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+      </svg>
+      <div class="drop-overlay-label">Drop CSV to batch design</div>
+      <div class="drop-overlay-sub">Required column: description &nbsp;·&nbsp; Optional: name, output_format</div>
+    </div>
     <div class="messages" id="messages">
       <div class="welcome" id="welcome">
         <div>
@@ -2307,6 +2502,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <h2>Design an expression plasmid</h2>
           <p>Describe what you want to build. Claude will retrieve verified sequences,<br>
           assemble your construct, validate it, and export the result.</p>
+          <p style="font-size:12px;color:var(--sand-300);margin-top:4px;">
+            Drag &amp; drop a CSV file here to batch design multiple plasmids at once.
+          </p>
           <div class="examples">
             <button onclick="sendExample(this)">Design an EGFP expression plasmid using pcDNA3.1(+)</button>
             <button onclick="sendExample(this)">Put mCherry into a mammalian expression vector</button>
@@ -2319,7 +2517,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     <div class="input-area">
       <div class="input-wrapper">
-        <textarea id="input" placeholder="Describe the plasmid you want to design..." rows="1"
+        <textarea id="input" placeholder="Describe the plasmid you want to design…" rows="1"
           oninput="autoResize(this)"></textarea>
         <div class="input-meta">
           <select id="model-select" class="model-select">
@@ -2343,6 +2541,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       </div>
     </div>
   </div>
+
+  <input type="file" id="batch-csv-input" accept=".csv" style="display:none" onchange="onBatchFileChosen(this)">
 </div>
 
 <script>
@@ -2577,6 +2777,7 @@ function showWelcome() {
     '<h2>Design an expression plasmid</h2>' +
     '<p>Describe what you want to build. Claude will retrieve verified sequences,<br>' +
     'assemble your construct, validate it, and export the result.</p>' +
+    '<p style="font-size:12px;color:var(--sand-300);margin-top:4px;">Drag &amp; drop a CSV file here to batch design multiple plasmids at once.</p>' +
     '<div class="examples">' +
       '<button onclick="sendExample(this)">Design an EGFP expression plasmid using pcDNA3.1(+)</button>' +
       '<button onclick="sendExample(this)">Put mCherry into a mammalian expression vector</button>' +
@@ -2986,10 +3187,577 @@ if (currentSessionId) {
   selectSession(currentSessionId);
 }
 inputEl.focus();
+
+// ── Batch ──
+let batchJobId = null;
+let batchPollTimer = null;
+const chatPanelEl = document.getElementById('chat-panel');
+const dropOverlayEl = document.getElementById('drop-overlay');
+
+// ── Drag & drop CSV onto the chat area ──
+var dragCounter = 0;
+
+function isCsvDrag(e) {
+  var types = e.dataTransfer && e.dataTransfer.types;
+  return types && (Array.from(types).indexOf('Files') !== -1);
+}
+
+chatPanelEl.addEventListener('dragenter', function(e) {
+  if (!isCsvDrag(e)) return;
+  e.preventDefault();
+  dragCounter++;
+  dropOverlayEl.classList.add('active');
+});
+
+chatPanelEl.addEventListener('dragleave', function(e) {
+  if (!isCsvDrag(e)) return;
+  dragCounter--;
+  if (dragCounter <= 0) { dragCounter = 0; dropOverlayEl.classList.remove('active'); }
+});
+
+chatPanelEl.addEventListener('dragover', function(e) {
+  if (!isCsvDrag(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+
+chatPanelEl.addEventListener('drop', function(e) {
+  e.preventDefault();
+  dragCounter = 0;
+  dropOverlayEl.classList.remove('active');
+  var file = e.dataTransfer.files[0];
+  if (!file) return;
+  if (!file.name.endsWith('.csv') && file.type !== 'text/csv') {
+    alert('Please drop a .csv file.');
+    return;
+  }
+  var reader = new FileReader();
+  reader.onload = function(ev) { uploadBatchCSV(ev.target.result, file.name); };
+  reader.readAsText(file);
+});
+
+function onBatchFileChosen(input) {
+  var file = input.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(e) { uploadBatchCSV(e.target.result, file.name); };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+function uploadBatchCSV(csvText, filename) {
+  var model = modelSelect.value;
+  fetch('/api/batch', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({csv_content: csvText, model: model}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) { alert('Error: ' + data.error); return; }
+    batchJobId = data.job_id;
+    initBatchCards(data.job_id, data.row_count, filename);
+    if (batchPollTimer) clearInterval(batchPollTimer);
+    batchPollTimer = setInterval(pollBatchStatus, 2000);
+    pollBatchStatus();
+  })
+  .catch(function(e) { alert('Upload failed: ' + e); });
+}
+
+function initBatchCards(jobId, count, filename) {
+  hideWelcome();
+  var inner = getInner();
+  // Label
+  var label = document.createElement('div');
+  label.className = 'msg assistant';
+  label.id = 'batch-label-' + jobId;
+  label.innerHTML = '<div class="msg-bubble-assistant" style="color:var(--sand-500);font-size:13px;">' +
+    'Batch designing <strong>' + count + ' plasmid' + (count === 1 ? '' : 's') + '</strong> from <em>' + escapeHtml(filename) + '</em>. ' +
+    'Click any row to expand and see what\u2019s happening, or send a follow-up once it finishes.' +
+    '</div>';
+  inner.appendChild(label);
+  // Placeholder cards
+  for (var i = 0; i < count; i++) {
+    var card = document.createElement('div');
+    card.className = 'msg assistant';
+    card.id = 'batch-card-' + jobId + '-' + i;
+    card.innerHTML = buildBatchCardHtml(jobId, i, {
+      status: 'pending', description: '\u2026', exports: [], error: null, log: []
+    }, false);
+    inner.appendChild(card);
+  }
+  scrollToBottom();
+}
+
+function pollBatchStatus() {
+  if (!batchJobId) return;
+  fetch('/api/batch/' + batchJobId)
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) return;
+    updateBatchCards(batchJobId, data.rows);
+    var anyRunning = data.rows && data.rows.some(function(r) { return r.status === 'running' || r.status === 'pending'; });
+    if (data.status === 'done' && !anyRunning) {
+      clearInterval(batchPollTimer);
+      batchPollTimer = null;
+      // Add Download All button to label message
+      var labelEl = document.getElementById('batch-label-' + batchJobId);
+      if (labelEl && !labelEl.querySelector('.batch-dl-all-btn')) {
+        var bubble = labelEl.querySelector('.msg-bubble-assistant');
+        if (bubble) {
+          var btn = document.createElement('button');
+          btn.className = 'download-btn batch-dl-all-btn';
+          btn.style.cssText = 'margin-top:8px;display:inline-flex;';
+          btn.innerHTML = '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download All (.zip)';
+          btn.onclick = function() { downloadAllBatch(batchJobId); };
+          bubble.appendChild(document.createElement('br'));
+          bubble.appendChild(btn);
+        }
+      }
+    }
+  })
+  .catch(function() {});
+}
+
+var STATUS_ICONS = {
+  pending: '<svg width="18" height="18" fill="none" stroke="var(--sand-300)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>',
+  running: '<svg width="18" height="18" fill="none" stroke="var(--brand-fig)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" class="spin"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>',
+  done: '<svg width="18" height="18" fill="none" stroke="var(--brand-aqua)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
+  no_export: '<svg width="18" height="18" fill="none" stroke="var(--sand-400)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>',
+  error: '<svg width="18" height="18" fill="none" stroke="var(--brand-orange)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>',
+};
+var STATUS_LABELS = {pending: 'Pending', running: 'Running\u2026', done: 'Done', no_export: 'No export produced', error: 'Error'};
+var CHEV_SVG = '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>';
+
+function renderBatchLog(log) {
+  if (!log || !log.length) return '<div style="font-size:12px;color:var(--sand-400);padding:4px 0;">No activity yet.</div>';
+  return log.map(function(entry) {
+    if (entry.type === 'tool') {
+      return '<div class="batch-log-entry batch-log-tool">' +
+        '<div class="batch-log-tool-header">' +
+          '<svg width="11" height="11" fill="none" stroke="var(--brand-fig)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3-3a1 1 0 000-1.4l-1.6-1.6a1 1 0 00-1.4 0l-3 3z"/><path d="M20.26 2.26L9 13.5l-5 1 1-5L16.5 3.74"/></svg>' +
+          escapeHtml(entry.name) +
+        '</div>' +
+        '<div class="batch-log-tool-result">' + escapeHtml(entry.result || '') + '</div>' +
+      '</div>';
+    } else if (entry.type === 'text') {
+      return '<div class="batch-log-entry batch-log-text">' + renderContent(entry.content || '') + '</div>';
+    } else if (entry.type === 'user') {
+      return '<div class="batch-log-entry batch-log-user">' + escapeHtml(entry.content || '') + '</div>';
+    } else if (entry.type === 'error') {
+      return '<div class="batch-log-entry batch-log-error">\u26a0 ' + escapeHtml(entry.content || '') + '</div>';
+    }
+    return '';
+  }).join('');
+}
+
+function buildDownloadsHtml(jobId, idx, exports) {
+  if (!exports || !exports.length) return '';
+  var html = '<div class="batch-row-downloads">';
+  exports.forEach(function(exp, eidx) {
+    html += '<button class="download-btn" onclick="event.stopPropagation();downloadBatchFile(\'' + jobId + '\',' + idx + ',' + eidx + ',\'' + escapeHtml(exp.filename) + '\')">' +
+      '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
+      escapeHtml(exp.filename) + '</button>';
+    if (exp.has_plot) {
+      html += '<button class="download-btn" style="border-color:var(--brand-fig-30);color:var(--brand-fig);background:var(--brand-fig-10);" ' +
+        'onclick="event.stopPropagation();openBatchPlot(\'' + jobId + '\',' + idx + ',' + eidx + ')">' +
+        '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>' +
+        'View Map</button>';
+    }
+  });
+  return html + '</div>';
+}
+
+function buildFollowupHtml(jobId, idx, status) {
+  if (status === 'running' || status === 'pending') return '';
+  var fid = 'batch-finput-' + jobId + '-' + idx;
+  return '<div class="batch-followup">' +
+    '<textarea class="batch-followup-input" id="' + fid + '" rows="1" ' +
+      'placeholder="Follow up with the agent about this design\u2026" ' +
+      'onkeydown="batchFollowupKey(event,\'' + jobId + '\',' + idx + ')" ' +
+      'oninput="this.style.height=\'auto\';this.style.height=Math.min(this.scrollHeight,100)+\'px\'"></textarea>' +
+    '<button class="batch-followup-send" onclick="sendBatchFollowup(\'' + jobId + '\',' + idx + ')" title="Send">' +
+      '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>' +
+    '</button>' +
+  '</div>';
+}
+
+function buildBatchCardHtml(jobId, idx, row, isOpen) {
+  var icon = STATUS_ICONS[row.status] || STATUS_ICONS.pending;
+  var label = STATUS_LABELS[row.status] || row.status;
+  var desc = escapeHtml((row.description || '').slice(0, 120) + ((row.description || '').length > 120 ? '\u2026' : ''));
+  var downloads = buildDownloadsHtml(jobId, idx, row.exports);
+  var logId = 'batch-log-' + jobId + '-' + idx;
+  var chevId = 'batch-chev-' + jobId + '-' + idx;
+  return '<div class="batch-card">' +
+    '<div class="batch-row-header" onclick="toggleBatchCard(\'' + jobId + '\',' + idx + ')">' +
+      '<div class="batch-row-status">' + icon + '</div>' +
+      '<div class="batch-row-body">' +
+        '<div class="batch-row-desc">' + desc + '</div>' +
+        '<div class="batch-row-meta">' + (idx + 1) + ' \xb7 ' + label + '</div>' +
+        downloads +
+      '</div>' +
+      '<span id="' + chevId + '" class="batch-row-chevron' + (isOpen ? ' open' : '') + '">' + CHEV_SVG + '</span>' +
+    '</div>' +
+    '<div id="' + logId + '" class="batch-row-log' + (isOpen ? ' open' : '') + '">' +
+      renderBatchLog(row.log) +
+      buildFollowupHtml(jobId, idx, row.status) +
+    '</div>' +
+  '</div>';
+}
+
+function updateBatchCards(jobId, rows) {
+  rows.forEach(function(row, idx) {
+    var cardEl = document.getElementById('batch-card-' + jobId + '-' + idx);
+    if (!cardEl) return;
+    // Preserve expanded state
+    var logEl = document.getElementById('batch-log-' + jobId + '-' + idx);
+    var isOpen = logEl ? logEl.classList.contains('open') : false;
+    cardEl.innerHTML = buildBatchCardHtml(jobId, idx, row, isOpen);
+  });
+}
+
+function toggleBatchCard(jobId, idx) {
+  var log = document.getElementById('batch-log-' + jobId + '-' + idx);
+  var chev = document.getElementById('batch-chev-' + jobId + '-' + idx);
+  if (!log) return;
+  var open = log.classList.toggle('open');
+  if (chev) chev.classList.toggle('open', open);
+}
+
+function batchFollowupKey(e, jobId, rowIdx) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendBatchFollowup(jobId, rowIdx); }
+}
+
+function sendBatchFollowup(jobId, rowIdx) {
+  var inputEl = document.getElementById('batch-finput-' + jobId + '-' + rowIdx);
+  if (!inputEl) return;
+  var message = inputEl.value.trim();
+  if (!message) return;
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+  // Optimistically show the user message in the log
+  var logEl = document.getElementById('batch-log-' + jobId + '-' + rowIdx);
+  if (logEl) {
+    var followup = logEl.querySelector('.batch-followup');
+    var userDiv = document.createElement('div');
+    userDiv.className = 'batch-log-entry batch-log-user';
+    userDiv.textContent = message;
+    if (followup) logEl.insertBefore(userDiv, followup);
+    else logEl.appendChild(userDiv);
+    // Disable input while running
+    if (followup) {
+      var btn = followup.querySelector('.batch-followup-send');
+      if (inputEl) inputEl.disabled = true;
+      if (btn) btn.disabled = true;
+    }
+  }
+  fetch('/api/batch/' + jobId + '/rows/' + rowIdx + '/continue', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: message}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) { alert('Error: ' + data.error); return; }
+    if (!batchPollTimer) batchPollTimer = setInterval(pollBatchStatus, 2000);
+  })
+  .catch(function(e) { alert('Failed to send: ' + e); });
+}
+
+function openBatchPlot(jobId, rowIdx, expIdx) {
+  // Expand the card if collapsed
+  var log = document.getElementById('batch-log-' + jobId + '-' + rowIdx);
+  var chev = document.getElementById('batch-chev-' + jobId + '-' + rowIdx);
+  if (log && !log.classList.contains('open')) {
+    log.classList.add('open');
+    if (chev) chev.classList.add('open');
+  }
+  // Don't render twice
+  var plotWrapperId = 'bplotwrap-' + jobId + '-' + rowIdx + '-' + expIdx;
+  if (document.getElementById(plotWrapperId)) return;
+  var plotId = 'bplot-' + jobId + '-' + rowIdx + '-' + expIdx;
+  // Insert plot container before the follow-up input
+  var wrapper = document.createElement('div');
+  wrapper.id = plotWrapperId;
+  wrapper.className = 'batch-plot-wrapper';
+  wrapper.style.cssText = 'padding:12px 16px;border-top:1px solid var(--sand-100);max-width:640px;';
+  wrapper.innerHTML =
+    '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px;">Plasmid Map</div>' +
+    '<div id="' + plotId + '" style="width:600px;height:600px;">Loading\u2026</div>';
+  if (log) {
+    var followup = log.querySelector('.batch-followup');
+    if (followup) log.insertBefore(wrapper, followup);
+    else log.appendChild(wrapper);
+  }
+  // Fetch the plot JSON then wait one animation frame so the browser has
+  // laid out the container before Bokeh reads its dimensions.
+  fetch('/api/batch/' + jobId + '/rows/' + rowIdx + '/plot/' + expIdx)
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    var el = document.getElementById(plotId);
+    if (!el) return;
+    if (data.error) { el.textContent = 'No map available.'; el.style.minHeight = ''; return; }
+    el.innerHTML = '';
+    // Double rAF ensures the element is fully painted before Bokeh measures it
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        Bokeh.embed.embed_item(data, plotId);
+      });
+    });
+  })
+  .catch(function() {
+    var el = document.getElementById(plotId);
+    if (el) { el.textContent = 'Failed to load map.'; el.style.minHeight = ''; }
+  });
+}
+
+function downloadAllBatch(jobId) {
+  var a = document.createElement('a');
+  a.href = '/api/batch/' + jobId + '/download-all';
+  a.download = 'batch_designs.zip';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+function downloadBatchFile(jobId, rowIdx, expIdx, filename) {
+  fetch('/api/batch/' + jobId + '/download/' + rowIdx + '/' + expIdx)
+  .then(function(r) { return r.blob(); })
+  .then(function(blob) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  })
+  .catch(function(e) { alert('Download failed: ' + e); });
+}
 </script>
 </body>
 </html>
 """
+
+
+# ── Batch job runner ────────────────────────────────────────────────────
+
+def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str) -> None:
+    """Worker for a single CSV row — runs the agent and stores exports + log in _batch_jobs."""
+    job = _batch_jobs.get(job_id)
+    if not job:
+        return
+
+    row_state = job["rows"][row_idx]
+    description = row.get("description", "").strip()
+    output_format = (row.get("output_format") or "genbank").strip().lower()
+
+    if output_format == "both":
+        prompt = description + "\nPlease export the final construct in both GenBank and FASTA formats."
+    elif output_format == "fasta":
+        prompt = description + "\nPlease export the final construct in FASTA format."
+    else:
+        prompt = description + "\nPlease export the final construct in GenBank format."
+
+    row_state["status"] = "running"
+    row_state["log"] = []
+
+    def append_log(entry: dict):
+        row_state["log"].append(entry)
+
+    try:
+        client = anthropic.Anthropic()
+        tracker = ReferenceTracker()
+        history = [{"role": "user", "content": prompt}]
+        exports: list[dict] = []
+
+        for _ in range(15):
+            response = client.messages.create(
+                model=model,
+                max_tokens=16000,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=history,
+                thinking={"type": "enabled", "budget_tokens": 5000},
+            )
+
+            # Log any text blocks
+            for block in response.content:
+                if block.type == "text" and block.text.strip():
+                    append_log({"type": "text", "content": block.text})
+
+            if response.stop_reason == "end_turn":
+                break
+            if response.stop_reason != "tool_use":
+                break
+
+            tool_results = []
+            for block in response.content:
+                if block.type != "tool_use":
+                    continue
+                result = execute_tool(block.name, block.input, tracker)
+                # Truncate long results for the log display
+                result_preview = result[:600] + ("\u2026" if len(result) > 600 else "")
+                append_log({
+                    "type": "tool",
+                    "name": block.name,
+                    "input": block.input,
+                    "result": result_preview,
+                })
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                })
+                if block.name == "export_construct":
+                    fmt = block.input.get("output_format", "genbank")
+                    cname = block.input.get("construct_name", "construct")
+                    ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
+                    name = row.get("name", "").strip() or f"plasmid_{row_idx + 1:03d}"
+                    _plot_str = _get_last_plot_json()
+                    exports.append({
+                        "filename": name + ext,
+                        "content": result,
+                        "plot_json": json.loads(_plot_str) if _plot_str else None,
+                    })
+
+            history.append({"role": "assistant", "content": response.content})
+            history.append({"role": "user", "content": tool_results})
+
+        row_state["exports"] = exports
+        row_state["history"] = history  # persist for follow-up turns
+        row_state["status"] = "done" if exports else "no_export"
+
+    except Exception as e:
+        row_state["status"] = "error"
+        row_state["error"] = str(e)
+        row_state["log"].append({"type": "error", "content": str(e)})
+
+
+def _strip_thinking_blocks(history: list) -> list:
+    """Remove thinking blocks from assistant messages so follow-ups can run without thinking."""
+    clean = []
+    for msg in history:
+        content = msg.get("content")
+        if msg.get("role") == "assistant" and isinstance(content, list):
+            filtered = [
+                b for b in content
+                if not (getattr(b, "type", None) == "thinking" or
+                        (isinstance(b, dict) and b.get("type") == "thinking"))
+            ]
+            if filtered:
+                clean.append({"role": "assistant", "content": filtered})
+        else:
+            clean.append(msg)
+    return clean
+
+
+def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
+    """Continue a finished batch row with a follow-up user message."""
+    job = _batch_jobs.get(job_id)
+    if not job:
+        return
+    row_state = job["rows"][row_idx]
+    model = job["model"]
+
+    row_state["status"] = "running"
+    row_state["log"].append({"type": "user", "content": user_message})
+
+    # Strip thinking blocks so follow-up calls don't require thinking enabled
+    history = _strip_thinking_blocks(list(row_state.get("history", [])))
+    history.append({"role": "user", "content": user_message})
+
+    try:
+        client = anthropic.Anthropic()
+        tracker = ReferenceTracker()
+
+        for _ in range(15):
+            response = client.messages.create(
+                model=model,
+                max_tokens=8000,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=history,
+            )
+
+            for block in response.content:
+                if block.type == "text" and block.text.strip():
+                    row_state["log"].append({"type": "text", "content": block.text})
+
+            if response.stop_reason == "end_turn":
+                break
+            if response.stop_reason != "tool_use":
+                break
+
+            tool_results = []
+            for block in response.content:
+                if block.type != "tool_use":
+                    continue
+                result = execute_tool(block.name, block.input, tracker)
+                result_preview = result[:600] + ("\u2026" if len(result) > 600 else "")
+                row_state["log"].append({
+                    "type": "tool",
+                    "name": block.name,
+                    "input": block.input,
+                    "result": result_preview,
+                })
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                })
+                if block.name == "export_construct":
+                    fmt = block.input.get("output_format", "genbank")
+                    cname = block.input.get("construct_name", "construct")
+                    ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
+                    name = row_state.get("name", "").strip() or f"plasmid_{row_idx + 1:03d}"
+                    _plot_str = _get_last_plot_json()
+                    row_state["exports"].append({
+                        "filename": name + ext,
+                        "content": result,
+                        "plot_json": json.loads(_plot_str) if _plot_str else None,
+                    })
+
+            history.append({"role": "assistant", "content": response.content})
+            history.append({"role": "user", "content": tool_results})
+
+        row_state["history"] = history
+        row_state["status"] = "done" if row_state["exports"] else "no_export"
+
+    except Exception as e:
+        row_state["status"] = "error"
+        row_state["error"] = str(e)
+        row_state["log"].append({"type": "error", "content": str(e)})
+
+
+def start_batch_job(rows: list, model: str) -> str:
+    """Create a batch job, launch a background thread, return job_id."""
+    job_id = str(uuid.uuid4())
+    job: dict = {
+        "status": "running",
+        "model": model,
+        "rows": [
+            {
+                "description": r.get("description", ""),
+                "name": r.get("name", ""),
+                "output_format": r.get("output_format", "genbank"),
+                "status": "pending",
+                "exports": [],
+                "error": None,
+            }
+            for r in rows
+        ],
+    }
+    _batch_jobs[job_id] = job
+
+    # Run rows sequentially in one daemon thread to avoid hammering the API
+    def worker():
+        for idx, row in enumerate(rows):
+            _run_batch_row(job_id, idx, row, model)
+        job["status"] = "done"
+
+    threading.Thread(target=worker, daemon=True).start()
+    return job_id
 
 
 # ── HTTP Server ─────────────────────────────────────────────────────────
@@ -3030,6 +3798,84 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self._send_json(session["display_messages"])
             else:
                 self._send_json([], 404)
+
+        elif path.startswith("/api/batch/") and path.endswith("/download-all"):
+            # GET /api/batch/{job_id}/download-all — ZIP of all exports
+            import zipfile as _zipfile
+            job_id = path.split("/")[3]
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404)
+                return
+            buf = io.BytesIO()
+            with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as zf:
+                for row in job["rows"]:
+                    for exp in row.get("exports", []):
+                        zf.writestr(exp["filename"], exp["content"])
+            data = buf.getvalue()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="batch_designs.zip"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        elif path.startswith("/api/batch/") and "/rows/" in path and "/plot/" in path:
+            # GET /api/batch/{job_id}/rows/{row_idx}/plot/{export_idx}
+            parts = path.split("/")
+            try:
+                job_id = parts[3]
+                row_idx = int(parts[5])
+                export_idx = int(parts[7]) if len(parts) > 7 else 0
+                export = _batch_jobs[job_id]["rows"][row_idx]["exports"][export_idx]
+                plot_json = export.get("plot_json")
+                if not plot_json:
+                    self._send_json({"error": "No plot available"}, 404)
+                    return
+                self._send_json(plot_json)
+            except (KeyError, IndexError, ValueError):
+                self.send_error(404)
+
+        elif path.startswith("/api/batch/") and "/download/" in path:
+            # GET /api/batch/{job_id}/download/{row_idx}/{export_idx}
+            parts = path.split("/")
+            try:
+                job_id = parts[3]
+                row_idx = int(parts[5])
+                export_idx = int(parts[6]) if len(parts) > 6 else 0
+                export = _batch_jobs[job_id]["rows"][row_idx]["exports"][export_idx]
+                filename = export["filename"]
+                content = export["content"]
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.end_headers()
+                self.wfile.write(content.encode("utf-8"))
+            except (KeyError, IndexError, ValueError):
+                self.send_error(404)
+
+        elif path.startswith("/api/batch/"):
+            # GET /api/batch/{job_id} — return job status (no full file content)
+            job_id = path.split("/")[3]
+            job = _batch_jobs.get(job_id)
+            if job:
+                rows_summary = [
+                    {
+                        "description": r["description"],
+                        "name": r["name"],
+                        "status": r["status"],
+                        "error": r["error"],
+                        "exports": [
+                            {"filename": e["filename"], "has_plot": bool(e.get("plot_json"))}
+                            for e in r["exports"]
+                        ],
+                        "log": r.get("log", []),
+                    }
+                    for r in job["rows"]
+                ]
+                self._send_json({"status": job["status"], "rows": rows_summary})
+            else:
+                self._send_json({"error": "Job not found"}, 404)
 
         else:
             self.send_error(404)
@@ -3126,6 +3972,61 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 "status": "ok",
                 "outcomes_count": len(session["experimental_outcomes"]),
             })
+
+        elif path.startswith("/api/batch/") and "/rows/" in path and path.endswith("/continue"):
+            # POST /api/batch/{job_id}/rows/{row_idx}/continue
+            parts = path.split("/")
+            try:
+                job_id = parts[3]
+                row_idx = int(parts[5])
+            except (IndexError, ValueError):
+                self._send_json({"error": "Bad request"}, 400)
+                return
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404)
+                return
+            row = job["rows"][row_idx]
+            if row["status"] == "running":
+                self._send_json({"error": "Row is still running"}, 409)
+                return
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            message = body.get("message", "").strip()
+            if not message:
+                self._send_json({"error": "Empty message"}, 400)
+                return
+            threading.Thread(
+                target=_continue_batch_row,
+                args=(job_id, row_idx, message),
+                daemon=True,
+            ).start()
+            self._send_json({"status": "ok"})
+
+        elif path == "/api/batch":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            csv_text = body.get("csv_content", "")
+            request_model = body.get("model", MODEL)
+
+            if not csv_text.strip():
+                self._send_json({"error": "No CSV content provided"}, 400)
+                return
+
+            reader = csv.DictReader(io.StringIO(csv_text))
+            rows = list(reader)
+
+            if not rows or "description" not in rows[0]:
+                self._send_json({"error": "CSV must have a 'description' column"}, 400)
+                return
+
+            rows = [r for r in rows if r.get("description", "").strip()]
+            if not rows:
+                self._send_json({"error": "No non-empty rows found"}, 400)
+                return
+
+            job_id = start_batch_job(rows, request_model)
+            self._send_json({"job_id": job_id, "row_count": len(rows)})
 
         elif path == "/api/reset":
             # Legacy endpoint — clear all sessions

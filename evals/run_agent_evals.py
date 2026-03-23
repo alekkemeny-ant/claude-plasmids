@@ -51,7 +51,13 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import UserMessage
 from src.tools import create_plasmid_tools, ALL_TOOL_NAMES
-from src.library import get_backbone_by_id, get_insert_by_id, set_library_readonly
+from src.library import (
+    get_backbone_by_id,
+    get_insert_by_id,
+    set_library_readonly,
+    register_test_fixtures,
+    clear_test_fixtures,
+)
 from src.assembler import find_mcs_insertion_point
 from evals.rubric import score_construct, RubricResult, Check
 from evals.simulated_user import SimulatedUser
@@ -1355,6 +1361,82 @@ AGENT_CASES = [
             "pcDNA3.1(+)."
         ),
     ),
+
+    # ── A9: Golden Gate assembly (Allen Institute modular system) ─────────
+    AgentTestCase(
+        id="A9-001",
+        name="Golden Gate: X0001 backbone + three AICS parts (explicit IDs)",
+        prompt=(
+            "Using Golden Gate assembly, design a vector using the backbone X0001 "
+            "with inserts AICS_SynP000X, AICS_SynP000Y, AICS_SynP000Z. "
+            "Assemble the construct and export the final sequence."
+        ),
+        description=(
+            "Explicit Golden Gate request with backbone and part IDs. "
+            "Agent must call assemble_golden_gate (not assemble_construct) with "
+            "backbone AICS_X0001_pTwist_Kan_B and the three part carrier vectors. "
+            "Expected assembly: SynP000X → SynP000Y → SynP000Z, 5383 bp total, "
+            "Esp3I enzyme, junctions CACC / CTGG / ATCC / AACG."
+        ),
+        # For multi-part GG assembly there is no single insert_id; grading is
+        # transcript-based. backbone_id and expected_insert_id are set to the
+        # primary components for bookkeeping purposes only.
+        expected_backbone_id="AICS_X0001_pTwist_Kan_B",
+        expected_insert_id="AICS_SynP000X",
+        expected_total_size=5383,
+        grading_mode="transcript",
+        transcript_assertions=[
+            "5383",           # correct assembled size reported
+            "Golden Gate",    # GG assembly method identified
+            "AICS_SynP000X",  # all three parts addressed
+            "AICS_SynP000Y",
+            "AICS_SynP000Z",
+        ],
+        tools_should_not_use=["assemble_construct"],  # must use GG path, not standard
+        tags=["golden_gate", "allen_institute", "modular_system", "multi_part"],
+    ),
+    AgentTestCase(
+        id="A9-002",
+        name="Golden Gate: compound construct name (ABC_XYZ-XXYYY_LMN_OhP)",
+        prompt=(
+            "Using Golden Gate assembly, design the following vector: ABC_XYZ-XXYYY_LMN_OhP."
+        ),
+        description=(
+            "Name-based Golden Gate request. The construct name encodes the three Allen "
+            "Institute modular parts by their display names: "
+            "  ABC_XYZ  → AICS_SynP000X, "
+            "  XXYYY    → AICS_SynP000Y, "
+            "  LMN_OhP  → AICS_SynP000Z. "
+            "Agent must parse the compound name, resolve each component to its library "
+            "ID, identify an appropriate X0001 backbone, call assemble_golden_gate, "
+            "and export the assembled sequence. "
+            "Expected assembly: 5383 bp total, same junctions as A9-001."
+        ),
+        expected_backbone_id="AICS_X0001_pTwist_Kan_B",
+        expected_insert_id="AICS_SynP000X",
+        expected_total_size=5383,
+        grading_mode="transcript",
+        transcript_assertions=[
+            "5383",       # correct assembled size
+            "Golden Gate",
+            "ABC_XYZ",    # agent acknowledges the part names from the construct label
+            "XXYYY",
+            "LMN_OhP",
+        ],
+        tools_should_not_use=["assemble_construct"],
+        max_tool_calls=35,
+        tags=["golden_gate", "allen_institute", "modular_system", "multi_part",
+              "name_resolution"],
+        user_persona=(
+            "You are a researcher who submitted the construct name ABC_XYZ-XXYYY_LMN_OhP. "
+            "If the agent asks you to confirm how it parsed the name, confirm that: "
+            "ABC_XYZ is the first part (AICS_SynP000X), XXYYY is the second part (AICS_SynP000Y), "
+            "and LMN_OhP is the third part (AICS_SynP000Z). "
+            "If the agent asks which backbone to use, say you want the Kanamycin backbone (X0001). "
+            "If the agent asks any other clarifying question, give a short direct answer consistent "
+            "with this setup. If the agent presents a design summary or asks to proceed, say 'Yes, proceed.'"
+        ),
+    ),
 ]
 
 
@@ -1689,6 +1771,34 @@ async def run_agent(
 # ── Eval runner ────────────────────────────────────────────────────────
 
 
+FIXTURES_PATH = PROJECT_ROOT / "tests" / "fixtures"
+
+
+def _load_fixtures_for_case(tc: AgentTestCase) -> bool:
+    """Load test fixtures for cases that need parts not in the main library.
+
+    Currently loads tests/fixtures/{backbones,inserts}.json for golden_gate
+    cases.  Returns True if fixtures were registered (caller must call
+    clear_test_fixtures() when done).
+    """
+    if "golden_gate" not in tc.tags:
+        return False
+    backbones_path = FIXTURES_PATH / "backbones.json"
+    inserts_path = FIXTURES_PATH / "inserts.json"
+    extra_backbones: list[dict] = []
+    extra_inserts: list[dict] = []
+    if backbones_path.exists():
+        with open(backbones_path) as f:
+            extra_backbones = json.load(f).get("backbones", [])
+    if inserts_path.exists():
+        with open(inserts_path) as f:
+            extra_inserts = json.load(f).get("inserts", [])
+    if extra_backbones or extra_inserts:
+        register_test_fixtures(backbones=extra_backbones, inserts=extra_inserts)
+        return True
+    return False
+
+
 async def run_agent_eval_case(
     tc: AgentTestCase,
     model: str = "claude-opus-4-6",
@@ -1705,17 +1815,27 @@ async def run_agent_eval_case(
             print(f"  Simulated user persona: {tc.user_persona[:80]}...")
         print(f"  Running agent...")
 
+    # Load test fixtures for cases that need parts not in the main library
+    # (e.g. Golden Gate AICS parts in tests/fixtures/).
+    fixtures_loaded = _load_fixtures_for_case(tc)
+    if fixtures_loaded and verbose:
+        print(f"  Loaded test fixtures from {FIXTURES_PATH}")
+
     # Always have a simulated user. If the case doesn't specify a persona,
     # use the default "proceed" persona so the agent doesn't stall at the
     # design-summary confirmation (Pattern #1/#2 safety net).
     sim_user = SimulatedUser(persona=tc.user_persona or DEFAULT_PROCEED_PERSONA)
 
-    trace = await run_agent(
-        prompt=tc.prompt,
-        model=model,
-        verbose=verbose,
-        simulated_user=sim_user,
-    )
+    try:
+        trace = await run_agent(
+            prompt=tc.prompt,
+            model=model,
+            verbose=verbose,
+            simulated_user=sim_user,
+        )
+    finally:
+        if fixtures_loaded:
+            clear_test_fixtures()
 
     if verbose and trace.simulated_user_exchanges:
         print(f"  Simulated user exchanges: {len(trace.simulated_user_exchanges)}")

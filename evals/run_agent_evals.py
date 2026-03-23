@@ -27,7 +27,7 @@ import logging
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -51,9 +51,9 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import UserMessage
 from src.tools import create_plasmid_tools, ALL_TOOL_NAMES
-from src.library import get_backbone_by_id, get_insert_by_id
+from src.library import get_backbone_by_id, get_insert_by_id, set_library_readonly
 from src.assembler import find_mcs_insertion_point
-from evals.rubric import score_construct, RubricResult
+from evals.rubric import score_construct, RubricResult, Check
 from evals.simulated_user import SimulatedUser
 from evals.llm_judge import LLMJudge, JudgeResult
 
@@ -105,6 +105,20 @@ class AgentTestCase:
     # When provided, rubric runs fusion linker checks (tag junctions skip linker
     # requirement, protein-protein junctions require a linker).
     fusion_parts: list[dict] = field(default_factory=list)
+    # Grading mode: controls how the case is scored.
+    #   "sequence"   — (default) full rubric against library backbone+insert
+    #   "ncbi"       — extract insert from construct by length (library insert
+    #                  may be unavailable or may differ species/isoform)
+    #   "transcript" — no sequence scoring; pass/fail on transcript_assertions
+    #                  + tools_should_not_use only (for analysis-only /
+    #                  promoter-swap cases where no ground-truth insert exists)
+    grading_mode: Literal["sequence", "ncbi", "transcript"] = "sequence"
+    # Hard upper bound on tool calls. If set, exceeding this count adds a
+    # Critical rubric failure. Use for cases that specifically test the agent
+    # does NOT loop (e.g., bespoke-promoter "no loop" cases). Without this,
+    # transcript-mode cases have no defense against the agent passing keyword
+    # checks while burning 40+ tool calls in a search loop.
+    max_tool_calls: Optional[int] = None
 
 
 AGENT_CASES = [
@@ -262,7 +276,7 @@ AGENT_CASES = [
         expected_backbone_id="pcDNA3.1(-)",
         expected_insert_id="EGFP",
         expected_insertion_position=895,
-        expected_total_size=6148,
+        expected_total_size=6148,  # pcDNA3.1(-) 5428bp + EGFP 720bp
         tags=["alias", "name_resolution", "mammalian"],
     ),
     # ── A3: Natural language / underspecified ──────────────────────────
@@ -302,6 +316,11 @@ AGENT_CASES = [
         alternative_expected=[
             {"backbone_id": "pUC19", "insertion_position": 631, "total_size": 4339},
         ],
+        user_persona=(
+            "You want firefly luciferase. Any standard bacterial expression "
+            "vector is fine — if asked to pick, say pGEX-4T-1. Proceed with "
+            "assembly when the design is presented."
+        ),
     ),
     AgentTestCase(
         id="A3-003",
@@ -319,6 +338,10 @@ AGENT_CASES = [
         expected_insertion_position=1260,
         expected_total_size=5797,
         tags=["natural_language", "mammalian", "fluorescent_protein", "retroviral"],
+        user_persona=(
+            "You want mCherry — it's the standard monomeric red FP. pBABE-puro "
+            "is exactly right for retroviral + puromycin. Proceed with assembly."
+        ),
     ),
     # ── A4: Specific insert types ─────────────────────────────────────
     AgentTestCase(
@@ -357,8 +380,13 @@ AGENT_CASES = [
         expected_backbone_id="pcDNA3.1(-)",
         expected_insert_id="HA_tag",
         expected_insertion_position=895,
-        expected_total_size=5455,
+        expected_total_size=5455,  # pcDNA3.1(-) 5428bp + HA_tag 27bp
         tags=["explicit", "mammalian", "epitope_tag"],
+        user_persona=(
+            "You want the HA tag inserted into the MCS by itself, exactly as "
+            "it is in the library. No fusion, no extra codons. Just the raw "
+            "tag sequence into the backbone."
+        ),
     ),
     AgentTestCase(
         id="A4-004",
@@ -552,6 +580,11 @@ AGENT_CASES = [
         expected_backbone_id="pcDNA3.1(+)",
         expected_insert_id="SERPINE1",
         tags=["ncbi", "mammalian", "alternative_name", "allen_sample"],
+        grading_mode="ncbi",
+        user_persona=(
+            "Human SERPINE1 (PAI-1). pcDNA3.1(+) is fine. Transient expression "
+            "in HEK293. Proceed with assembly."
+        ),
     ),
     AgentTestCase(
         id="A6-007",
@@ -831,6 +864,497 @@ AGENT_CASES = [
         tags=["negative", "balanced", "no_fusion"],
         tools_should_not_use=["fuse_inserts"],
     ),
+
+    # ══════════════════════════════════════════════════════════════════
+    # P1: Phase 1 Acceptance Prompts (Allen Institute Reference Doc)
+    # ══════════════════════════════════════════════════════════════════
+    # These 7 prompts are the acceptance criteria for Phase 1 completion.
+    # Each exercises a specific disambiguation or routing behavior.
+
+    AgentTestCase(
+        id="P1-SP1",
+        name="sfGFP in pcDNA3.1(+) for HEK293",
+        prompt=(
+            "Design an expression vector for Super Folder GFP (sfGFP) "
+            "using pcDNA3.1(+) for transient expression in HEK293 cells."
+        ),
+        description=(
+            "Backbone explicitly specified → no backbone clarification "
+            "needed. sfGFP IS in library. Should assemble directly."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="sfGFP",
+        expected_insertion_position=895,
+        tags=["phase1", "acceptance", "explicit_backbone"],
+        tools_should_not_use=["search_addgene"],  # sfGFP is local
+    ),
+
+    AgentTestCase(
+        id="P1-SP2",
+        name="MyD88 in RAW 264 cells (species + backbone inference)",
+        prompt="Design an expression vector for MyD88 in RAW 264 cells.",
+        description=(
+            "No backbone specified → agent must ask about expression "
+            "type/level. RAW 264 = mouse → agent should infer or confirm "
+            "mouse MyD88. Tests cell-line species inference."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="Myd88",
+        tags=["phase1", "acceptance", "disambiguation", "cell_line", "multiturn"],
+        grading_mode="ncbi",  # mouse MyD88 from NCBI, not library
+        user_persona=(
+            "You want mouse MyD88 (since RAW 264.7 is a mouse cell line). "
+            "For expression: transient, strong constitutive, any standard "
+            "mammalian backbone like pcDNA3.1(+) is fine."
+        ),
+        transcript_assertions=["species", "backbone"],  # should discuss both
+    ),
+
+    AgentTestCase(
+        id="P1-SP3",
+        name="TRAF transient overexpression in Raw 264.7 (family disambiguation)",
+        prompt=(
+            "Design a vector for TRAF transient overexpression in Raw 264.7 cells."
+        ),
+        description=(
+            "TRAF is a family (1-7), not a gene. Agent MUST ask which "
+            "family member. 'transient overexpression' answers the "
+            "backbone-selection questions."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="TRAF6",
+        tags=["phase1", "acceptance", "gene_family", "disambiguation", "multiturn"],
+        grading_mode="ncbi",  # mouse TRAF6 from NCBI, not library
+        user_persona=(
+            "You want TRAF6 (the well-studied one in innate immunity). "
+            "Mouse, since RAW 264.7 is mouse. pcDNA3.1(+) is fine."
+        ),
+        transcript_assertions=["TRAF6", "TRAF"],  # must present options + use choice
+    ),
+
+    AgentTestCase(
+        id="P1-SP4",
+        name="TNF receptor associated factor long-name recognition",
+        prompt=(
+            "Design a vector for TNF receptor associated factor "
+            "transient overexpression in Raw 264.7."
+        ),
+        description=(
+            "Same as SP3 but uses the long name. Agent must recognize "
+            "this as TRAF family, NOT fetch the TNF Receptor gene. "
+            "Critical alias resolution test."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="TRAF6",
+        tags=["phase1", "acceptance", "alias", "gene_family", "multiturn"],
+        grading_mode="ncbi",  # mouse TRAF6 from NCBI, not library
+        user_persona=(
+            "You want TRAF6. Mouse. pcDNA3.1(+) is fine."
+        ),
+        transcript_assertions=["TRAF"],
+        # Must NOT fetch TNFR/TNFRSF genes by mistake
+    ),
+
+    AgentTestCase(
+        id="P1-SP5",
+        name="RFP in human cells (FP variant disambiguation)",
+        prompt="Design an expression vector for RFP in human cells.",
+        description=(
+            "RFP is not a specific protein. Agent MUST ask which variant "
+            "(mCherry, tdTomato, mScarlet, etc.). Also needs backbone info."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="mCherry",
+        tags=["phase1", "acceptance", "fp_variant", "disambiguation", "multiturn"],
+        user_persona=(
+            "You want mCherry — it's the standard choice. Transient, "
+            "strong constitutive, pcDNA3.1(+) is fine."
+        ),
+        transcript_assertions=["mCherry"],
+    ),
+
+    AgentTestCase(
+        id="P1-SP6",
+        name="eGFP driven by SV40 in pcDNA3.1(+) (promoter conflict)",
+        prompt=(
+            "Design an expression vector for eGFP (driven by SV40) "
+            "using pcDNA3.1(+)."
+        ),
+        description=(
+            "pcDNA3.1(+) already contains SV40 driving NeoR. Agent should "
+            "detect this conflict and offer alternatives. This tests "
+            "backbone-feature awareness."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",
+        tags=["phase1", "acceptance", "promoter_conflict", "multiturn"],
+        user_persona=(
+            "Good catch on the SV40 conflict. Just use the CMV promoter "
+            "that's already in pcDNA3.1(+) instead."
+        ),
+        transcript_assertions=["SV40"],  # should mention the conflict
+    ),
+
+    AgentTestCase(
+        id="P1-SP7",
+        name="mRuby in HEK293 (FPbase routing, no hallucination, fail-closed)",
+        prompt=(
+            "Design an expression vector for mRuby in HEK293 cells, "
+            "transient expression."
+        ),
+        description=(
+            "mRuby is NOT in local library and NOT a natural gene. "
+            "Previously the agent hallucinated or fetched wrong NCBI result. "
+            "Now: FPbase routing confirms it's a real FP. Two valid outcomes: "
+            "(a) FPbase has DNA -> agent retrieves and assembles directly; "
+            "(b) FPbase has only AA -> agent tells user exactly what it found "
+            "and asks for DNA (fail-closed, no synthesis). Both pass the "
+            "'no hallucination' criterion — the key is the agent NEVER goes "
+            "to NCBI Gene for an engineered FP and NEVER synthesizes DNA."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="mRuby",
+        tags=["phase1", "acceptance", "fpbase", "no_hallucination", "multiturn"],
+        grading_mode="ncbi",  # mRuby from FPbase/Addgene extraction, not library
+        user_persona=(
+            "pcDNA3.1(+) is fine. If you find multiple mRuby variants, "
+            "I want the original mRuby (not mRuby2 or mRuby3). "
+            "If FPbase doesn't have the DNA sequence, suggest I look at "
+            "Addgene plasmid #40260 (pcDNA3-mRuby) and you can extract the "
+            "mRuby CDS from there."
+        ),
+        transcript_assertions=["FPbase", "mRuby"],  # must route via FPbase
+        tools_should_not_use=["search_gene"],  # must NOT try NCBI Gene
+    ),
+
+    # ══════════════════════════════════════════════════════════════════
+    # P2: Phase 2 Advanced Design Features (Anthropic-assigned)
+    # ══════════════════════════════════════════════════════════════════
+    # These cases exercise the 5 Anthropic-assigned features from the
+    # Allen Institute Epics & Prioritization doc:
+    #   - Design Confidence Score (cryptic signals, CAI, Kozak, etc.)
+    #   - Bespoke Promoters (detect non-standard, offer 3 options, no loop)
+    #   - Intelligent Fusion Design (disorder-based internal fusion sites)
+    #   - Smart Mutation Design (curated GoF/LoF lookup + deterministic edit)
+    #   - Troubleshooting Mode (diagnose failure → propose remediation)
+    #
+    # Most of these are TRANSCRIPT-assertion evals (did the agent say/do
+    # the right thing?), not sequence-correctness evals. expected_backbone_id
+    # and expected_insert_id are still required by the schema but the key
+    # grading signal is transcript_assertions + tool usage.
+
+    # ── P2-DCS: Design Confidence Score ────────────────────────────────
+    AgentTestCase(
+        id="P2-DCS1",
+        name="Confidence score surfaces cryptic polyA warning",
+        prompt=(
+            "I have a custom CDS I want to express in HEK293 cells using "
+            "pcDNA3.1(+). Before I proceed, can you check if there are any "
+            "sequence-level problems? Here is the CDS:\n\n"
+            "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTG"
+            "GACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCC"
+            "ACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCC"
+            "TGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAATAAACTGCTTCAGCCGCT"
+            "ACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACG"
+            "TCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGG"
+            "TGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCA"
+            "AGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACG"
+            "TCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCC"
+            "ACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCA"
+            "TCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCC"
+            "TGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCG"
+            "CCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA"
+        ),
+        description=(
+            "The supplied CDS has an AATAAA cryptic polyA signal at ~position "
+            "200 (in the insert body, not the last 150bp). Agent should call "
+            "score_construct_confidence and surface the cryptic-polyA warning. "
+            "Tests the Design Confidence Score feature from Epic 3."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",  # the CDS is a modified EGFP; use for size ref
+        tags=["phase2", "confidence_score", "cryptic_polya"],
+        grading_mode="transcript",  # analysis-only; no assembly expected
+        transcript_assertions=["polyA", "cryptic"],  # must mention the signal
+        user_persona=(
+            "You just want an analysis of the sequence. If the agent finds "
+            "the cryptic polyA signal, acknowledge it and say you will "
+            "fix it by codon-optimizing that region. No assembly needed."
+        ),
+        # Negative assertion: agent should NOT blindly assemble without warning
+    ),
+
+    AgentTestCase(
+        id="P2-DCS2",
+        name="Confidence score on clean CDS returns high score",
+        prompt=(
+            "I want to express EGFP in HEK293 using pcDNA3.1(+). Before "
+            "assembling, can you run a design confidence check on the EGFP "
+            "CDS to make sure there are no red flags?"
+        ),
+        description=(
+            "EGFP is a well-optimized CDS (CAI 0.91, good Kozak, no cryptic "
+            "signals). Agent should score it, report high confidence (≥85), "
+            "and proceed. Positive-path test for the confidence scorer."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",
+        expected_insertion_position=895,
+        tags=["phase2", "confidence_score", "positive"],
+        transcript_assertions=["confidence", "100"],  # EGFP scores 100/100
+        user_persona="Looks good, please proceed with assembly.",
+    ),
+
+    # ── P2-BP: Bespoke Promoters ───────────────────────────────────────
+    AgentTestCase(
+        id="P2-BP1",
+        name="p65 promoter reporter — detect bespoke, offer options, no loop",
+        prompt=(
+            "Design a p65 promoter reporter construct for stable expression "
+            "in HEK293 and RAW264.7 cells."
+        ),
+        description=(
+            "Direct from the Allen Epics doc. p65 (RELA) is NOT a standard "
+            "promoter. The agent should: (1) detect this is a bespoke "
+            "promoter request, (2) NOT get stuck in a search loop, (3) offer "
+            "the 3 options: research/Addgene, user-paste, or native upstream "
+            "fetch. The agent should also ask which species since the user "
+            "mentioned both human (HEK293) and mouse (RAW264.7) cells. "
+            "Reference: Epics doc, 'Bespoke promoters' section."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",  # reporter gene
+        tags=["phase2", "bespoke_promoter", "no_loop", "multiturn"],
+        grading_mode="transcript",  # bespoke promoter swap; no canonical insert
+        transcript_assertions=[
+            "p65",           # agent acknowledges the promoter name
+            "upstream",      # agent offers the native-upstream option
+            "RELA",          # agent resolves p65 → RELA gene symbol
+        ],
+        # The entire point of this case is verifying the agent does NOT loop
+        # searching for a promoter it will never find. A focused run is:
+        # 1× get_backbone, 1× search (miss), 1× fetch_promoter_region,
+        # 1× get_insert (reporter), 1× assemble, 1× validate + a few extras.
+        # 12 is generous; the previous 44-tool trace was a genuine loop.
+        max_tool_calls=12,
+        user_persona=(
+            "I want a human p65 (RELA) promoter reporter — EGFP as the "
+            "reporter gene. I know there is a published p65 promoter on "
+            "Addgene, but I do not have the catalog number handy. Just "
+            "fetch the ~2kb upstream of the human RELA gene from NCBI "
+            "and use that. pcDNA3.1(+) backbone is fine for the rest."
+        ),
+    ),
+
+    AgentTestCase(
+        id="P2-BP2",
+        name="IFNβ promoter — user pastes sequence",
+        prompt=(
+            "I want to build an IFNβ promoter reporter. I have the IFNβ "
+            "promoter sequence — should I paste it?"
+        ),
+        description=(
+            "IFNβ (IFNB1) promoter is not standard. Agent should recognize "
+            "the bespoke promoter pattern, confirm it wants the user to "
+            "paste the sequence (option b in the decision tree), validate "
+            "it, and use it. Tests the paste-sequence branch."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",  # persona specifies EGFP as reporter
+        tags=["phase2", "bespoke_promoter", "paste_sequence", "multiturn"],
+        grading_mode="transcript",  # bespoke promoter; can't score standard insert
+        transcript_assertions=[
+            "IFNβ",      # agent acknowledges the specific promoter
+            "EGFP",      # agent uses the persona-specified reporter
+            "validate",  # agent validates the pasted sequence before use
+        ],
+        max_tool_calls=12,
+        user_persona=(
+            "Yes, here is the ~300bp IFNβ minimal promoter:\n"
+            "AGTTTCACTTTCCATTTCCCAGAGTCAGGAGACTTCCTAAGTGCCTCAAGGGCTCAG"
+            "TTTAGAAATCCTACCAAGATGCGCACAGGCTGTTTCTCTCAGGCCTAGGCGGTGTCT"
+            "CCTGCTGTCCTTCCTGCCACAGCATCTGCTGAGCCTTCCCACCGGGCGTGGAGGAGG"
+            "AGCGCTCTCCTGATTTTCCTGCCGCTCCCCGGCAAAGCCTAGCACGGCGCGGAGCCT"
+            "ACCTGCCGTCCGCGAAGGAGTCAATCAGCGGAAGTTCATC\n"
+            "Use EGFP as the reporter, pcDNA3.1(+) backbone. Transient in "
+            "HEK293."
+        ),
+    ),
+
+    # ── P2-IF: Intelligent Fusion Design ───────────────────────────────
+    AgentTestCase(
+        id="P2-IF1",
+        name="Internal fusion site for buried-terminus protein",
+        prompt=(
+            "I want to tag human TP53 with EGFP for live-cell imaging in "
+            "U2OS cells. I've tried a C-terminal fusion before and it was "
+            "non-functional — the C-terminus of p53 is critical for "
+            "tetramerization. Can you suggest an internal insertion site "
+            "in a disordered loop instead?"
+        ),
+        description=(
+            "User explicitly asks for internal (not terminal) fusion. "
+            "Agent should call predict_fusion_sites on TP53's protein "
+            "sequence and offer ranked disordered regions. p53 has a "
+            "well-known intrinsically disordered N-terminal transactivation "
+            "domain (residues ~1-60) that should be detected. Tests the "
+            "Smart Fusion Design feature from Epic 3."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="TP53",
+        tags=["phase2", "intelligent_fusion", "internal_fusion", "multiturn"],
+        grading_mode="ncbi",  # internal EGFP fusion into TP53; extract from construct
+        transcript_assertions=[
+            "disorder",      # agent should reference disorder prediction
+            "residue",       # agent should give specific residue positions
+        ],
+        user_persona=(
+            "Human TP53. The N-terminal disordered region sounds right — "
+            "let's insert EGFP into the most disordered window you find "
+            "there. Use the default (GGGGS)x4 linker on both sides of EGFP. "
+            "pcDNA3.1(+) is fine."
+        ),
+    ),
+
+    # ── P2-SM: Smart Mutation Design ───────────────────────────────────
+    AgentTestCase(
+        id="P2-SM1",
+        name="Constitutively active BRAF — curated V600E lookup",
+        prompt=(
+            "I want to express a constitutively active human BRAF in "
+            "HEK293 cells to study MEK/ERK signaling. What mutation should "
+            "I use?"
+        ),
+        description=(
+            "Agent should call lookup_known_mutations('BRAF', 'GoF') and "
+            "return V600E (and V600K) with phenotype + PMID. Then offer "
+            "to apply the mutation and assemble. Tests the Smart Mutation "
+            "feature — Tier A curated database."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="BRAF",
+        tags=["phase2", "smart_mutation", "gof", "curated_db", "multiturn"],
+        grading_mode="ncbi",  # mutated BRAF; extract from construct
+        transcript_assertions=[
+            "V600E",         # must surface the canonical mutation
+            "constitutive",  # phenotype from the DB
+        ],
+        user_persona=(
+            "V600E is perfect. Please apply it to the human BRAF CDS and "
+            "assemble in pcDNA3.1(+) for transient expression. Show me "
+            "the original→new codon change."
+        ),
+    ),
+
+    AgentTestCase(
+        id="P2-SM2",
+        name="Loss-of-function PTEN — curated + premature stop fallback",
+        prompt=(
+            "I need a kinase-dead PTEN (loss of function) for a rescue "
+            "experiment in PTEN-null cells. What are my options?"
+        ),
+        description=(
+            "Agent should look up curated PTEN LoF mutations (C124S "
+            "catalytic-dead, R130G phosphatase-dead) and ALSO mention the "
+            "premature-stop option. Tests both Tier A (curated) and Tier B "
+            "(de novo LoF design)."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="PTEN",
+        tags=["phase2", "smart_mutation", "lof", "curated_db", "multiturn"],
+        grading_mode="ncbi",  # mutated PTEN; extract from construct
+        transcript_assertions=[
+            "C124S",          # curated catalytic-dead
+            "phosphatase",    # phenotype
+        ],
+        user_persona=(
+            "C124S is the one I want (catalytic-dead). Human PTEN. "
+            "pcDNA3.1(+). Apply the mutation and assemble."
+        ),
+    ),
+
+    # ── P2-TM: Troubleshooting Mode ────────────────────────────────────
+    AgentTestCase(
+        id="P2-TM1",
+        name="Troubleshooting — no expression, agent diagnoses cryptic polyA",
+        prompt=(
+            "I previously designed a pcDNA3.1(+)-myGene construct with you "
+            "and tested it in the lab. I got zero fluorescence in HEK293, "
+            "even though transfection efficiency looked normal (control "
+            "plasmid worked). Here is the insert CDS I used:\n\n"
+            "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTG"
+            "GACGGCGACGTAAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCC"
+            "ACCTACGGCAAGCTGACCCTGAAGTTCATCTGCACCACCGGCAAGCTGCCCGTGCCC"
+            "TGGCCCACCCTCGTGACCACCCTGACCTACGGCGTGCAATAAACTGCTTCAGCCGCT"
+            "ACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGGCTACG"
+            "TCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGG"
+            "TGAAGTTCGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCA"
+            "AGGAGGACGGCAACATCCTGGGGCACAAGCTGGAGTACAACTACAACAGCCACAACG"
+            "TCTATATCATGGCCGACAAGCAGAAGAACGGCATCAAGGTGAACTTCAAGATCCGCC"
+            "ACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGCAGAACACCCCCA"
+            "TCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCGCCC"
+            "TGAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCG"
+            "CCGCCGGGATCACTCTCGGCATGGACGAGCTGTACAAGTAA\n\n"
+            "What went wrong and how do I fix it?"
+        ),
+        description=(
+            "The CDS has a cryptic AATAAA polyA signal at ~pos 200 that "
+            "would cause premature transcription termination → truncated/ "
+            "no protein → no fluorescence. Agent should: (1) acknowledge "
+            "the prior failure, (2) run score_construct_confidence or "
+            "manually inspect, (3) identify the cryptic polyA, (4) propose "
+            "specific remediation (codon-optimize around that position to "
+            "eliminate AATAAA). Tests Troubleshooting Mode from Epic 5. "
+            "Same CDS as P2-DCS1 but framed as a post-lab-failure scenario."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="EGFP",  # modified EGFP, for size ref
+        tags=["phase2", "troubleshooting", "diagnosis", "multiturn"],
+        transcript_assertions=[
+            "polyA",         # must identify the cryptic polyA
+            "premature",     # explain the mechanism (premature termination)
+            "codon",         # propose codon-optimization as fix
+        ],
+        user_persona=(
+            "That makes sense — the cryptic polyA explains the truncated "
+            "transcript. Please log this outcome so I can refer back to "
+            "it. I will codon-optimize that region and come back with a "
+            "revised sequence."
+        ),
+    ),
+
+    AgentTestCase(
+        id="P2-TM2",
+        name="Troubleshooting — fusion misfolding, agent suggests internal site",
+        prompt=(
+            "Follow-up on a fusion design: I made a C-terminal EGFP fusion "
+            "to human Lamin A/C (LMNA) and it mislocalized — EGFP was "
+            "cytoplasmic instead of at the nuclear envelope. The LMNA "
+            "C-terminus has the CaaX farnesylation motif that targets it to "
+            "the membrane. I think the fusion blocked it. What should I try?"
+        ),
+        description=(
+            "Classic C-terminus-critical case: LMNA's C-terminal CaaX box "
+            "is essential for nuclear lamina targeting. Agent should "
+            "diagnose (C-term fusion buried the CaaX), and propose either "
+            "(a) N-terminal fusion, or (b) internal fusion via "
+            "predict_fusion_sites. Tests the troubleshooting-mode → "
+            "intelligent-fusion pipeline."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="LMNA",
+        tags=["phase2", "troubleshooting", "intelligent_fusion", "multiturn"],
+        grading_mode="ncbi",  # N-term EGFP-LMNA fusion; extract from construct
+        transcript_assertions=[
+            "CaaX",          # agent acknowledges the farnesylation motif
+            "N-terminal",    # suggests N-term alternative
+        ],
+        user_persona=(
+            "N-terminal fusion sounds safer for this case. Use the "
+            "standard (GGGGS)x4 linker. Human LMNA, transient in U2OS, "
+            "pcDNA3.1(+)."
+        ),
+    ),
 ]
 
 
@@ -889,6 +1413,88 @@ class AgentTrace:
     cost_usd: Optional[float] = None
     simulated_user_exchanges: list[dict] = field(default_factory=list)
     judge_result: Optional[JudgeResult] = None
+    # Disambiguates why a case produced no rubric (set by run_agent_eval_case):
+    #   None       — scoring succeeded
+    #   "ERROR"    — trace.error is set (agent crashed / SDK exception)
+    #   "SKIP"     — scorer couldn't obtain reference sequences
+    #   "NO_OUTPUT"— agent produced no assembled sequence (and case isn't transcript-mode)
+    skip_reason: Optional[str] = None
+
+
+# ── Grading-mode helpers ───────────────────────────────────────────────
+
+# Default simulated-user persona for cases without an explicit one.
+# The original prompt already states the user's intent; this persona only
+# unblocks the agent when it asks for confirmation or a trivial choice.
+DEFAULT_PROCEED_PERSONA = (
+    "You have already told the agent exactly what you want in your first "
+    "message. If the agent presents a design summary or asks to proceed, "
+    "say 'Yes, proceed with the assembly.' If it asks a clarifying question, "
+    "give a direct 1-line answer consistent with the original request, "
+    "picking the most common/standard option."
+)
+
+
+def _normalize_tool_name(name: str) -> str:
+    """Strip MCP namespace prefix so test-case tool names match trace entries.
+
+    Trace records show 'mcp__plasmid-library__search_gene' but test cases
+    list 'search_gene'. Without normalization the tool-negative check never
+    triggers.
+    """
+    return name.removeprefix("mcp__plasmid-library__")
+
+
+def _max_tool_calls_check(
+    max_tool_calls: Optional[int],
+    actual_tool_calls: int,
+) -> Optional[Check]:
+    """Return a Critical check if max_tool_calls is set. None otherwise."""
+    if max_tool_calls is None:
+        return None
+    passed = actual_tool_calls <= max_tool_calls
+    return Check(
+        section="Tool Routing",
+        name=f"Tool calls within budget (≤{max_tool_calls})",
+        severity="Critical",
+        passed=passed,
+        detail=f"{actual_tool_calls} tool calls"
+        + ("" if passed else f" — exceeds budget, likely search loop"),
+    )
+
+
+def _build_transcript_rubric(
+    transcript_results: list[tuple[str, bool]],
+    tool_violation_results: list[tuple[str, bool]],
+    max_tool_check: Optional[Check],
+) -> RubricResult:
+    """Build a RubricResult from transcript assertions + tool checks only.
+
+    Used for grading_mode="transcript" cases where no sequence-level
+    ground truth exists (analysis-only tasks, bespoke promoter swaps).
+    Transcript assertions are Critical (the case's PASS/FAIL hinges on
+    whether the agent said the right thing); tool violations are Major.
+    """
+    result = RubricResult()
+    for assertion, found in transcript_results:
+        result.checks.append(Check(
+            section="Transcript",
+            name=f"Agent mentions '{assertion}'",
+            severity="Critical",
+            passed=found,
+            detail="found in transcript" if found else "not found in transcript",
+        ))
+    for tool_name, was_used in tool_violation_results:
+        result.checks.append(Check(
+            section="Tool Routing",
+            name=f"Agent should NOT use {tool_name}",
+            severity="Major",
+            passed=not was_used,
+            detail=f"Agent {'used' if was_used else 'correctly avoided'} {tool_name}",
+        ))
+    if max_tool_check is not None:
+        result.checks.append(max_tool_check)
+    return result
 
 
 async def _auto_approve(tool_name, tool_input, context):
@@ -923,7 +1529,7 @@ def _get_assistant_text(message) -> str:
 
 async def run_agent(
     prompt: str,
-    model: str = "claude-opus-4-5-20251101",
+    model: str = "claude-opus-4-6",
     max_turns: int = 15,
     verbose: bool = False,
     simulated_user: Optional[SimulatedUser] = None,
@@ -1027,9 +1633,13 @@ async def run_agent(
                             "content": agent_text,
                         })
 
-                        user_response = simulated_user.respond(
-                            agent_message=agent_text,
-                            conversation_history=sim_conversation[:-1] if len(sim_conversation) > 1 else None,
+                        # SimulatedUser.respond() is a blocking Anthropic SDK
+                        # call — wrap in to_thread so parallel evals don't
+                        # stall the event loop waiting on Haiku.
+                        user_response = await asyncio.to_thread(
+                            simulated_user.respond,
+                            agent_text,
+                            sim_conversation[:-1] if len(sim_conversation) > 1 else None,
                         )
 
                         sim_conversation.append({
@@ -1081,10 +1691,10 @@ async def run_agent(
 
 async def run_agent_eval_case(
     tc: AgentTestCase,
-    model: str = "claude-opus-4-5-20251101",
+    model: str = "claude-opus-4-6",
     verbose: bool = False,
     use_judge: bool = False,
-    judge_model: str = "claude-sonnet-4-5-20250929",
+    judge_model: str = "claude-sonnet-4-6",
 ) -> tuple[Optional[RubricResult], AgentTrace]:
     """Run a single agent eval case."""
     if verbose:
@@ -1095,8 +1705,10 @@ async def run_agent_eval_case(
             print(f"  Simulated user persona: {tc.user_persona[:80]}...")
         print(f"  Running agent...")
 
-    # Create simulated user if the case has a persona
-    sim_user = SimulatedUser(persona=tc.user_persona) if tc.user_persona else None
+    # Always have a simulated user. If the case doesn't specify a persona,
+    # use the default "proceed" persona so the agent doesn't stall at the
+    # design-summary confirmation (Pattern #1/#2 safety net).
+    sim_user = SimulatedUser(persona=tc.user_persona or DEFAULT_PROCEED_PERSONA)
 
     trace = await run_agent(
         prompt=tc.prompt,
@@ -1115,11 +1727,10 @@ async def run_agent_eval_case(
     if trace.error:
         if verbose:
             print(f"  Agent ERROR: {trace.error}")
+        trace.skip_reason = "ERROR"
         return None, trace
 
     # ── Transcript assertions (conversational quality grading) ────────
-    # For disambiguation cases, check that the agent asked the right
-    # clarifying questions in its text output.
     transcript_results = []
     if tc.transcript_assertions:
         for assertion in tc.transcript_assertions:
@@ -1130,108 +1741,133 @@ async def run_agent_eval_case(
                 print(f"  [transcript] '{assertion}': {status}")
 
     # ── Tool negative assertions (balanced eval grading) ──────────────
-    # Check that the agent did NOT call tools it shouldn't have.
+    # Normalize MCP-prefixed tool names so test-case short names match.
     tool_violation_results = []
     if tc.tools_should_not_use:
-        tools_used = {t["tool"] for t in trace.tool_calls}
+        tools_used = {_normalize_tool_name(t["tool"]) for t in trace.tool_calls}
         for forbidden_tool in tc.tools_should_not_use:
-            was_used = forbidden_tool in tools_used
+            was_used = _normalize_tool_name(forbidden_tool) in tools_used
             tool_violation_results.append((forbidden_tool, was_used))
             if verbose:
                 status = "VIOLATION — used" if was_used else "OK — not used"
                 print(f"  [tool_negative] {forbidden_tool}: {status}")
 
+    # ── Tool budget assertion (loop detection for all grading modes) ──
+    max_tool_check = _max_tool_calls_check(tc.max_tool_calls, len(trace.tool_calls))
+    if max_tool_check is not None and verbose:
+        status = "OK" if max_tool_check.passed else "VIOLATION"
+        print(f"  [max_tool_calls] {status}: {max_tool_check.detail}")
+
+    # ── Transcript-mode grading (no sequence scoring) ─────────────────
+    # For analysis-only / promoter-swap cases, PASS/FAIL is based entirely
+    # on whether the agent said the right things + avoided forbidden tools.
+    if tc.grading_mode == "transcript":
+        rubric_result = _build_transcript_rubric(
+            transcript_results, tool_violation_results, max_tool_check
+        )
+        if verbose:
+            print(f"  [grading_mode=transcript] Result: {rubric_result.summary()}")
+            print(rubric_result.report())
+        _maybe_run_judge(tc, trace, rubric_result, use_judge, judge_model, verbose)
+        return rubric_result, trace
+
+    # ── Sequence / NCBI grading modes ─────────────────────────────────
     if not trace.assembled_sequence:
         if verbose:
             print(f"  No assembled sequence found in agent output")
             print(f"  Tool calls made: {[t['tool'] for t in trace.tool_calls]}")
-        # For disambiguation cases, no assembled sequence is expected
-        # (agent should ask questions, not guess). Still report transcript results.
         if tc.transcript_assertions and transcript_results:
             passed_assertions = sum(1 for _, found in transcript_results if found)
-            total_assertions = len(transcript_results)
             if verbose:
-                print(f"  Transcript assertions: {passed_assertions}/{total_assertions} passed")
-
-        # Still run judge on cases without assembled sequence (e.g., disambiguation)
-        if use_judge and trace.assistant_text.strip():
-            if verbose:
-                print(f"  Running LLM judge ({judge_model})...")
-            judge = LLMJudge(model=judge_model)
-            judge_result = judge.evaluate(
-                case_id=tc.id,
-                case_name=tc.name,
-                case_description=tc.description,
-                case_prompt=tc.prompt,
-                expected_backbone=tc.expected_backbone_id,
-                expected_insert=tc.expected_insert_id,
-                transcript=trace.assistant_text,
-                tool_calls=trace.tool_calls,
-                transcript_assertions=tc.transcript_assertions or None,
-            )
-            trace.judge_result = judge_result
-            if verbose:
-                print(f"  {judge_result.summary()}")
-
+                print(
+                    f"  Transcript assertions: {passed_assertions}/"
+                    f"{len(transcript_results)} passed"
+                )
+        _maybe_run_judge(tc, trace, None, use_judge, judge_model, verbose)
+        trace.skip_reason = "NO_OUTPUT"
         return None, trace
 
     if verbose:
         print(f"  Extracted sequence: {len(trace.assembled_sequence)} bp")
-        print(f"  Tool calls: {len(trace.tool_calls)} ({', '.join(t['tool'] for t in trace.tool_calls)})")
+        print(
+            f"  Tool calls: {len(trace.tool_calls)} "
+            f"({', '.join(t['tool'] for t in trace.tool_calls)})"
+        )
 
-    # Resolve expected values for scoring
     backbone_data = get_backbone_by_id(tc.expected_backbone_id)
-
     if not backbone_data or not backbone_data.get("sequence"):
         if verbose:
             print(f"  SKIP: No backbone sequence for '{tc.expected_backbone_id}'")
+        trace.skip_reason = "SKIP"
         return None, trace
 
     backbone_seq = backbone_data["sequence"]
-
-    # Resolve insert sequence: prefer inline ground truth, fall back to library.
-    # For NCBI cases, the library may have a cached version that differs from
-    # what the agent retrieves. If the library insert isn't found in the
-    # construct, extract the actual insert from the construct.
-    insert_seq = tc.expected_insert_sequence
-    insert_data = None
-    if not insert_seq:
-        insert_data = get_insert_by_id(tc.expected_insert_id)
-        if not insert_data or not insert_data.get("sequence"):
-            if verbose:
-                print(f"  SKIP: No insert sequence for '{tc.expected_insert_id}'")
-            return None, trace
-        insert_seq = insert_data["sequence"]
-
-    # For NCBI cases: if the library insert isn't found in the construct,
-    # extract the actual insert from the construct using the backbone.
-    if (
-        "ncbi" in tc.tags
-        and trace.assembled_sequence
-        and insert_seq not in trace.assembled_sequence
-    ):
-        ins_pos = tc.expected_insertion_position or find_mcs_insertion_point(backbone_data)
-        if ins_pos is not None:
-            insert_len = len(trace.assembled_sequence) - len(backbone_seq)
-            if insert_len > 0:
-                extracted = trace.assembled_sequence[ins_pos:ins_pos + insert_len]
-                if verbose:
-                    print(f"  NCBI case: library insert not found, extracted {insert_len} bp from construct")
-                insert_seq = extracted
-
     insertion_pos = tc.expected_insertion_position
     if insertion_pos is None:
         insertion_pos = find_mcs_insertion_point(backbone_data)
-
     if insertion_pos is None:
         if verbose:
             print(f"  SKIP: Cannot determine insertion position")
+        trace.skip_reason = "SKIP"
         return None, trace
 
-    insert_name = insert_data["name"] if insert_data else tc.expected_insert_id
-    insert_category = insert_data.get("category") if insert_data else None
+    # Resolve insert sequence. Priority: inline → library → extract-from-construct
+    # (ncbi mode only). Guard against get_insert_by_id() returning a
+    # disambiguation dict ({"needs_disambiguation": True, ...}) — that's a
+    # valid return value but has no sequence/name keys and should be treated
+    # the same as "not found" for scoring purposes.
+    insert_seq = tc.expected_insert_sequence
+    insert_data = None
+    if not insert_seq:
+        lookup = get_insert_by_id(tc.expected_insert_id)
+        if lookup and not lookup.get("needs_disambiguation") and lookup.get("sequence"):
+            insert_data = lookup
+            insert_seq = lookup["sequence"]
 
-    # Score with rubric
+    # NCBI mode: library insert may be missing entirely OR may be a different
+    # species/isoform than what the agent fetched. In either case, extract
+    # the insert from the construct by length (construct - backbone).
+    if tc.grading_mode == "ncbi" and trace.assembled_sequence:
+        needs_extraction = not insert_seq or insert_seq not in trace.assembled_sequence
+        if needs_extraction:
+            insert_len = len(trace.assembled_sequence) - len(backbone_seq)
+            if insert_len > 0:
+                extracted = trace.assembled_sequence[insertion_pos:insertion_pos + insert_len]
+                if verbose:
+                    print(
+                        f"  [grading_mode=ncbi] library insert unavailable/mismatched; "
+                        f"extracted {insert_len} bp from construct"
+                    )
+                insert_seq = extracted
+
+    # Legacy tag-based extraction (kept for backward compatibility with any
+    # untagged test cases that relied on "ncbi" in tags).
+    elif (
+        "ncbi" in tc.tags
+        and insert_seq
+        and insert_seq not in trace.assembled_sequence
+    ):
+        insert_len = len(trace.assembled_sequence) - len(backbone_seq)
+        if insert_len > 0:
+            extracted = trace.assembled_sequence[insertion_pos:insertion_pos + insert_len]
+            if verbose:
+                print(
+                    f"  NCBI case: library insert not found, extracted "
+                    f"{insert_len} bp from construct"
+                )
+            insert_seq = extracted
+
+    if not insert_seq:
+        if verbose:
+            print(f"  SKIP: No insert sequence for '{tc.expected_insert_id}'")
+        trace.skip_reason = "SKIP"
+        return None, trace
+
+    # insert_data is only set when we have a real library/FPbase/NCBI record
+    # (never a disambiguation dict), so .get() here is defensive only.
+    insert_name = (insert_data or {}).get("name") or tc.expected_insert_id
+    insert_category = (insert_data or {}).get("category")
+
     rubric_result = score_construct(
         construct_sequence=trace.assembled_sequence,
         expected_backbone_sequence=backbone_seq,
@@ -1245,7 +1881,7 @@ async def run_agent_eval_case(
         fusion_parts=tc.fusion_parts or None,
     )
 
-    # ── Try alternative backbones if primary scoring fails ────────────
+    # Try alternative backbones if primary scoring fails
     if not rubric_result.overall_pass and tc.alternative_expected:
         for alt in tc.alternative_expected:
             alt_backbone_data = get_backbone_by_id(alt["backbone_id"])
@@ -1270,133 +1906,201 @@ async def run_agent_eval_case(
             if alt_result.score_pct > rubric_result.score_pct:
                 rubric_result = alt_result
                 if verbose:
-                    print(f"  Alternative backbone '{alt['backbone_id']}' scored better: {alt_result.summary()}")
+                    print(
+                        f"  Alternative backbone '{alt['backbone_id']}' scored "
+                        f"better: {alt_result.summary()}"
+                    )
                 if rubric_result.overall_pass:
                     break
 
-    # ── Add tool violation checks to rubric (negative/balanced cases) ────
+    # Add tool violation checks to the rubric
     if tool_violation_results:
-        from evals.rubric import Check
         for tool_name, was_used in tool_violation_results:
             rubric_result.checks.append(Check(
                 section="Tool Routing",
                 name=f"Agent should NOT use {tool_name}",
                 severity="Major",
                 passed=not was_used,
-                detail=f"Agent {'used' if was_used else 'correctly avoided'} {tool_name}",
+                detail=(
+                    f"Agent {'used' if was_used else 'correctly avoided'} "
+                    f"{tool_name}"
+                ),
             ))
+
+    # Add tool-budget check (applies to sequence/ncbi modes too)
+    if max_tool_check is not None:
+        rubric_result.checks.append(max_tool_check)
 
     if verbose:
         print(f"  Result: {rubric_result.summary()}")
         print()
         print(rubric_result.report())
 
-    # ── LLM Judge grading ────────────────────────────────────────────
-    if use_judge:
-        if verbose:
-            print(f"  Running LLM judge ({judge_model})...")
-        judge = LLMJudge(model=judge_model)
-        judge_result = judge.evaluate(
-            case_id=tc.id,
-            case_name=tc.name,
-            case_description=tc.description,
-            case_prompt=tc.prompt,
-            expected_backbone=tc.expected_backbone_id,
-            expected_insert=tc.expected_insert_id,
-            transcript=trace.assistant_text,
-            tool_calls=trace.tool_calls,
-            transcript_assertions=tc.transcript_assertions or None,
-            rubric_result=rubric_result,
-        )
-        trace.judge_result = judge_result
-        if verbose:
-            print(f"  {judge_result.summary()}")
-            for s in judge_result.scores:
-                print(f"    {s.dimension}: {s.score}/5 — {s.explanation[:80]}")
-
+    _maybe_run_judge(tc, trace, rubric_result, use_judge, judge_model, verbose)
     return rubric_result, trace
+
+
+def _maybe_run_judge(
+    tc: AgentTestCase,
+    trace: AgentTrace,
+    rubric_result: Optional[RubricResult],
+    use_judge: bool,
+    judge_model: str,
+    verbose: bool,
+) -> None:
+    """Run LLM judge if enabled. Mutates trace.judge_result."""
+    if not use_judge or not trace.assistant_text.strip():
+        return
+    if verbose:
+        print(f"  Running LLM judge ({judge_model})...")
+    judge = LLMJudge(model=judge_model)
+    judge_result = judge.evaluate(
+        case_id=tc.id,
+        case_name=tc.name,
+        case_description=tc.description,
+        case_prompt=tc.prompt,
+        expected_backbone=tc.expected_backbone_id,
+        expected_insert=tc.expected_insert_id,
+        transcript=trace.assistant_text,
+        tool_calls=trace.tool_calls,
+        transcript_assertions=tc.transcript_assertions or None,
+        rubric_result=rubric_result,
+    )
+    trace.judge_result = judge_result
+    if verbose:
+        print(f"  {judge_result.summary()}")
+        for s in judge_result.scores:
+            print(f"    {s.dimension}: {s.score}/5 — {s.explanation[:80]}")
+
+
+def _build_result_dict(
+    tc: AgentTestCase,
+    rubric: Optional[RubricResult],
+    trace: AgentTrace,
+    elapsed: float,
+) -> dict:
+    """Build the per-case result dict for the summary table / JSONL output."""
+    judge_score = None
+    if trace.judge_result and trace.judge_result.scores:
+        judge_score = round(trace.judge_result.overall_score, 1)
+
+    base = {
+        "id": tc.id,
+        "name": tc.name,
+        "grading_mode": tc.grading_mode,
+        "tool_calls": len(trace.tool_calls),
+        "turns": trace.total_turns,
+        "elapsed_s": round(elapsed, 1),
+        "cost_usd": trace.cost_usd,
+        "judge_score": judge_score,
+    }
+
+    if rubric is None:
+        # Disambiguate ERROR vs SKIP vs NO_OUTPUT via skip_reason
+        status = trace.skip_reason or "ERROR"
+        if status == "ERROR":
+            detail = trace.error or "Unknown error"
+        elif status == "SKIP":
+            detail = "Scorer could not obtain reference sequences"
+        else:  # NO_OUTPUT
+            detail = "Agent produced no assembled sequence"
+        return {**base, "status": status, "score": None, "detail": detail}
+
+    if rubric.overall_pass:
+        return {**base, "status": "PASS", "score": rubric.score_pct, "detail": rubric.summary()}
+
+    return {
+        **base,
+        "status": "FAIL",
+        "score": rubric.score_pct,
+        "detail": rubric.summary(),
+        "critical_fail": rubric.critical_fail,
+    }
 
 
 async def run_agent_eval_suite(
     cases: list[AgentTestCase],
-    model: str = "claude-opus-4-5-20251101",
+    model: str = "claude-opus-4-6",
     verbose: bool = False,
     use_judge: bool = False,
-    judge_model: str = "claude-sonnet-4-5-20250929",
+    judge_model: str = "claude-sonnet-4-6",
+    concurrency: int = 1,
+    output_path: Optional[Path] = None,
 ) -> dict:
-    """Run a suite of agent eval cases."""
-    results = []
-    passed = 0
-    failed = 0
-    errored = 0
+    """Run a suite of agent eval cases, optionally in parallel.
 
-    for tc in cases:
-        start_time = time.time()
-        rubric, trace = await run_agent_eval_case(
-            tc, model=model, verbose=verbose,
-            use_judge=use_judge, judge_model=judge_model,
-        )
-        elapsed = time.time() - start_time
+    Args:
+        concurrency: Max concurrent cases. 1 = sequential (default).
+        output_path: If set, stream full per-case traces as JSONL lines.
+    """
+    sem = asyncio.Semaphore(concurrency)
+    results: list[Optional[dict]] = [None] * len(cases)
+    output_file = open(output_path, "w") if output_path else None
+    output_lock = asyncio.Lock()
+    completed = [0]  # mutable counter for progress line
 
-        # Common fields for judge results
-        judge_score = None
-        if trace.judge_result and trace.judge_result.scores:
-            judge_score = round(trace.judge_result.overall_score, 1)
+    async def _run_one(idx: int, tc: AgentTestCase):
+        async with sem:
+            start = time.time()
+            rubric, trace = await run_agent_eval_case(
+                tc, model=model, verbose=verbose,
+                use_judge=use_judge, judge_model=judge_model,
+            )
+            elapsed = time.time() - start
+            result = _build_result_dict(tc, rubric, trace, elapsed)
+            results[idx] = result
 
-        if rubric is None:
-            errored += 1
-            results.append({
-                "id": tc.id,
-                "name": tc.name,
-                "status": "ERROR",
-                "score": None,
-                "detail": trace.error or "No sequence extracted",
-                "tool_calls": len(trace.tool_calls),
-                "turns": trace.total_turns,
-                "elapsed_s": round(elapsed, 1),
-                "cost_usd": trace.cost_usd,
-                "judge_score": judge_score,
-            })
-        elif rubric.overall_pass:
-            passed += 1
-            results.append({
-                "id": tc.id,
-                "name": tc.name,
-                "status": "PASS",
-                "score": rubric.score_pct,
-                "detail": rubric.summary(),
-                "tool_calls": len(trace.tool_calls),
-                "turns": trace.total_turns,
-                "elapsed_s": round(elapsed, 1),
-                "cost_usd": trace.cost_usd,
-                "judge_score": judge_score,
-            })
-        else:
-            failed += 1
-            results.append({
-                "id": tc.id,
-                "name": tc.name,
-                "status": "FAIL",
-                "score": rubric.score_pct,
-                "detail": rubric.summary(),
-                "critical_fail": rubric.critical_fail,
-                "tool_calls": len(trace.tool_calls),
-                "turns": trace.total_turns,
-                "elapsed_s": round(elapsed, 1),
-                "cost_usd": trace.cost_usd,
-                "judge_score": judge_score,
-            })
+            if output_file is not None:
+                trace_record = {
+                    **result,
+                    "prompt": tc.prompt,
+                    "tool_calls_full": trace.tool_calls,
+                    "assistant_text": trace.assistant_text,
+                    "simulated_user_exchanges": trace.simulated_user_exchanges,
+                    "rubric_report": rubric.report() if rubric else None,
+                    "error": trace.error,
+                }
+                async with output_lock:
+                    output_file.write(json.dumps(trace_record) + "\n")
+                    output_file.flush()
 
+            if not verbose:
+                completed[0] += 1
+                score_str = f"{result['score']}%" if result['score'] is not None else "—"
+                print(
+                    f"  [{completed[0]}/{len(cases)}] [{result['status']:>9}] "
+                    f"{tc.id:<8} {score_str:>6}  ({elapsed:.1f}s)",
+                    flush=True,
+                )
+
+    try:
+        await asyncio.gather(*[_run_one(i, tc) for i, tc in enumerate(cases)])
+    finally:
+        if output_file:
+            output_file.close()
+
+    # Aggregate — results is now fully populated in original case order.
+    final_results = [r for r in results if r is not None]
+    passed = sum(1 for r in final_results if r["status"] == "PASS")
+    failed = sum(1 for r in final_results if r["status"] == "FAIL")
+    errored = sum(1 for r in final_results if r["status"] == "ERROR")
+    skipped = sum(1 for r in final_results if r["status"] == "SKIP")
+    no_output = sum(1 for r in final_results if r["status"] == "NO_OUTPUT")
+
+    scored = passed + failed
     summary = {
-        "total": len(cases),
+        "total": len(final_results),
         "passed": passed,
         "failed": failed,
         "errored": errored,
-        "pass_rate": round(passed / (passed + failed) * 100, 1) if (passed + failed) > 0 else 0,
+        "skipped": skipped,
+        "no_output": no_output,
+        "pass_rate": round(passed / scored * 100, 1) if scored > 0 else 0,
         "model": model,
+        "concurrency": concurrency,
     }
 
-    return {"results": results, "summary": summary}
+    return {"results": final_results, "summary": summary}
 
 
 def print_agent_summary_table(eval_output: dict):
@@ -1404,37 +2108,55 @@ def print_agent_summary_table(eval_output: dict):
     results = eval_output["results"]
     summary = eval_output["summary"]
 
-    # Detect if any results have judge scores
     has_judge = any(r.get("judge_score") is not None for r in results)
 
-    width = 88 if has_judge else 80
+    width = 92 if has_judge else 84
     print(f"\n{'='*width}")
     print(f"AGENT EVALUATION RESULTS (model: {summary['model']})")
     print(f"{'='*width}")
 
     if has_judge:
-        print(f"{'ID':<8} {'Name':<35} {'Status':>6} {'Score':>7} {'Judge':>7} {'Tools':>5} {'Time':>6}")
+        print(
+            f"{'ID':<8} {'Name':<35} {'Status':>9} {'Score':>7} "
+            f"{'Judge':>7} {'Tools':>5} {'Time':>6}"
+        )
     else:
-        print(f"{'ID':<8} {'Name':<35} {'Status':>6} {'Score':>7} {'Tools':>5} {'Time':>6}")
+        print(
+            f"{'ID':<8} {'Name':<35} {'Status':>9} {'Score':>7} "
+            f"{'Tools':>5} {'Time':>6}"
+        )
     print(f"{'-'*width}")
 
     for r in results:
         score_str = f"{r['score']}%" if r['score'] is not None else "—"
         time_str = f"{r['elapsed_s']}s"
+        name_trunc = r['name'][:35]
         if has_judge:
             judge_str = f"{r['judge_score']}/5" if r.get('judge_score') is not None else "—"
-            print(f"{r['id']:<8} {r['name']:<35} {r['status']:>6} {score_str:>7} {judge_str:>7} {r['tool_calls']:>5} {time_str:>6}")
+            print(
+                f"{r['id']:<8} {name_trunc:<35} {r['status']:>9} {score_str:>7} "
+                f"{judge_str:>7} {r['tool_calls']:>5} {time_str:>6}"
+            )
         else:
-            print(f"{r['id']:<8} {r['name']:<35} {r['status']:>6} {score_str:>7} {r['tool_calls']:>5} {time_str:>6}")
+            print(
+                f"{r['id']:<8} {name_trunc:<35} {r['status']:>9} {score_str:>7} "
+                f"{r['tool_calls']:>5} {time_str:>6}"
+            )
 
     print(f"{'-'*width}")
-    print(
-        f"Total: {summary['total']}  |  "
-        f"Passed: {summary['passed']}  |  "
-        f"Failed: {summary['failed']}  |  "
-        f"Errors: {summary['errored']}  |  "
-        f"Pass Rate: {summary['pass_rate']}%"
-    )
+    parts = [
+        f"Total: {summary['total']}",
+        f"Passed: {summary['passed']}",
+        f"Failed: {summary['failed']}",
+    ]
+    if summary.get("errored"):
+        parts.append(f"Errors: {summary['errored']}")
+    if summary.get("skipped"):
+        parts.append(f"Skipped: {summary['skipped']}")
+    if summary.get("no_output"):
+        parts.append(f"NoOutput: {summary['no_output']}")
+    parts.append(f"Pass Rate: {summary['pass_rate']}%")
+    print("  |  ".join(parts))
     print(f"{'='*width}")
 
 
@@ -1442,13 +2164,25 @@ def print_agent_summary_table(eval_output: dict):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run end-to-end agent evaluations (Agent SDK)")
+    parser = argparse.ArgumentParser(
+        description="Run end-to-end agent evaluations (Agent SDK)"
+    )
     parser.add_argument("--case", type=str, help="Run a single test case by ID (e.g., A1-001)")
     parser.add_argument("--tag", type=str, help="Run cases matching this tag")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show full agent trace")
-    parser.add_argument("--json", action="store_true", help="Output results as JSON")
     parser.add_argument(
-        "--model", type=str, default="claude-opus-4-5-20251101",
+        "--filter", type=str,
+        help="Run cases whose ID starts with this prefix (e.g., P1-SP)",
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Show full agent trace",
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Output results as JSON to stdout",
+    )
+    parser.add_argument(
+        "--model", type=str, default="claude-opus-4-6",
         help="Model to use (default: opus)",
     )
     parser.add_argument(
@@ -1456,8 +2190,16 @@ def main():
         help="Enable LLM-as-judge grading (off by default to save cost)",
     )
     parser.add_argument(
-        "--judge-model", type=str, default="claude-sonnet-4-5-20250929",
+        "--judge-model", type=str, default="claude-sonnet-4-6",
         help="Model for LLM judge (default: sonnet)",
+    )
+    parser.add_argument(
+        "--parallel", "-j", type=int, default=1,
+        help="Max concurrent cases (default: 1, sequential). Try 4-8 for full suite.",
+    )
+    parser.add_argument(
+        "--output", "-o", type=Path,
+        help="Write full per-case traces as JSONL to this path",
     )
     args = parser.parse_args()
 
@@ -1465,6 +2207,18 @@ def main():
         print("Error: ANTHROPIC_API_KEY not set.", file=sys.stderr)
         print("Set it with: export ANTHROPIC_API_KEY=sk-ant-...", file=sys.stderr)
         sys.exit(1)
+
+    # Disable library write-back: evals should not pollute library/*.json.
+    # This is also a hard prerequisite for parallel execution (the library
+    # caching layer does unprotected read-modify-write on JSON files).
+    set_library_readonly(True)
+
+    if args.verbose and args.parallel > 1:
+        print(
+            "Warning: --verbose with --parallel>1 will interleave output across "
+            "cases. Consider --parallel 1 for readable traces.",
+            file=sys.stderr,
+        )
 
     # Select cases
     if args.case:
@@ -1476,6 +2230,8 @@ def main():
         cases = [tc]
     elif args.tag:
         cases = get_agent_cases_by_tag(args.tag)
+    elif args.filter:
+        cases = [c for c in AGENT_CASES if c.id.startswith(args.filter)]
     else:
         cases = AGENT_CASES
 
@@ -1484,11 +2240,17 @@ def main():
         sys.exit(1)
 
     judge_info = f", judge={args.judge_model}" if args.judge else ""
-    print(f"Running {len(cases)} agent eval case(s) with model {args.model}{judge_info}...")
+    parallel_info = f", parallel={args.parallel}" if args.parallel > 1 else ""
+    output_info = f", output={args.output}" if args.output else ""
+    print(
+        f"Running {len(cases)} agent eval case(s) with model "
+        f"{args.model}{judge_info}{parallel_info}{output_info}..."
+    )
 
     eval_output = asyncio.run(run_agent_eval_suite(
         cases, model=args.model, verbose=args.verbose,
         use_judge=args.judge, judge_model=args.judge_model,
+        concurrency=args.parallel, output_path=args.output,
     ))
 
     if args.json:

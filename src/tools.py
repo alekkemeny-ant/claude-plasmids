@@ -98,6 +98,20 @@ def _text(s: str) -> dict:
     return {"content": [{"type": "text", "text": s}]}
 
 
+# ── Sequence cache ──────────────────────────────────────────────────────
+# Stores full sequences fetched during a session so tools can reference
+# them by key without the model copying long strings verbatim.
+_sequence_cache: dict[str, str] = {}
+
+
+def _cache_sequence(key: str, sequence: str) -> None:
+    _sequence_cache[key] = sequence
+
+
+def _get_cached_sequence(key: str) -> Optional[str]:
+    return _sequence_cache.get(key)
+
+
 def _error(s: str) -> dict:
     return {"content": [{"type": "text", "text": s}], "is_error": True}
 
@@ -350,6 +364,8 @@ async def assemble_construct(args):
 
     bb_name = backbone_data["name"] if backbone_data else "custom"
     ins_name = insert_data["name"] if insert_data else "custom"
+    assembly_key = f"assembly:{bb_name}:{ins_name}"
+    _cache_sequence(assembly_key, result.sequence)
 
     out = f"Assembly Successful: {ins_name} in {bb_name}\n"
     out += f"Total size: {result.total_size_bp} bp\n"
@@ -361,7 +377,11 @@ async def assemble_construct(args):
     out += f"Reading frame ok: {'Yes' if result.insert_length_valid else 'No'}\n"
     if result.warnings:
         out += "Warnings:\n" + "\n".join(f"- {w}" for w in result.warnings) + "\n"
-    out += f"\nAssembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
+    out += (
+        f"\nAssembled sequence ({result.total_size_bp} bp) — cached as \"{assembly_key}\".\n"
+        f"To export, call export_construct with sequence_cache_key=\"{assembly_key}\" "
+        f"instead of copying the raw sequence."
+    )
     return _text(out)
 
 
@@ -371,7 +391,8 @@ async def assemble_construct(args):
     {
         "type": "object",
         "properties": {
-            "sequence": {"type": "string", "description": "Assembled construct DNA sequence"},
+            "sequence": {"type": "string", "description": "Assembled construct DNA sequence (omit if using sequence_cache_key)"},
+            "sequence_cache_key": {"type": "string", "description": "Cache key returned by get_addgene_plasmid or other tools — use this instead of copying long sequences verbatim"},
             "output_format": {"type": "string", "description": "Output format", "enum": ["raw", "fasta", "genbank"]},
             "construct_name": {"type": "string", "description": "Name for the construct", "default": "construct"},
             "backbone_name": {"type": "string", "description": "Backbone name for annotation", "default": ""},
@@ -379,12 +400,22 @@ async def assemble_construct(args):
             "insert_position": {"type": "integer", "description": "Insert start position", "default": 0},
             "insert_length": {"type": "integer", "description": "Insert length in bp", "default": 0},
             "reverse_complement_insert": {"type": "boolean", "description": "True if insert was inserted in reverse complement orientation", "default": False},
+            "linear": {"type": "boolean", "description": "Export as linear sequence (default: circular/plasmid)", "default": False},
         },
-        "required": ["sequence", "output_format"],
+        "required": ["output_format"],
     },
 )
 async def export_construct(args):
-    seq = clean_sequence(args["sequence"])
+    cache_key = args.get("sequence_cache_key")
+    if cache_key:
+        cached = _get_cached_sequence(cache_key)
+        if not cached:
+            return _error(f"No cached sequence found for key '{cache_key}'.")
+        seq = clean_sequence(cached)
+    elif args.get("sequence"):
+        seq = clean_sequence(args["sequence"])
+    else:
+        return _error("Provide either 'sequence' or 'sequence_cache_key'.")
     fmt = args["output_format"]
     cname = args.get("construct_name", "construct")
     bname = args.get("backbone_name", "")
@@ -554,11 +585,17 @@ async def get_addgene_plasmid(args):
     if not plasmid:
         return _text(f"Could not fetch Addgene #{args['addgene_id']}")
     _record("add_addgene_plasmid", plasmid.__dict__)
+    cache_key = f"addgene:{args['addgene_id']}"
     out = f"Addgene #{args['addgene_id']}: {plasmid.name}\n"
     out += f"Size: {plasmid.size_bp} bp\n"
     out += f"Resistance: {plasmid.bacterial_resistance}\n"
     if plasmid.sequence:
-        out += f"Sequence: {len(plasmid.sequence)} bp available"
+        _cache_sequence(cache_key, plasmid.sequence)
+        out += (
+            f"Sequence: {len(plasmid.sequence)} bp — cached as \"{cache_key}\".\n"
+            f"To export, call export_construct with sequence_cache_key=\"{cache_key}\" "
+            f"instead of copying the raw sequence."
+        )
     else:
         out += "Sequence: not available"
     return _text(out)

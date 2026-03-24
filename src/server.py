@@ -64,6 +64,7 @@ from .library import (
     format_backbone_summary,
     format_insert_summary,
     extract_insert_from_plasmid as _extract_insert_from_plasmid,
+    extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
 )
 
 logger = logging.getLogger(__name__)
@@ -1087,6 +1088,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=f"Fusion error: {str(e)}")]
 
     elif name == "extract_insert_from_plasmid":
+        breakpoint()
         result = _extract_insert_from_plasmid(
             plasmid_sequence=arguments["plasmid_sequence"],
             insert_name=arguments["insert_name"],
@@ -1100,6 +1102,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
             f"Source: {result['source']}\n\n"
             f"DNA Sequence:\n{seq}"
+        )
+        return [TextContent(type="text", text=output)]
+    elif name == "extract_inserts_from_plasmid":
+        result = _extract_inserts_from_plasmid(
+            plasmid_sequence=arguments["plasmid_sequence"],
+            insert_names=arguments["insert_names"],
+        )
+        if not result:
+            return [TextContent(type="text", text=f"Could not extract any of {arguments['insert_names']} from the provided plasmid sequence.")]
+        output = (
+            f"Extracted region spanning: {result['name']} ({result['size_bp']} bp)\n"
+            f"Source: {result['source']}\n\n"
+            f"DNA Sequence:\n{result['sequence']}"
         )
         return [TextContent(type="text", text=output)]
 

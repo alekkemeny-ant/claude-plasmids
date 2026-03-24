@@ -1151,6 +1151,7 @@ def format_as_genbank(
             insert_name=insert_name, insert_position=insert_position,
             insert_length=insert_length, features=features, linear=linear,
         )
+    
     df = annotate(sequence, linear=linear)
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,

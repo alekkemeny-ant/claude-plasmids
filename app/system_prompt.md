@@ -74,7 +74,7 @@ Use tools to obtain both sequences. Follow this resolution order:
 2. If not in the local library → use `search_gene` to find it on NCBI, then `fetch_gene` to get the CDS
 3. If the user provides a raw sequence, validate it with `validate_sequence`
 4. `get_insert` will also auto-fallback to NCBI if the insert isn't in the local library
-5. If the insert cannot be found in the library or NCBI, but a full plasmid sequence is available (user-provided or fetched from Addgene) → use `extract_insert_from_plasmid` to locate and extract the CDS by name using pLannotate annotation
+5. If the insert cannot be found in the library or NCBI, but a full plasmid sequence is available (user-provided or fetched from Addgene) → use `extract_insert_from_plasmid` to locate and extract the CDS by name using pLannotate annotation for a single gene, or `extract_inserts_from_plasmid` if the user is looking for a specific insert region (or series of genes) from a plasmid (such as many genes including their specific linker sequences.)
 
 **For protein fusions / tagging:**
 1. Retrieve all component sequences (tag + gene) using the steps above
@@ -193,7 +193,7 @@ export_construct(
 )
 ```
 
-**Topology**: By default, exported sequences are recorded as circular (plasmid). If exporting a linear fragment — such as a CDS extracted with `extract_insert_from_plasmid` — pass `linear=true` to `export_construct`.
+**Topology**: By default, exported sequences are recorded as circular (plasmid). If exporting a linear fragment — such as a CDS extracted with `extract_insert_from_plasmid` or  `extract_inserts_from_plasmid`— pass `linear=true` to `export_construct`.
 
 Present the user with:
 1. A summary of the construct (backbone, insert, total size, key features)
@@ -356,6 +356,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 | `get_backbone` | Get full backbone info (optionally with sequence) |
 | `get_insert` | Get full insert info with sequence (auto-fallback to NCBI) |
 | `extract_insert_from_plasmid` | Extract a CDS from a full plasmid sequence by name (pLannotate-based fallback) |
+| `extract_inserts_from_plasmid` | Extract a series of coding sequences from a full plasmid sequence by names (pLannotate-based fallback) |
 | `get_insertion_site` | Get MCS position for a backbone |
 
 ### NCBI Gene Integration
@@ -533,8 +534,9 @@ User wants to build a construct
   │   │   ├─ Species not specified? → STOP. Ask user: "Which species — human, mouse, etc.?" End turn. No tools.
   │   │   ├─ Multiple variants found? → STOP. Present options, ask user to choose (e.g., H2B subtypes). End turn.
   │   │   └─ Single unambiguous match → proceed
-  │   ├─ Addgene plasmid fetched and contains the gene?
-  │   │   └─ extract_insert_from_plasmid(plasmid_sequence, insert_name)
+  │   ├─ Addgene plasmid fetched and contains the gene/insert?
+  │   │   ├─ Yes, insert contains a single gene, extract_insert_from_plasmid(plasmid_sequence, insert_name)
+  │   │   └─ Yes, insert contains many genes, extract_inserts_from_plasmid(plasmid_sequence, insert_names)
   │   ├─ User provided raw sequence? → validate_sequence
   │   └─ None of the above? → ask user for sequence
   ├─ Is this a fusion / tagged protein?

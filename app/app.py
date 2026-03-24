@@ -94,6 +94,7 @@ from library import (
     format_backbone_summary,
     format_insert_summary,
     extract_insert_from_plasmid as _extract_insert_from_plasmid,
+    extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
     infer_species_from_cell_line,
 )
 
@@ -407,7 +408,7 @@ TOOLS = [
     {
         "name": "extract_insert_from_plasmid",
         "description": (
-            "Extract a CDS insert from a full plasmid sequence by name. "
+            "Extract a single CDS insert from a full plasmid sequence by name. "
             "Uses pLannotate to annotate the plasmid and locate the feature. "
             "Use this when an insert cannot be found in the local library or NCBI — "
             "for example, when the user provides a plasmid sequence or an Addgene plasmid "
@@ -416,12 +417,29 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within."},
+                "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by get_addgene_plasmid."},
                 "insert_name": {"type": "string", "description": "Name of the gene or feature to extract (case-insensitive)."},
-                "start": {"type": "integer", "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly."},
-                "end": {"type": "integer", "description": "0-based end coordinate (exclusive). If provided along with start, skips annotation and slices directly."},
+                "start": {"type": "integer", "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly. If start >= end the feature is treated as origin-spanning (wraps around position 0)."},
+                "end": {"type": "integer", "description": "0-based end coordinate (exclusive). Origin-spanning: if start >= end, extracts seq[start:] + seq[:end]."},
+                "strand": {"type": "integer", "description": "1 (forward, default) or -1 (reverse complement the extracted region). Only used with explicit start/end; inferred automatically when using pLannotate annotation.", "enum": [1, -1]},
             },
             "required": ["plasmid_sequence", "insert_name"],
+        },
+    },
+    {
+        "name": "extract_inserts_from_plasmid",
+        "description": (
+            "Extract multiple named CDS inserts from a full plasmid sequence in a single "
+            "pLannotate annotation pass, returning one contiguous sequence that spans all "
+            "requested features. Use when you need to pull a multi-gene region from the same plasmid."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by get_addgene_plasmid."},
+                "insert_names": {"type": "array", "items": {"type": "string"}, "description": "List of gene/feature names to extract (case-insensitive)."},
+            },
+            "required": ["plasmid_sequence", "insert_names"],
         },
     },
     {
@@ -1212,12 +1230,32 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"\n{_fmt_seq_for_agent(result['sequence'], 'CDS Sequence')}"
             return out
 
+        elif name == "extract_inserts_from_plasmid":
+            plasmid_seq = args["plasmid_sequence"]
+            if plasmid_seq in _sequence_cache:
+                plasmid_seq = _sequence_cache[plasmid_seq]
+            result = _extract_inserts_from_plasmid(
+                plasmid_sequence=plasmid_seq,
+                insert_names=args["insert_names"],
+            )
+            if not result:
+                return f"Could not extract any of {args['insert_names']} from the provided plasmid sequence."
+            return (
+                f"Extracted region spanning: {result['name']} ({result['size_bp']} bp)\n"
+                f"Source: {result['source']}\n\n"
+                f"DNA Sequence:\n{result['sequence']}"
+            )
+
         elif name == "extract_insert_from_plasmid":
+            plasmid_seq = args["plasmid_sequence"]
+            if plasmid_seq in _sequence_cache:
+                plasmid_seq = _sequence_cache[plasmid_seq]
             result = _extract_insert_from_plasmid(
-                plasmid_sequence=args["plasmid_sequence"],
+                plasmid_sequence=plasmid_seq,
                 insert_name=args["insert_name"],
                 start=args.get("start"),
                 end=args.get("end"),
+                strand=args.get("strand", 1),
             )
             if not result:
                 return f"Could not extract '{args['insert_name']}' from the provided plasmid sequence."

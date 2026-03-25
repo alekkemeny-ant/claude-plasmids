@@ -1505,6 +1505,40 @@ AGENT_CASES = [
         max_tool_calls=15,
         tags=["addgene", "export", "genbank", "whole_plasmid"],
     ),
+    AgentTestCase(
+        id="A10-003",
+        name="mCerulean-His transient overexpression in mammalian vector",
+        prompt=(
+            "Design a mammalian expression vector for transient overexpression of "
+            "mCerulean-His. Create a fresh design."
+        ),
+        description=(
+            "Agent must fetch mCerulean from Addgene (e.g. #27796), extract the CDS "
+            "without stop codon (717 bp), append a C-terminal His tag, and assemble "
+            "into a suitable mammalian backbone (e.g. pcDNA3.1(+)) at the MCS. "
+            "Key length check: mCerulean is 720 bp with stop codon, 717 bp without. "
+            "The 717 bp form is required for in-frame His-tag fusion. "
+            "Graded on transcript: correct insert length cited, His tag appended, "
+            "and assembly into a mammalian backbone confirmed."
+        ),
+        expected_backbone_id="pcDNA3.1(+)",
+        expected_insert_id="mCerulean",
+        grading_mode="transcript",
+        transcript_assertions=[
+            "mCerulean",   # correct insert identified
+            "717",         # mCerulean without stop codon for C-terminal fusion
+            "His",         # His tag appended
+            "pcDNA",       # mammalian backbone selected
+        ],
+        user_persona=(
+            "You want mCerulean with a C-terminal 6xHis tag for transient "
+            "overexpression in mammalian cells. pcDNA3.1(+) or any standard "
+            "mammalian expression vector is fine. Proceed when the design is presented."
+            "If the agent asks for the mCerulean sequence, tell it to look up a sequence from Addgene."
+        ),
+        max_tool_calls=25,
+        tags=["addgene", "extraction", "fusion", "mammalian", "his_tag"],
+    ),
 ]
 
 

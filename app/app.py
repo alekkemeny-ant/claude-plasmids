@@ -2056,6 +2056,15 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                 else:
                     safe_write({"type": "error", "content": "Rate limit exceeded after retries. Please try again later."})
                     break
+            except anthropic.InternalServerError:
+                if retry_attempt < max_retries:
+                    wait_time = 2 ** retry_attempt  # 1s, 2s, 4s
+                    safe_write({"type": "text_delta", "content": f"\n[Server error, retrying in {wait_time}s...]\n"})
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    safe_write({"type": "error", "content": "Anthropic API returned an internal server error after retries. Please try again."})
+                    break
             except Exception:
                 if is_cancelled() or disconnected:
                     break
@@ -4263,6 +4272,9 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 run_agent_turn_streaming(user_message, session_id, write_event, model=request_model)
             except anthropic.AuthenticationError:
                 write_event({"type": "error", "content": "Invalid or missing ANTHROPIC_API_KEY."})
+            except anthropic.APIStatusError as e:
+                logger.exception("Agent API error")
+                write_event({"type": "error", "content": f"Anthropic API error ({e.status_code}): {e.message}"})
             except Exception as e:
                 logger.exception("Agent error")
                 write_event({"type": "error", "content": str(e)})

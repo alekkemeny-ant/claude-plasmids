@@ -1437,6 +1437,74 @@ AGENT_CASES = [
             "with this setup. If the agent presents a design summary or asks to proceed, say 'Yes, proceed.'"
         ),
     ),
+
+    # ── A10: Insert extraction from Addgene plasmids ──────────────────
+    AgentTestCase(
+        id="A10-001",
+        name="Extract mCerulean CDS from Addgene #27796",
+        prompt=(
+            "Download the plasmid 27796 from addgene and extract the mCerulean "
+            "coding sequence"
+        ),
+        description=(
+            "Agent must fetch Addgene plasmid 27796, then call "
+            "extract_insert_from_plasmid to locate and return the mCerulean CDS. "
+            "No backbone assembly — the deliverable is the extracted insert sequence. "
+            "Expected sequence is 720 bp (mCerulean, a cyan FP). "
+            "Graded on transcript: agent must output the correct CDS."
+        ),
+        # Extraction-only: no backbone assembly. IDs are for bookkeeping only.
+        expected_backbone_id="addgene_27796",
+        expected_insert_id="mCerulean",
+        expected_insert_sequence=(
+            "ATGGTGAGCAAGGGCGAGGAGCTGTTCACCGGGGTGGTGCCCATCCTGGTCGAGCTGGACGGCGACGT"
+            "AAACGGCCACAAGTTCAGCGTGTCCGGCGAGGGCGAGGGCGATGCCACCTACGGCAAGCTGACCCTGAA"
+            "GTTCATCTGCACCACCGGCAAGCTGCCCGTGCCCTGGCCCACCCTCGTGACCACCCTGACCTGGGGCGT"
+            "GCAGTGCTTCGCCCGCTACCCCGACCACATGAAGCAGCACGACTTCTTCAAGTCCGCCATGCCCGAAGG"
+            "CTACGTCCAGGAGCGCACCATCTTCTTCAAGGACGACGGCAACTACAAGACCCGCGCCGAGGTGAAGTT"
+            "CGAGGGCGACACCCTGGTGAACCGCATCGAGCTGAAGGGCATCGACTTCAAGGAGGACGGCAACATCCT"
+            "GGGGCACAAGCTGGAGTACAACGCCATCAGCGACAACGTCTATATCACCGCCGACAAGCAGAAGAACGGC"
+            "ATCAAGGCCAACTTCAAGATCCGCCACAACATCGAGGACGGCAGCGTGCAGCTCGCCGACCACTACCAGC"
+            "AGAACACCCCCATCGGCGACGGCCCCGTGCTGCTGCCCGACAACCACTACCTGAGCACCCAGTCCAAGCT"
+            "GAGCAAAGACCCCAACGAGAAGCGCGATCACATGGTCCTGCTGGAGTTCGTGACCGCCGCCGGGATCACT"
+            "CTCGGCATGGACGAGCTGTACAAG"
+        ),
+        grading_mode="transcript",
+        transcript_assertions=[
+            "mCerulean",          # agent identifies the gene by name
+            "27796",              # agent fetched the correct Addgene plasmid
+            "ATGGTGAGCAAGGGCGAGGAG",  # first 22 bp of expected CDS
+            "720",                # correct insert length in bp
+        ],
+        max_tool_calls=20,
+        tags=["addgene", "extraction", "fluorescent_protein", "single_insert"],
+    ),
+    AgentTestCase(
+        id="A10-002",
+        name="Download Addgene #244170 and export as GenBank",
+        prompt="Download the plasmid 244170 and export as a genbank file",
+        description=(
+            "Agent must call get_addgene_plasmid(244170), then export_construct with "
+            "sequence_cache_key and output_format='genbank'. No assembly. "
+            "Graded on transcript: GenBank output must be non-empty and contain "
+            "expected feature annotations (mNeonGreen CDS, CMV promoter/enhancer, "
+            "f1 ori, EF-1α intron A, neo CDS) from pLannotate annotation of the "
+            "7792 bp PolyTX-mNeonGreen plasmid."
+        ),
+        expected_backbone_id="addgene_244170",
+        expected_insert_id="mNeonGreen",
+        grading_mode="transcript",
+        transcript_assertions=[
+            "244170",           # correct Addgene plasmid fetched
+            "FEATURES",         # GenBank format header present → file is non-empty
+            "mNeonGreen",       # key insert CDS annotated
+            "CMV",              # CMV promoter/enhancer annotated
+            "neo",              # neomycin resistance annotated
+            "f1 ori",           # f1 origin of replication annotated
+        ],
+        max_tool_calls=15,
+        tags=["addgene", "export", "genbank", "whole_plasmid"],
+    ),
 ]
 
 

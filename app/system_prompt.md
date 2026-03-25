@@ -180,8 +180,9 @@ Check the validation report. All Critical checks must pass. If any fail, diagnos
 
 ### Step 5: Export and Present
 
-Call `export_construct` to format the output:
+Call `export_construct` to format the output. Use `sequence=` for assembled constructs, or `sequence_cache_key=` when exporting a sequence fetched by `get_addgene_plasmid` (use the cache key it returns — do not copy the raw sequence):
 ```
+# Assembled construct:
 export_construct(
   sequence="<assembled sequence>",
   output_format="genbank",
@@ -190,6 +191,13 @@ export_construct(
   insert_name="EGFP",
   insert_position=895,
   insert_length=720
+)
+
+# Whole Addgene plasmid (no assembly):
+export_construct(
+  sequence_cache_key="addgene:244170",
+  output_format="genbank",
+  construct_name="L4312-IL10Rb"
 )
 ```
 
@@ -517,6 +525,10 @@ When a session has prior experimental outcomes logged (shown in your context as 
 ### Tool Routing Decision Tree
 
 ```
+User wants to download / export a plasmid as-is (no assembly)
+  ├─ Has Addgene ID? → get_addgene_plasmid(addgene_id) → export_construct(sequence_cache_key=..., output_format=...)
+  └─ User provided raw sequence? → export_construct(sequence=..., output_format=...)
+
 User wants to build a construct
   ├─ Is this a Golden Gate / MoClo / Type IIS assembly?
   │   ├─ Yes → follow Golden Gate Workflow (see ## Golden Gate Assembly section)

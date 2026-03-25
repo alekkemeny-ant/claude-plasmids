@@ -1156,7 +1156,6 @@ def extract_insert_from_plasmid(
     if conda_bin not in os.environ.get("PATH", ""):
         os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
 
-    breakpoint()
     try:
         df = annotate(plasmid_sequence, linear=False)
     except Exception as e:

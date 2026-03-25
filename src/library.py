@@ -14,8 +14,12 @@ from pathlib import Path
 from typing import Optional
 import os, sys
 
-from assembler import reverse_complement as rc  
-from assembler import validate_dna
+try:
+    from assembler import reverse_complement as rc
+    from assembler import validate_dna
+except ModuleNotFoundError:
+    from src.assembler import reverse_complement as rc
+    from src.assembler import validate_dna
 
 # Library path
 LIBRARY_PATH = Path(__file__).parent.parent / "library"

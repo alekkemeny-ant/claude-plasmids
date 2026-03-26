@@ -12,6 +12,14 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
+import os, sys
+
+try:
+    from assembler import reverse_complement as rc
+    from assembler import validate_dna
+except ModuleNotFoundError:
+    from src.assembler import reverse_complement as rc
+    from src.assembler import validate_dna
 
 # Library path
 LIBRARY_PATH = Path(__file__).parent.parent / "library"
@@ -951,4 +959,252 @@ def search_all_sources(
                     results["errors"][name] = f"timed out after {timeout}s"
                     logger.warning(f"Concurrent search ({name}) timed out after {timeout}s")
 
-    return results
+
+def _extract_circular_region(seq: str, start: int, end: int) -> str:
+    """Extract a region from a circular sequence, handling origin-spanning coords.
+
+    If start < end, returns seq[start:end] (normal case).
+    If start >= end, the feature wraps around position 0: returns seq[start:] + seq[:end].
+    """
+    if start < end:
+        return seq[start:end]
+    return seq[start:] + seq[:end]
+
+def _extract_insert_coordinates(df, insert_name):
+    """Return (qstart, qend, strand) for the best match of insert_name in df.
+
+    Always returns raw pLannotate coordinates (qstart < qend not guaranteed for
+    origin-spanning features). Raises ValueError if no match found.
+    """
+    exact = df[df["Feature"].str.lower() == insert_name]
+    match = exact if not exact.empty else df[df["Feature"].str.lower().str.contains(insert_name, na=False)]
+
+    if match.empty:
+        available = df["Feature"].tolist()
+        raise ValueError(
+            f"No feature matching '{insert_name}' found in pLannotate annotations. "
+            f"Available: {available}"
+        )
+
+    row = match.iloc[0]
+    qstart = int(row["qstart"])
+    qend = int(row["qend"])
+    strand = int(row["sframe"])
+    return qstart, qend, strand
+
+def extract_inserts_from_plasmid(plasmid_sequence: str, insert_names: list) -> list:
+    """Extract multiple named CDS inserts from a plasmid using pLannotate.
+
+    Runs a single pLannotate annotation pass and extracts all requested features,
+    handling origin-spanning and reverse-strand features automatically.
+
+    Args:
+        plasmid_sequence: Full plasmid DNA sequence string.
+        insert_names: List of gene/feature names to extract (case-insensitive).
+
+    Returns:
+        List of insert dicts (id, name, sequence, size_bp, source) for each
+        successfully matched feature. Features not found are omitted.
+    """
+    plasmid_sequence = re.sub(r'\s', '', plasmid_sequence.upper())
+
+    invalid_chars = set(plasmid_sequence) - set("ACGTN")
+    if invalid_chars or len(plasmid_sequence) < 10:
+        raise ValueError(
+            f"plasmid_sequence does not look like a DNA sequence "
+            f"(length={len(plasmid_sequence)}, unexpected chars: {sorted(invalid_chars)}). "
+            f"If you passed a cache key, resolve it to a sequence first."
+        )
+
+    try:
+        from plannotate.annotate import annotate
+    except ImportError:
+        logger.error(
+            "pLannotate is not installed. Cannot annotate plasmid to extract inserts. "
+            "Run: conda install -c bioconda plannotate"
+        )
+        return []
+
+ 
+    conda_bin = str(Path(sys.executable).parent)
+    if conda_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
+
+    def _rc(seq: str) -> str:
+        comp = str.maketrans("ACGTN", "TGCAN")
+        return seq.translate(comp)[::-1]
+
+    try:
+        df = annotate(plasmid_sequence, linear=False)
+    except Exception as e:
+        logger.error(f"extract_inserts_from_plasmid: pLannotate annotation failed: {e}")
+        raise RuntimeError(f"pLannotate failed to annotate the plasmid sequence: {e}") from e
+
+    if df.empty:
+        logger.info("extract_inserts_from_plasmid: pLannotate found no features in plasmid")
+        return []
+
+    # Use first and last gene in the ordered list to bound the region
+    first_insert = insert_names[0].lower()
+    last_insert = insert_names[-1].lower()
+
+    start_1, end_1, strand_1 = _extract_insert_coordinates(df, first_insert)
+    start_2, end_2, strand_2 = _extract_insert_coordinates(df, last_insert)
+
+    # Determine strand from first gene (both genes should agree)
+    is_reverse = strand_1 < 0
+
+    # Select region boundaries based on strand:
+    # Forward: region_start = first_gene.qstart (5′ end), region_end = last_gene.qend (3′ end)
+    # Reverse: region_start = last_gene.qstart (3′ on forward = 5′ on reverse),
+    #          region_end = first_gene.qend (5′ on forward = 3′ on reverse)
+    # Origin-spanning is auto-detected: region_start > region_end
+    if is_reverse:
+        region_start = start_2  # last gene's qstart
+        region_end = end_1      # first gene's qend
+    else:
+        region_start = start_1  # first gene's qstart
+        region_end = end_2      # last gene's qend
+
+    seq = _extract_circular_region(plasmid_sequence, region_start, region_end)
+    if is_reverse:
+        seq = _rc(seq)
+
+    logger.debug(
+        f"extract_inserts_from_plasmid: spanning region [{region_start}:{region_end}] "
+        f"covering {insert_names}, strand={strand_1}, size={len(seq)} bp"
+    )
+
+    return {
+        "id": "_".join(insert_names),
+        "name": ", ".join(insert_names),
+        "sequence": seq,
+        "size_bp": len(seq),
+        "source": "extracted_from_plasmid",
+    }
+
+
+def extract_insert_from_plasmid(
+    plasmid_sequence: str,
+    insert_name: str,
+    start: Optional[int] = None,
+    end: Optional[int] = None,
+    strand: int = 1,
+) -> Optional[dict]:
+    """Extract an insert CDS from a plasmid sequence.
+
+    Handles two cases automatically:
+    - Origin-spanning features: start >= end means the feature wraps around
+      position 0 (e.g. start=950, end=100 in a 1000 bp plasmid extracts
+      seq[950:] + seq[:100]).
+    - Reverse-complement features: strand=-1 reverse-complements the extracted
+      region so the returned sequence is in 5'→3' coding orientation.
+
+    If start and end are provided, slices directly at those coordinates.
+    Otherwise, runs pLannotate to annotate the plasmid and finds the feature
+    whose name best matches insert_name (strand and wraparound are inferred
+    automatically from the annotation).
+
+    Args:
+        plasmid_sequence: Full plasmid DNA sequence string.
+        insert_name: Name of the gene/feature to extract (case-insensitive).
+        start: 0-based start coordinate (optional, skips annotation if given).
+        end: 0-based end coordinate, exclusive (optional).
+              If start >= end, the region is treated as origin-spanning.
+        strand: 1 (default, forward) or -1 (reverse complement the result).
+
+    Returns:
+        Insert dict with keys id, name, sequence, size_bp, source — or None if
+        not found.
+    """
+    plasmid_sequence = re.sub(r'\s', '', plasmid_sequence.upper())
+
+    # Guard: reject anything that isn't a DNA sequence (e.g. a cache key string)
+    dna_is_valid, errors = validate_dna(plasmid_sequence)
+    if not dna_is_valid:
+        raise ValueError(
+            f"plasmid_sequence does not look like a DNA sequence "
+            f"(length={len(plasmid_sequence)}, unexpected chars: {sorted(e)}). "
+            f"If you passed a cache key, resolve it to a sequence first."
+        )
+
+    # ── Explicit coordinates: slice directly ──────────────────────────────
+    if start is not None and end is not None:
+        seq = _extract_circular_region(plasmid_sequence, start, end)
+        if not seq:
+            logger.warning(f"extract_insert_from_plasmid: empty slice [{start}:{end}]")
+            return None
+        if strand == -1:
+            seq = _rc(seq)
+        return {
+            "id": insert_name,
+            "name": insert_name,
+            "sequence": seq,
+            "size_bp": len(seq),
+            "source": "extracted_from_plasmid",
+        }
+
+    # ── pLannotate annotation: find feature by name ───────────────────────
+    try:
+        from plannotate.annotate import annotate
+    except ImportError:
+        logger.error(
+            "pLannotate is not installed. Cannot annotate plasmid to extract insert. "
+            "Run: conda install -c bioconda plannotate"
+        )
+        return None
+
+    # Ensure conda env bin dir is on PATH so pLannotate can find blastn/cmscan
+    import os, sys
+    conda_bin = str(Path(sys.executable).parent)
+    if conda_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
+
+    try:
+        df = annotate(plasmid_sequence, linear=False)
+    except Exception as e:
+        logger.error(f"extract_insert_from_plasmid: pLannotate annotation failed: {e}")
+        raise RuntimeError(f"pLannotate failed to annotate the plasmid sequence: {e}") from e
+
+    if df.empty:
+        logger.info(f"extract_insert_from_plasmid: pLannotate found no features in plasmid")
+        return None
+
+    # Case-insensitive match: prefer exact, then partial
+    name_lower = insert_name.lower()
+    exact = df[df["Feature"].str.lower() == name_lower]
+    match = exact if not exact.empty else df[df["Feature"].str.lower().str.contains(name_lower, na=False)]
+
+    if match.empty:
+        logger.info(
+            f"extract_insert_from_plasmid: no feature matching '{insert_name}' found. "
+            f"Available: {df['Feature'].tolist()}"
+        )
+        return None
+
+    # Use the highest-scoring (first) match
+    row = match.iloc[0]
+
+    # Re-extract from the plasmid using qstart/qend so we handle origin-spanning
+    # features correctly (qstart > qend means the feature wraps around position 0).
+    # qseq from BLAST already handles this, but we rebuild explicitly for clarity.
+    seq = _extract_circular_region(plasmid_sequence, int(row["qstart"]), int(row["qend"]))
+
+    # sframe < 0 means the feature is on the reverse strand — RC to coding orientation.
+    if int(row["sframe"]) < 0:
+        seq = _rc(seq)
+        logger.debug(f"extract_insert_from_plasmid: reverse-complemented '{insert_name}' (sframe={row['sframe']})")
+
+    logger.debug(
+        f"extract_insert_from_plasmid: extracted '{insert_name}' "
+        f"qstart={row['qstart']} qend={row['qend']} sframe={row['sframe']} "
+        f"origin_spanning={int(row['qstart']) >= int(row['qend'])} size={len(seq)} bp"
+    )
+
+    return {
+        "id": insert_name,
+        "name": str(row["Feature"]),
+        "sequence": seq,
+        "size_bp": len(seq),
+        "source": "extracted_from_plasmid",
+    }

@@ -8,8 +8,11 @@ on verified sequences.
 """
 
 import logging
+import os
 import re
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 import io
 from typing import Optional
 from Bio import SeqIO
@@ -1090,13 +1093,14 @@ def _build_annotated_record(
     insert_position: int,
     insert_length: int,
     reverse_complement_insert: bool,
+    linear: bool = False,
 ):
     """Build a BioPython SeqRecord from a pLannotate df, adding the insert feature if needed."""
     if not _PLANNOTATE_AVAILABLE:
         raise RuntimeError(_PLANNOTATE_MISSING_MSG)
-    record = get_seq_record(df, sequence, is_linear=False)
+    record = get_seq_record(df, sequence, is_linear=linear)
     record.annotations["molecule_type"] = "DNA"
-    record.annotations["topology"] = "circular"
+    record.annotations["topology"] = "linear" if linear else "circular"
 
     locus_name = re.sub(r'[^A-Za-z0-9_\-]', '_', name)[:16]
     record.name = locus_name
@@ -1133,6 +1137,7 @@ def format_as_genbank(
     insert_length: int = 0,
     reverse_complement_insert: bool = False,
     features: Optional[list[dict]] = None,
+    linear: bool = False,
 ) -> str:
     """Format an assembled construct as a GenBank flat file.
 
@@ -1144,12 +1149,13 @@ def format_as_genbank(
         return _format_as_genbank_fallback(
             sequence=sequence, name=name, backbone_name=backbone_name,
             insert_name=insert_name, insert_position=insert_position,
-            insert_length=insert_length, features=features,
+            insert_length=insert_length, features=features, linear=linear,
         )
-    df = annotate(sequence, linear=False)
+    
+    df = annotate(sequence, linear=linear)
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,
-        insert_position, insert_length, reverse_complement_insert,
+        insert_position, insert_length, reverse_complement_insert, linear=linear,
     )
     handle = io.StringIO()
     SeqIO.write(record, handle, "genbank")
@@ -1164,6 +1170,7 @@ def _format_as_genbank_fallback(
     insert_position: int = 0,
     insert_length: int = 0,
     features: Optional[list[dict]] = None,
+    linear: bool = False,
 ) -> str:
     """Minimal GenBank writer for environments without pLannotate.
 
@@ -1178,7 +1185,7 @@ def _format_as_genbank_fallback(
 
     # LOCUS line
     lines.append(
-        f"LOCUS       {locus_name:<16} {total_len:>5} bp    DNA     circular   UNK"
+        f"LOCUS       {locus_name:<16} {total_len:>5} bp    DNA     {'linear  ' if linear else 'circular'}   UNK"
     )
 
     # DEFINITION
@@ -1243,9 +1250,9 @@ def get_plasmid_plot_json(df, linear: bool = False) -> str:
         raise RuntimeError(_PLANNOTATE_MISSING_MSG)
     plot = get_bokeh(df, linear=linear)
     plot.plot_width = 600
-    plot.plot_height = 600
+    plot.plot_height = 200 if linear else 600
     plot.sizing_mode = "stretch_width"
-    return json.dumps(json_item(plot))
+    return json.dumps({"plot": json_item(plot), "linear": linear})
 
 
 def export_genbank_with_plot(
@@ -1256,6 +1263,7 @@ def export_genbank_with_plot(
     insert_position: int = 0,
     insert_length: int = 0,
     reverse_complement_insert: bool = False,
+    linear: bool = False,
 ) -> tuple[str, str]:
     """Annotate a sequence, returning both a GenBank string and a Bokeh plot JSON.
 
@@ -1266,15 +1274,15 @@ def export_genbank_with_plot(
     """
     if not _PLANNOTATE_AVAILABLE:
         raise RuntimeError(_PLANNOTATE_MISSING_MSG)
-    df = annotate(sequence, linear=False)
+    df = annotate(sequence, linear=linear)
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,
-        insert_position, insert_length, reverse_complement_insert,
+        insert_position, insert_length, reverse_complement_insert, linear=linear,
     )
     handle = io.StringIO()
     SeqIO.write(record, handle, "genbank")
     gbk = handle.getvalue()
-    plot_json = get_plasmid_plot_json(df, linear=False)
+    plot_json = get_plasmid_plot_json(df, linear=linear)
     return gbk, plot_json
 
 

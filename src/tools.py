@@ -33,6 +33,8 @@ from .library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    extract_insert_from_plasmid as _extract_insert_from_plasmid,
+    extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
     infer_species_from_cell_line,
 )
 from .assembler import (
@@ -151,6 +153,20 @@ def _record(method_name: str, *args, **kwargs) -> None:
 def _text(s: str) -> dict:
     """Helper to build a tool result."""
     return {"content": [{"type": "text", "text": s}]}
+
+
+# ── Sequence cache ──────────────────────────────────────────────────────
+# Stores full sequences fetched during a session so tools can reference
+# them by key without the model copying long strings verbatim.
+_sequence_cache: dict[str, str] = {}
+
+
+def _cache_sequence(key: str, sequence: str) -> None:
+    _sequence_cache[key] = sequence
+
+
+def _get_cached_sequence(key: str) -> Optional[str]:
+    return _sequence_cache.get(key)
 
 
 def _error(s: str) -> dict:
@@ -294,6 +310,71 @@ async def get_insert(args):
 
 
 @tool(
+    "extract_insert_from_plasmid",
+    "Extract a single CDS insert from a full plasmid sequence by name. Uses pLannotate to annotate the plasmid and locate the feature. Use this when an insert cannot be found in the local library or NCBI — for example, when the user provides a plasmid sequence or an Addgene plasmid has been fetched and contains the gene of interest.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by get_addgene_plasmid."},
+            "insert_name": {"type": "string", "description": "Name of the gene or feature to extract (case-insensitive)."},
+            "start": {"type": "integer", "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly. If start >= end the feature is treated as origin-spanning (wraps around position 0)."},
+            "end": {"type": "integer", "description": "0-based end coordinate (exclusive). Origin-spanning: if start >= end, extracts seq[start:] + seq[:end]."},
+            "strand": {"type": "integer", "description": "1 (forward, default) or -1 (reverse complement the extracted region). Only used with explicit start/end; inferred automatically when using pLannotate annotation.", "enum": [1, -1]},
+        },
+        "required": ["plasmid_sequence", "insert_name"],
+    },
+)
+async def extract_insert_from_plasmid_tool(args):
+    plasmid_seq = args["plasmid_sequence"]
+    if plasmid_seq in _sequence_cache:
+        plasmid_seq = _sequence_cache[plasmid_seq]
+    result = _extract_insert_from_plasmid(
+        plasmid_sequence=plasmid_seq,
+        insert_name=args["insert_name"],
+        start=args.get("start"),
+        end=args.get("end"),
+        strand=args.get("strand", 1),
+    )
+    if not result:
+        return _text(f"Could not extract '{args['insert_name']}' from the provided plasmid sequence.")
+    seq = result["sequence"]
+    return _text(
+        f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
+        f"Source: {result['source']}\n\n"
+        f"DNA Sequence:\n{seq}"
+    )
+
+
+@tool(
+    "extract_inserts_from_plasmid",
+    "Extract multiple named CDS inserts from a full plasmid sequence in a single pLannotate annotation pass. Use when you need to pull several genes out of the same plasmid.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by get_addgene_plasmid."},
+            "insert_names": {"type": "array", "items": {"type": "string"}, "description": "List of gene/feature names to extract (case-insensitive)."},
+        },
+        "required": ["plasmid_sequence", "insert_names"],
+    },
+)
+async def extract_inserts_from_plasmid_tool(args):
+    plasmid_seq = args["plasmid_sequence"]
+    if plasmid_seq in _sequence_cache:
+        plasmid_seq = _sequence_cache[plasmid_seq]
+    result = _extract_inserts_from_plasmid(
+        plasmid_sequence=plasmid_seq,
+        insert_names=args["insert_names"],
+    )
+    if not result:
+        return _text(f"Could not extract any of {args['insert_names']} from the provided plasmid sequence.")
+    return _text(
+        f"Extracted region spanning: {result['name']} ({result['size_bp']} bp)\n"
+        f"Source: {result['source']}\n\n"
+        f"DNA Sequence:\n{result['sequence']}"
+    )
+
+
+@tool(
     "list_all_backbones",
     "List all available backbone plasmids in the library.",
     {"type": "object", "properties": {}},
@@ -429,6 +510,8 @@ async def assemble_construct(args):
 
     bb_name = backbone_data["name"] if backbone_data else "custom"
     ins_name = insert_data["name"] if insert_data else "custom"
+    assembly_key = f"assembly:{bb_name}:{ins_name}"
+    _cache_sequence(assembly_key, result.sequence)
 
     out = f"Assembly Successful: {ins_name} in {bb_name}\n"
     out += f"Total size: {result.total_size_bp} bp\n"
@@ -440,7 +523,11 @@ async def assemble_construct(args):
     out += f"Reading frame ok: {'Yes' if result.insert_length_valid else 'No'}\n"
     if result.warnings:
         out += "Warnings:\n" + "\n".join(f"- {w}" for w in result.warnings) + "\n"
-    out += f"\nAssembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
+    out += (
+        f"\nAssembled sequence ({result.total_size_bp} bp) — cached as \"{assembly_key}\".\n"
+        f"To export, call export_construct with sequence_cache_key=\"{assembly_key}\" "
+        f"instead of copying the raw sequence."
+    )
     return _text(out)
 
 
@@ -450,7 +537,8 @@ async def assemble_construct(args):
     {
         "type": "object",
         "properties": {
-            "sequence": {"type": "string", "description": "Assembled construct DNA sequence"},
+            "sequence": {"type": "string", "description": "Assembled construct DNA sequence (omit if using sequence_cache_key)"},
+            "sequence_cache_key": {"type": "string", "description": "Cache key returned by get_addgene_plasmid or other tools — use this instead of copying long sequences verbatim"},
             "output_format": {"type": "string", "description": "Output format", "enum": ["raw", "fasta", "genbank"]},
             "construct_name": {"type": "string", "description": "Name for the construct", "default": "construct"},
             "backbone_name": {"type": "string", "description": "Backbone name for annotation", "default": ""},
@@ -458,12 +546,22 @@ async def assemble_construct(args):
             "insert_position": {"type": "integer", "description": "Insert start position", "default": 0},
             "insert_length": {"type": "integer", "description": "Insert length in bp", "default": 0},
             "reverse_complement_insert": {"type": "boolean", "description": "True if insert was inserted in reverse complement orientation", "default": False},
+            "linear": {"type": "boolean", "description": "Export as linear sequence (default: circular/plasmid)", "default": False},
         },
-        "required": ["sequence", "output_format"],
+        "required": ["output_format"],
     },
 )
 async def export_construct(args):
-    seq = clean_sequence(args["sequence"])
+    cache_key = args.get("sequence_cache_key")
+    if cache_key:
+        cached = _get_cached_sequence(cache_key)
+        if not cached:
+            return _error(f"No cached sequence found for key '{cache_key}'.")
+        seq = clean_sequence(cached)
+    elif args.get("sequence"):
+        seq = clean_sequence(args["sequence"])
+    else:
+        return _error("Provide either 'sequence' or 'sequence_cache_key'.")
     fmt = args["output_format"]
     cname = args.get("construct_name", "construct")
     bname = args.get("backbone_name", "")
@@ -633,11 +731,17 @@ async def get_addgene_plasmid(args):
     if not plasmid:
         return _text(f"Could not fetch Addgene #{args['addgene_id']}")
     _record("add_addgene_plasmid", plasmid.__dict__)
+    cache_key = f"addgene:{args['addgene_id']}"
     out = f"Addgene #{args['addgene_id']}: {plasmid.name}\n"
     out += f"Size: {plasmid.size_bp} bp\n"
     out += f"Resistance: {plasmid.bacterial_resistance}\n"
     if plasmid.sequence:
-        out += f"Sequence: {len(plasmid.sequence)} bp available"
+        _cache_sequence(cache_key, plasmid.sequence)
+        out += (
+            f"Sequence: {len(plasmid.sequence)} bp — cached as \"{cache_key}\".\n"
+            f"To export, call export_construct with sequence_cache_key=\"{cache_key}\" "
+            f"instead of copying the raw sequence."
+        )
     else:
         out += "Sequence: not available"
     return _text(out)
@@ -1347,6 +1451,8 @@ ALL_TOOLS = [
     fetch_gene_tool,
     get_cell_line_info_tool,
     fuse_inserts_tool,
+    extract_insert_from_plasmid_tool,
+    extract_inserts_from_plasmid_tool,
     # Phase-2 advanced design tools
     score_construct_confidence_tool,
     predict_fusion_sites_tool,

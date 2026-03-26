@@ -65,6 +65,10 @@ def _get_last_plot_json() -> Optional[str]:
 def _set_last_plot_json(val: Optional[str]):
     _thread_local.last_plot_json = val
 
+# Sequence cache — keyed strings so the model can reference sequences by key
+# instead of copying long DNA strings verbatim between tool calls.
+_sequence_cache: dict[str, str] = {}
+
 try:
     from ncbi_integration import (
         search_gene as _search_gene_fn,
@@ -89,6 +93,8 @@ from library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    extract_insert_from_plasmid as _extract_insert_from_plasmid,
+    extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
     infer_species_from_cell_line,
 )
 
@@ -270,7 +276,8 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "sequence": {"type": "string", "description": "Assembled construct DNA sequence"},
+                "sequence": {"type": "string", "description": "Assembled construct DNA sequence (omit if using sequence_cache_key)"},
+                "sequence_cache_key": {"type": "string", "description": "Cache key returned by get_addgene_plasmid or other tools — use this instead of copying long sequences verbatim"},
                 "output_format": {"type": "string", "description": "Output format", "enum": ["raw", "fasta", "genbank"]},
                 "construct_name": {"type": "string", "description": "Name for the construct", "default": "construct"},
                 "backbone_name": {"type": "string", "description": "Backbone name for annotation", "default": ""},
@@ -278,8 +285,9 @@ TOOLS = [
                 "insert_position": {"type": "integer", "description": "Insert start position", "default": 0},
                 "insert_length": {"type": "integer", "description": "Insert length in bp", "default": 0},
                 "reverse_complement_insert": {"type": "boolean", "description": "True if insert was inserted in reverse complement orientation", "default": False},
+                "linear": {"type": "boolean", "description": "Set to true for linear DNA fragments (e.g. extracted inserts). Defaults to false (circular plasmid).", "default": False},
             },
-            "required": ["sequence", "output_format"],
+            "required": ["output_format"],
         },
     },
     {
@@ -395,6 +403,43 @@ TOOLS = [
                 "gene_symbol": {"type": "string", "description": "Gene symbol (e.g., 'TP53')"},
                 "organism": {"type": "string", "description": "Organism (e.g., 'human', 'mouse')"},
             },
+        },
+    },
+    {
+        "name": "extract_insert_from_plasmid",
+        "description": (
+            "Extract a single CDS insert from a full plasmid sequence by name. "
+            "Uses pLannotate to annotate the plasmid and locate the feature. "
+            "Use this when an insert cannot be found in the local library or NCBI — "
+            "for example, when the user provides a plasmid sequence or an Addgene plasmid "
+            "has been fetched and contains the gene of interest."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by get_addgene_plasmid."},
+                "insert_name": {"type": "string", "description": "Name of the gene or feature to extract (case-insensitive)."},
+                "start": {"type": "integer", "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly. If start >= end the feature is treated as origin-spanning (wraps around position 0)."},
+                "end": {"type": "integer", "description": "0-based end coordinate (exclusive). Origin-spanning: if start >= end, extracts seq[start:] + seq[:end]."},
+                "strand": {"type": "integer", "description": "1 (forward, default) or -1 (reverse complement the extracted region). Only used with explicit start/end; inferred automatically when using pLannotate annotation.", "enum": [1, -1]},
+            },
+            "required": ["plasmid_sequence", "insert_name"],
+        },
+    },
+    {
+        "name": "extract_inserts_from_plasmid",
+        "description": (
+            "Extract multiple named CDS inserts from a full plasmid sequence in a single "
+            "pLannotate annotation pass, returning one contiguous sequence that spans all "
+            "requested features. Use when you need to pull a multi-gene region from the same plasmid."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by get_addgene_plasmid."},
+                "insert_names": {"type": "array", "items": {"type": "string"}, "description": "List of gene/feature names to extract (case-insensitive)."},
+            },
+            "required": ["plasmid_sequence", "insert_names"],
         },
     },
     {
@@ -835,6 +880,8 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             bb_name = backbone_data["name"] if backbone_data else "custom"
             ins_name = insert_data["name"] if insert_data else "custom"
 
+            assembly_key = f"assembly:{bb_name}:{ins_name}"
+            _sequence_cache[assembly_key] = result.sequence
             out = f"Assembly Successful: {ins_name} in {bb_name}\n"
             out += f"Total size: {result.total_size_bp} bp\n"
             out += f"Insert position: {result.insert_position}\n"
@@ -845,14 +892,25 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"Reading frame ok: {'Yes' if result.insert_length_valid else 'No'}\n"
             if result.warnings:
                 out += "Warnings:\n" + "\n".join(f"- {w}" for w in result.warnings) + "\n"
-            # NOTE: full sequence is required here — the agent passes it to
-            # validate_construct and export_construct. Do not truncate.
-            out += f"\nAssembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
+            out += (
+                f"\nAssembled sequence ({result.total_size_bp} bp) — cached as \"{assembly_key}\".\n"
+                f"To export, call export_construct with sequence_cache_key=\"{assembly_key}\" "
+                f"instead of copying the raw sequence."
+            )
             return out
 
         elif name == "export_construct":
             _set_last_plot_json(None)
-            seq = clean_sequence(args["sequence"])
+            cache_key = args.get("sequence_cache_key")
+            if cache_key:
+                raw = _sequence_cache.get(cache_key)
+                if not raw:
+                    return f"No cached sequence for key '{cache_key}'."
+                seq = clean_sequence(raw)
+            elif args.get("sequence"):
+                seq = clean_sequence(args["sequence"])
+            else:
+                return "Provide either 'sequence' or 'sequence_cache_key'."
             fmt = args["output_format"]
             cname = args.get("construct_name", "construct")
             bname = args.get("backbone_name", "")
@@ -860,6 +918,7 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             ipos = args.get("insert_position", 0)
             ilen = args.get("insert_length", 0)
             rc_insert = args.get("reverse_complement_insert", False)
+            linear = args.get("linear", False)
 
             if fmt == "raw":
                 return seq
@@ -874,9 +933,10 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                     gbk, plot_json = export_genbank_with_plot(
                         sequence=seq, name=cname, backbone_name=bname,
                         insert_name=iname, insert_position=ipos, insert_length=ilen,
-                        reverse_complement_insert=rc_insert,
+                        reverse_complement_insert=rc_insert, linear=linear,
                     )
-                    _set_last_plot_json(plot_json)
+                    if not linear:
+                        _set_last_plot_json(plot_json)
                     return gbk
                 except RuntimeError as e:
                     logger.info(
@@ -1064,17 +1124,17 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 return f"Could not fetch Addgene #{args['addgene_id']}"
             if tracker:
                 tracker.add_addgene_plasmid(plasmid.__dict__)
+            cache_key = f"addgene:{args['addgene_id']}"
             out = f"Addgene #{args['addgene_id']}: {plasmid.name}\n"
             out += f"Size: {plasmid.size_bp} bp\n"
             out += f"Resistance: {plasmid.bacterial_resistance}\n"
             if plasmid.sequence:
-                out += f"Sequence: {len(plasmid.sequence)} bp available\n"
-                # If explicitly requested, include the full sequence text so the
-                # agent can pass it directly to assemble_construct.
-                if args.get("include_sequence", False):
-                    out += f"\nSequence ({len(plasmid.sequence)} bp):\n{plasmid.sequence}"
-                else:
-                    out += "(Use get_backbone or import_addgene_to_library to make it available by ID, or set include_sequence=true to retrieve raw text.)"
+                _sequence_cache[cache_key] = plasmid.sequence
+                out += (
+                    f"Sequence: {len(plasmid.sequence)} bp — cached as \"{cache_key}\".\n"
+                    f"To export, call export_construct with sequence_cache_key=\"{cache_key}\" "
+                    f"instead of copying the raw sequence."
+                )
             else:
                 out += "Sequence: not available (Addgene may require login for this plasmid's depositor sequence)"
             return out
@@ -1169,6 +1229,41 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
             out += f"CDS length: {result['length']} bp\n"
             out += f"\n{_fmt_seq_for_agent(result['sequence'], 'CDS Sequence')}"
             return out
+
+        elif name == "extract_inserts_from_plasmid":
+            plasmid_seq = args["plasmid_sequence"]
+            if plasmid_seq in _sequence_cache:
+                plasmid_seq = _sequence_cache[plasmid_seq]
+            result = _extract_inserts_from_plasmid(
+                plasmid_sequence=plasmid_seq,
+                insert_names=args["insert_names"],
+            )
+            if not result:
+                return f"Could not extract any of {args['insert_names']} from the provided plasmid sequence."
+            return (
+                f"Extracted region spanning: {result['name']} ({result['size_bp']} bp)\n"
+                f"Source: {result['source']}\n\n"
+                f"DNA Sequence:\n{result['sequence']}"
+            )
+
+        elif name == "extract_insert_from_plasmid":
+            plasmid_seq = args["plasmid_sequence"]
+            if plasmid_seq in _sequence_cache:
+                plasmid_seq = _sequence_cache[plasmid_seq]
+            result = _extract_insert_from_plasmid(
+                plasmid_sequence=plasmid_seq,
+                insert_name=args["insert_name"],
+                start=args.get("start"),
+                end=args.get("end"),
+                strand=args.get("strand", 1),
+            )
+            if not result:
+                return f"Could not extract '{args['insert_name']}' from the provided plasmid sequence."
+            return (
+                f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
+                f"Source: {result['source']}\n\n"
+                f"DNA Sequence:\n{result['sequence']}"
+            )
 
         elif name == "search_fpbase":
             if not FPBASE_AVAILABLE:
@@ -1960,6 +2055,15 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                     continue
                 else:
                     safe_write({"type": "error", "content": "Rate limit exceeded after retries. Please try again later."})
+                    break
+            except anthropic.InternalServerError:
+                if retry_attempt < max_retries:
+                    wait_time = 2 ** retry_attempt  # 1s, 2s, 4s
+                    safe_write({"type": "text_delta", "content": f"\n[Server error, retrying in {wait_time}s...]\n"})
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    safe_write({"type": "error", "content": "Anthropic API returned an internal server error after retries. Please try again."})
                     break
             except Exception:
                 if is_cancelled() or disconnected:
@@ -3188,15 +3292,18 @@ function startToolBlock(toolName) {
 }
 
 function addPlasmidPlot(plotJson) {
+  var bokehItem = plotJson.plot !== undefined ? plotJson.plot : plotJson;
+  var isLinear = plotJson.linear === true;
+  var label = isLinear ? 'Linear DNA Map' : 'Plasmid Map';
   const plotId = 'plot-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
   const div = document.createElement('div');
   div.className = 'msg assistant';
   div.innerHTML = '<div class="msg-bubble-assistant" style="margin-top:8px;padding:12px;width:100%;max-width:640px;">' +
-    '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Plasmid Map</div>' +
+    '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">' + label + '</div>' +
     '<div id="' + plotId + '" style="width:100%;"></div>' +
   '</div>';
   getInner().appendChild(div);
-  Bokeh.embed.embed_item(plotJson, plotId);
+  Bokeh.embed.embed_item(bokehItem, plotId);
   scrollToBottom();
 }
 
@@ -4165,6 +4272,9 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 run_agent_turn_streaming(user_message, session_id, write_event, model=request_model)
             except anthropic.AuthenticationError:
                 write_event({"type": "error", "content": "Invalid or missing ANTHROPIC_API_KEY."})
+            except anthropic.APIStatusError as e:
+                logger.exception("Agent API error")
+                write_event({"type": "error", "content": f"Anthropic API error ({e.status_code}): {e.message}"})
             except Exception as e:
                 logger.exception("Agent error")
                 write_event({"type": "error", "content": str(e)})

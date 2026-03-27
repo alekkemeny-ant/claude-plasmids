@@ -67,6 +67,20 @@ except ImportError:
     except ImportError:
         USER_LIBRARY_AVAILABLE = False
 
+# Optional custom annotation DB (BYOA — bring your own annotations)
+try:
+    from .custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
+    _CUSTOM_ANNOTATIONS_AVAILABLE = True
+except ImportError:
+    try:
+        from custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
+        _CUSTOM_ANNOTATIONS_AVAILABLE = True
+    except ImportError:
+        _CUSTOM_ANNOTATIONS_AVAILABLE = False
+
+if _CUSTOM_ANNOTATIONS_AVAILABLE:
+    setup_custom_annotations()
+
 # Optional FPbase integration (fluorescent proteins — engineered, not in NCBI Gene)
 try:
     from .fpbase_integration import (
@@ -1040,6 +1054,11 @@ def extract_inserts_from_plasmid(plasmid_sequence: str, insert_names: list) -> l
         logger.error(f"extract_inserts_from_plasmid: pLannotate annotation failed: {e}")
         raise RuntimeError(f"pLannotate failed to annotate the plasmid sequence: {e}") from e
 
+    if _CUSTOM_ANNOTATIONS_AVAILABLE:
+        custom_df = query_custom_db(plasmid_sequence)
+        if custom_df is not None:
+            df = merge_annotation_results(df, custom_df)
+
     if df.empty:
         logger.info("extract_inserts_from_plasmid: pLannotate found no features in plasmid")
         return []
@@ -1165,6 +1184,11 @@ def extract_insert_from_plasmid(
     except Exception as e:
         logger.error(f"extract_insert_from_plasmid: pLannotate annotation failed: {e}")
         raise RuntimeError(f"pLannotate failed to annotate the plasmid sequence: {e}") from e
+
+    if _CUSTOM_ANNOTATIONS_AVAILABLE:
+        custom_df = query_custom_db(plasmid_sequence)
+        if custom_df is not None:
+            df = merge_annotation_results(df, custom_df)
 
     if df.empty:
         logger.info(f"extract_insert_from_plasmid: pLannotate found no features in plasmid")

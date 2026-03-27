@@ -1674,6 +1674,13 @@ SESSIONS_FILE = Path(__file__).parent / ".sessions.json"
 
 MODEL = "claude-opus-4-6"
 
+# Context window sizes by model (tokens)
+CONTEXT_WINDOW = {
+    "claude-opus-4-6":          1_000_000,
+    "claude-sonnet-4-6":        1_000_000,
+    "claude-haiku-4-5-20251001":  200_000,
+}
+
 
 def _serialize_content(content):
     """Convert Anthropic SDK content blocks to JSON-serializable format.
@@ -2044,6 +2051,14 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                         break
 
                     final_message = stream.get_final_message()
+                    if final_message and hasattr(final_message, "usage"):
+                        input_tokens = final_message.usage.input_tokens
+                        context_window = CONTEXT_WINDOW.get(model, 1_000_000)
+                        safe_write({
+                            "type": "token_usage",
+                            "input_tokens": input_tokens,
+                            "context_window": context_window,
+                        })
                 # Stream succeeded, break out of retry loop
                 break
 
@@ -2514,6 +2529,23 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .model-select:hover { border-color: var(--sand-300); }
   .model-select:focus { border-color: var(--brand-fig); }
+  .token-indicator {
+    display: none; align-items: center; gap: 5px;
+    margin-left: 8px; font-size: 11px; color: var(--sand-400);
+    white-space: nowrap;
+  }
+  .token-indicator.visible { display: flex; }
+  .token-bar-track {
+    width: 48px; height: 4px; border-radius: 2px;
+    background: var(--sand-200); overflow: hidden;
+  }
+  .token-bar-fill {
+    height: 100%; border-radius: 2px;
+    background: var(--brand-aqua);
+    transition: width 0.4s ease, background 0.4s ease;
+  }
+  .token-bar-fill.warn  { background: var(--brand-fig); }
+  .token-bar-fill.alert { background: var(--brand-orange); }
   .input-buttons { position: absolute; right: 12px; bottom: 12px; }
   .send-btn, .stop-btn {
     width: 36px; height: 36px; border: none; border-radius: 12px;
@@ -2730,6 +2762,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <option value="claude-sonnet-4-6">Sonnet 4.6</option>
             <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
           </select>
+          <div class="token-indicator" id="token-indicator">
+            <div class="token-bar-track"><div class="token-bar-fill" id="token-bar"></div></div>
+            <span id="token-label"></span>
+          </div>
         </div>
         <div class="input-buttons">
           <button class="send-btn" id="send-btn" onclick="sendMessage()">
@@ -2756,6 +2792,23 @@ let currentSessionId = sessionStorage.getItem('plasmid_session_id') || null;
 let sessions = [];
 let isStreaming = false;
 let abortController = null;
+
+// ── Token indicator ──
+function updateTokenIndicator(inputTokens, contextWindow) {
+  const indicator = document.getElementById('token-indicator');
+  const bar = document.getElementById('token-bar');
+  const label = document.getElementById('token-label');
+  if (!indicator || !bar || !label) return;
+  const pct = Math.min(inputTokens / contextWindow, 1);
+  const remaining = contextWindow - inputTokens;
+  const remainingK = remaining >= 1000
+    ? (remaining / 1000).toFixed(0) + 'k'
+    : remaining.toString();
+  bar.style.width = (pct * 100).toFixed(1) + '%';
+  bar.className = 'token-bar-fill' + (pct >= 0.9 ? ' alert' : pct >= 0.7 ? ' warn' : '');
+  label.textContent = remainingK + ' context window tokens left';
+  indicator.classList.add('visible');
+}
 
 function saveSessionId(id) {
   currentSessionId = id;
@@ -3422,6 +3475,7 @@ async function sendMessage() {
           case 'tool_use_start': startToolBlock(event.tool); break;
           case 'tool_result': finishToolBlock(event.tool, event.input || {}, event.content, event.download_content, event.download_filename); break;
           case 'plot_data': addPlasmidPlot(event.plot_json); break;
+          case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
           case 'error':
             startTextBlock();
             appendTextDelta('Error: ' + event.content);

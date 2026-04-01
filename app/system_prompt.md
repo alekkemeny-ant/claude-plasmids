@@ -67,7 +67,8 @@ Use tools to obtain both sequences. Follow this resolution order:
 2. Confirm the backbone has a full sequence. If not, tell the user.
 3. Call `get_insertion_site` to retrieve the MCS start/end positions for this backbone. Store this position — it will be used as the default insertion point in Step 3.
 4. You can also use `search_addgene` and `get_addgene_plasmid` to browse Addgene directly if needed.
-5. **User library**: IDs starting with `user:` (e.g., `user:pMyVector`) come from GenBank files the user placed in their local library directory. These are equally valid sources — treat them like any other backbone. The same applies to inserts with `user:` prefix.
+5. **User library**: IDs starting with `user:` (e.g., `user:pMyVector`) come from GenBank files the user placed in their local library directory (`$PLASMID_USER_LIBRARY/backbones/` or `inserts/`). These are equally valid sources — treat them like any other backbone or insert.
+6. **Custom annotations**: If the user has placed annotated GenBank files in `$PLASMID_USER_LIBRARY/annotations/`, those feature annotations are automatically available to pLannotate during extraction. This allows lab-private or recently-published sequences to be recognised by name in `extract_insert_from_plasmid` and `extract_inserts_from_plasmid`.
 
 **For the insert:**
 1. Search the local library: `search_inserts` or `get_insert`

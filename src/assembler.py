@@ -40,6 +40,20 @@ _PLANNOTATE_MISSING_MSG = (
     "(plannotate is not on PyPI)"
 )
 
+# Optional custom annotation DB (BYOA — bring your own annotations)
+try:
+    from .custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
+    _CUSTOM_ANNOTATIONS_AVAILABLE = True
+except ImportError:
+    try:
+        from custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
+        _CUSTOM_ANNOTATIONS_AVAILABLE = True
+    except ImportError:
+        _CUSTOM_ANNOTATIONS_AVAILABLE = False
+
+if _CUSTOM_ANNOTATIONS_AVAILABLE:
+    setup_custom_annotations()
+
 
 logger = logging.getLogger(__name__)
 
@@ -1153,6 +1167,10 @@ def format_as_genbank(
         )
     
     df = annotate(sequence, linear=linear)
+    if _CUSTOM_ANNOTATIONS_AVAILABLE:
+        custom_df = query_custom_db(sequence)
+        if custom_df is not None:
+            df = merge_annotation_results(df, custom_df)
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,
         insert_position, insert_length, reverse_complement_insert, linear=linear,
@@ -1275,6 +1293,10 @@ def export_genbank_with_plot(
     if not _PLANNOTATE_AVAILABLE:
         raise RuntimeError(_PLANNOTATE_MISSING_MSG)
     df = annotate(sequence, linear=linear)
+    if _CUSTOM_ANNOTATIONS_AVAILABLE:
+        custom_df = query_custom_db(sequence)
+        if custom_df is not None:
+            df = merge_annotation_results(df, custom_df)
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,
         insert_position, insert_length, reverse_complement_insert, linear=linear,

@@ -682,7 +682,7 @@ class AddgeneLibraryIntegration:
 
 
 # Convenience functions for use in MCP tools
-def search_addgene(query: str, limit: int = 10) -> List[Dict]:
+def search_addgene(query: str, limit: int = 100) -> List[Dict]:
     """Search Addgene for plasmids."""
     client = AddgeneClient()
     return client.search(query, limit)

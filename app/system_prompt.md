@@ -66,7 +66,7 @@ Use tools to obtain both sequences. Follow this resolution order:
 1. Search with `search_backbones` or `get_backbone`. If the backbone isn't in the local library, it will automatically be fetched from Addgene (sequence + feature annotations) and cached locally.
 2. Confirm the backbone has a full sequence. If not, tell the user.
 3. Call `get_insertion_site` to retrieve the MCS start/end positions for this backbone. Store this position — it will be used as the default insertion point in Step 3.
-4. You can also use `search_addgene` and `get_addgene_plasmid` to browse Addgene directly if needed.
+4. You can also use `search_addgene` and `fetch_addgene_sequence_with_metadata` to browse Addgene directly if needed.
 5. **User library**: IDs starting with `user:` (e.g., `user:pMyVector`) come from GenBank files the user placed in their local library directory (`$PLASMID_USER_LIBRARY/backbones/` or `inserts/`). These are equally valid sources — treat them like any other backbone or insert.
 6. **Custom annotations**: If the user has placed annotated GenBank files in `$PLASMID_USER_LIBRARY/annotations/`, those feature annotations are automatically available to pLannotate during extraction. This allows lab-private or recently-published sequences to be recognised by name in `extract_insert_from_plasmid` and `extract_inserts_from_plasmid`.
 
@@ -181,7 +181,7 @@ Check the validation report. All Critical checks must pass. If any fail, diagnos
 
 ### Step 5: Export and Present
 
-Call `export_construct` to format the output. Use `sequence=` for assembled constructs, or `sequence_cache_key=` when exporting a sequence fetched by `get_addgene_plasmid` (use the cache key it returns — do not copy the raw sequence):
+Call `export_construct` to format the output. Use `sequence=` for assembled constructs, or `sequence_cache_key=` when exporting a sequence fetched by `fetch_addgene_sequence_with_metadata` (use the cache key it returns — do not copy the raw sequence):
 ```
 # Assembled construct:
 export_construct(
@@ -388,7 +388,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 | Tool | Purpose |
 |------|---------|
 | `search_addgene` | Search Addgene catalog |
-| `get_addgene_plasmid` | Fetch plasmid details from Addgene |
+| `fetch_addgene_sequence_with_metadata` | Fetch plasmid details from Addgene |
 | `import_addgene_to_library` | Import an Addgene plasmid to local library |
 
 ### Assembly & Validation
@@ -527,7 +527,7 @@ When a session has prior experimental outcomes logged (shown in your context as 
 
 ```
 User wants to download / export a plasmid as-is (no assembly)
-  ├─ Has Addgene ID? → get_addgene_plasmid(addgene_id) → export_construct(sequence_cache_key=..., output_format=...)
+  ├─ Has Addgene ID? → fetch_addgene_sequence_with_metadata(addgene_id) → export_construct(sequence_cache_key=..., output_format=...)
   └─ User provided raw sequence? → export_construct(sequence=..., output_format=...)
 
 User wants to build a construct

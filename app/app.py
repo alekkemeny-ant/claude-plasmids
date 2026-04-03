@@ -99,6 +99,85 @@ async def _auto_approve(tool_name, tool_input, context):
     return PermissionResultAllow()
 
 
+# ── Warm-client pool ────────────────────────────────────────────────────
+# The Agent SDK spawns a `claude` CLI subprocess per ClaudeSDKClient. That
+# subprocess loads settings, hooks, and MCP servers before the API call,
+# adding ~2-3s to TTFT on every turn. We pre-spawn a client per session on
+# a background event loop and reuse it across turns so the user only pays
+# the spawn cost once (on textarea focus / page load via /api/warmup).
+
+import atexit
+import concurrent.futures
+
+_bg_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+_bg_thread = threading.Thread(target=_bg_loop.run_forever, daemon=True, name="sdk-loop")
+_bg_thread.start()
+
+_warm_clients: dict[str, ClaudeSDKClient] = {}
+_warming: dict[str, concurrent.futures.Future] = {}
+_warm_lock = threading.Lock()
+
+
+def _run_on_loop(coro) -> concurrent.futures.Future:
+    """Schedule a coroutine on the background loop and return its Future."""
+    return asyncio.run_coroutine_threadsafe(coro, _bg_loop)
+
+
+async def _do_warmup(session_id: str, session: dict, model: str) -> None:
+    options = _build_agent_options(session, model)
+    client = ClaudeSDKClient(options=options)
+    await client.__aenter__()
+    with _warm_lock:
+        _warm_clients[session_id] = client
+        _warming.pop(session_id, None)
+
+
+def warmup_session(session_id: str, model: str | None = None) -> None:
+    """Pre-spawn the SDK subprocess for a session. Idempotent and non-blocking."""
+    with _warm_lock:
+        if session_id in _warm_clients or session_id in _warming:
+            return
+        session = _sessions.get(session_id)
+        if session is None:
+            return
+        fut = _run_on_loop(_do_warmup(session_id, session, model or MODEL))
+        _warming[session_id] = fut
+
+
+def _take_warm_client(session_id: str) -> ClaudeSDKClient | None:
+    """Pop a warm client, blocking briefly if warmup is in-flight."""
+    with _warm_lock:
+        client = _warm_clients.pop(session_id, None)
+        fut = _warming.pop(session_id, None)
+    if client is not None:
+        return client
+    if fut is not None:
+        try:
+            fut.result()  # warmup was in-flight; wait for it
+        except Exception:
+            return None
+        with _warm_lock:
+            return _warm_clients.pop(session_id, None)
+    return None
+
+
+def close_warm_client(session_id: str) -> None:
+    """Tear down a session's warm subprocess (on session delete / shutdown)."""
+    with _warm_lock:
+        client = _warm_clients.pop(session_id, None)
+        _warming.pop(session_id, None)
+    if client is not None:
+        _run_on_loop(client.__aexit__(None, None, None))
+
+
+def _shutdown_warm_clients() -> None:
+    for sid in list(_warm_clients):
+        close_warm_client(sid)
+
+
+atexit.register(_shutdown_warm_clients)
+
+
 # ── Session management ──────────────────────────────────────────────────
 
 _sessions: dict[str, dict] = {}
@@ -295,6 +374,7 @@ def get_session(session_id: str) -> dict | None:
 def delete_session_by_id(session_id: str) -> bool:
     deleted = _sessions.pop(session_id, None) is not None
     if deleted:
+        close_warm_client(session_id)
         _save_sessions()
     return deleted
 
@@ -381,10 +461,18 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
     # Map tool_use_id -> {name, input} so we can pair tool results with calls.
     pending_tools: dict[str, dict] = {}
 
+    # Acquire warm client on the HTTP thread (safe to block here; the bg
+    # loop must not block on _warming futures or it deadlocks).
+    warm_client = _take_warm_client(session_id)
+
     async def _run():
         nonlocal assistant_text, export_called
-        options = _build_agent_options(session, model)
-        async with ClaudeSDKClient(options=options) as client:
+        client = warm_client
+        if client is None:
+            options = _build_agent_options(session, model)
+            client = ClaudeSDKClient(options=options)
+            await client.__aenter__()
+        try:
             await client.query(user_message)
             async for message in client.receive_response():
                 if is_cancelled() or disconnected:
@@ -511,9 +599,21 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                             "context_window": CONTEXT_WINDOW.get(model, 1_000_000),
                         })
                     break
+        finally:
+            # Keep the subprocess warm for the next turn unless the
+            # request was aborted (cancel/disconnect → state is unknown,
+            # close it to avoid leaking a half-consumed stream).
+            if is_cancelled() or disconnected:
+                try:
+                    await client.__aexit__(None, None, None)
+                except Exception:
+                    pass
+            else:
+                with _warm_lock:
+                    _warm_clients[session_id] = client
 
     try:
-        asyncio.run(_run())
+        _run_on_loop(_run()).result()
     finally:
         set_tracker(None)
 
@@ -1210,6 +1310,25 @@ const sessionsListEl = document.getElementById('sessions-list');
 const reopenBtn = document.getElementById('sidebar-reopen-btn');
 const healthBadge = document.getElementById('health-badge');
 const healthText = document.getElementById('health-text');
+
+// Pre-spawn the agent subprocess so the first message doesn't pay the
+// ~2-3s SDK startup cost. Fires on page load and on textarea focus
+// (covers the "switch session, then type" path). Idempotent server-side.
+async function warmup() {
+  try {
+    const r = await fetch('/api/warmup', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: currentSessionId, model: modelSelect.value}),
+    });
+    const j = await r.json();
+    if (j.session_id && !currentSessionId) {
+      currentSessionId = j.session_id;
+      sessionStorage.setItem('plasmid_session_id', currentSessionId);
+    }
+  } catch (e) { /* warmup is best-effort */ }
+}
+inputEl.addEventListener('focus', warmup);
 
 // ── Helpers ──
 function escapeHtml(text) {
@@ -2655,9 +2774,23 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 logger.exception("Agent error")
                 write_event({"type": "error", "content": str(e)})
 
+        elif path == "/api/warmup":
+            # Pre-spawn the SDK subprocess so the next /api/chat skips
+            # the ~2-3s startup overhead. Idempotent. Creates a session
+            # if one isn't provided so the frontend can warm before the
+            # first message is composed.
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            session_id = body.get("session_id")
+            if not session_id or not get_session(session_id):
+                session_id = create_session()
+            warmup_session(session_id, body.get("model"))
+            self._send_json({"status": "warming", "session_id": session_id})
+
         elif path.startswith("/api/sessions/") and path.endswith("/cancel"):
             session_id = path.split("/")[3]
             cancel_session(session_id)
+            close_warm_client(session_id)
             self._send_json({"status": "ok"})
 
         elif path.startswith("/api/sessions/") and path.endswith("/outcome"):

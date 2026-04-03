@@ -1582,6 +1582,32 @@ ALL_TOOLS = [
 ALL_TOOL_NAMES = [t.name for t in ALL_TOOLS]
 
 
+def get_anthropic_tool_schemas() -> list[dict]:
+    """Project ALL_TOOLS into Anthropic API ``tools=`` format.
+
+    The web UI calls the Anthropic API directly for low-latency streaming
+    but dispatches tool calls in-process to the same handlers the Agent
+    SDK MCP server uses (see :func:`get_tool_dispatch`). The ``@tool``
+    decorator stores ``name``/``description``/``input_schema`` directly on
+    each :class:`SdkMcpTool`, so this is a straight projection — single
+    source of truth shared with ``app/agent.py`` and the eval harness.
+    """
+    return [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for t in ALL_TOOLS
+    ]
+
+
+def get_tool_dispatch() -> dict[str, Any]:
+    """Return ``{tool_name: async_handler}`` for in-process dispatch.
+
+    Handlers are the bare ``async def fn(args: dict)`` functions wrapped
+    by ``@tool`` and return MCP-shaped results
+    (``{"content": [{"type": "text", "text": ...}]}``).
+    """
+    return {t.name: t.handler for t in ALL_TOOLS}
+
+
 def create_plasmid_tools():
     """Create an SDK MCP server config with all plasmid tools.
 

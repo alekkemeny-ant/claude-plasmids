@@ -3,8 +3,9 @@
 Plasmid Design Agent — Web UI
 
 A chat interface for the Claude-powered plasmid design agent.
-Uses the Claude Agent SDK with the same MCP tool server as the CLI agent
-(app/agent.py) and the eval harness (evals/run_agent_evals.py).
+Streams via the Anthropic API directly for low TTFT, dispatching tool
+calls in-process to the same handlers (src/tools.py:ALL_TOOLS) that
+back the Agent SDK MCP server used by app/agent.py and the eval harness.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
@@ -39,23 +40,11 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from claude_agent_sdk import (
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    AssistantMessage,
-    UserMessage,
-    SystemMessage,
-    ResultMessage,
-    TextBlock,
-    ThinkingBlock,
-    ToolUseBlock,
-    ToolResultBlock,
-    PermissionResultAllow,
-)
-from claude_agent_sdk.types import StreamEvent
+import anthropic
 
 from src.tools import (
-    build_mcp_servers,
+    get_anthropic_tool_schemas,
+    get_tool_dispatch,
     set_tracker,
     get_last_plot_json,
     clear_last_plot_json,
@@ -72,19 +61,19 @@ LIBRARY_PATH = PROJECT_ROOT / "library"
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "system_prompt.md"  # lives in app/
 SYSTEM_PROMPT = SYSTEM_PROMPT_PATH.read_text() if SYSTEM_PROMPT_PATH.exists() else ""
 
+# ── Tool schemas + dispatch ─────────────────────────────────────────────
+# Tool definitions live in src/tools.py:ALL_TOOLS — the same list the
+# Agent SDK MCP server (app/agent.py, evals) is built from. We project
+# them into Anthropic API format and dispatch in-process so the web UI
+# gets ~1s direct-API TTFT instead of the SDK subprocess's ~5s, while
+# tool implementations stay single-sourced.
 
-# ── MCP tool name helpers ───────────────────────────────────────────────
-# SDK MCP tools surface as "mcp__plasmid-library__<name>". The frontend
-# expects bare tool names in SSE events for display.
-
-def _strip_mcp_prefix(name: str) -> str:
-    if name.startswith("mcp__"):
-        return name.rsplit("__", 1)[-1]
-    return name
+TOOLS = get_anthropic_tool_schemas()
+_TOOL_HANDLERS = get_tool_dispatch()
 
 
 def _tool_result_text(content) -> str:
-    """Extract a flat string from a ToolResultBlock.content (str or list[dict])."""
+    """Flatten an MCP-shaped tool result content into a string."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -94,88 +83,23 @@ def _tool_result_text(content) -> str:
     return "" if content is None else str(content)
 
 
-async def _auto_approve(tool_name, tool_input, context):
-    """Auto-approve all tool calls (in-process MCP tools are safe)."""
-    return PermissionResultAllow()
+def _dispatch_tool(name: str, args: dict) -> str:
+    """Run a tool handler in-process and return its text result.
 
-
-# ── Warm-client pool ────────────────────────────────────────────────────
-# The Agent SDK spawns a `claude` CLI subprocess per ClaudeSDKClient. That
-# subprocess loads settings, hooks, and MCP servers before the API call,
-# adding ~2-3s to TTFT on every turn. We pre-spawn a client per session on
-# a background event loop and reuse it across turns so the user only pays
-# the spawn cost once (on textarea focus / page load via /api/warmup).
-
-import atexit
-import concurrent.futures
-
-_bg_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
-_bg_thread = threading.Thread(target=_bg_loop.run_forever, daemon=True, name="sdk-loop")
-_bg_thread.start()
-
-_warm_clients: dict[str, ClaudeSDKClient] = {}
-_warming: dict[str, concurrent.futures.Future] = {}
-_warm_lock = threading.Lock()
-
-
-def _run_on_loop(coro) -> concurrent.futures.Future:
-    """Schedule a coroutine on the background loop and return its Future."""
-    return asyncio.run_coroutine_threadsafe(coro, _bg_loop)
-
-
-async def _do_warmup(session_id: str, session: dict, model: str) -> None:
-    options = _build_agent_options(session, model)
-    client = ClaudeSDKClient(options=options)
-    await client.__aenter__()
-    with _warm_lock:
-        _warm_clients[session_id] = client
-        _warming.pop(session_id, None)
-
-
-def warmup_session(session_id: str, model: str | None = None) -> None:
-    """Pre-spawn the SDK subprocess for a session. Idempotent and non-blocking."""
-    with _warm_lock:
-        if session_id in _warm_clients or session_id in _warming:
-            return
-        session = _sessions.get(session_id)
-        if session is None:
-            return
-        fut = _run_on_loop(_do_warmup(session_id, session, model or MODEL))
-        _warming[session_id] = fut
-
-
-def _take_warm_client(session_id: str) -> ClaudeSDKClient | None:
-    """Pop a warm client, blocking briefly if warmup is in-flight."""
-    with _warm_lock:
-        client = _warm_clients.pop(session_id, None)
-        fut = _warming.pop(session_id, None)
-    if client is not None:
-        return client
-    if fut is not None:
-        try:
-            fut.result()  # warmup was in-flight; wait for it
-        except Exception:
-            return None
-        with _warm_lock:
-            return _warm_clients.pop(session_id, None)
-    return None
-
-
-def close_warm_client(session_id: str) -> None:
-    """Tear down a session's warm subprocess (on session delete / shutdown)."""
-    with _warm_lock:
-        client = _warm_clients.pop(session_id, None)
-        _warming.pop(session_id, None)
-    if client is not None:
-        _run_on_loop(client.__aexit__(None, None, None))
-
-
-def _shutdown_warm_clients() -> None:
-    for sid in list(_warm_clients):
-        close_warm_client(sid)
-
-
-atexit.register(_shutdown_warm_clients)
+    Handlers are async (defined for the SDK MCP server), so we drive them
+    with a short-lived event loop. They return MCP-shaped
+    ``{"content": [{"type": "text", "text": ...}]}`` which we flatten.
+    """
+    handler = _TOOL_HANDLERS.get(name)
+    if handler is None:
+        return f"Unknown tool: {name}"
+    try:
+        result = asyncio.run(handler(args))
+    except Exception as e:  # noqa: BLE001 — surface tool errors to the model
+        return f"Tool error ({name}): {e}"
+    if isinstance(result, dict) and "content" in result:
+        return _tool_result_text(result["content"])
+    return _tool_result_text(result)
 
 
 # ── Session management ──────────────────────────────────────────────────
@@ -261,7 +185,6 @@ def _save_sessions():
                     "created_at": data.get("created_at", time.time()),
                     "first_message": data.get("first_message"),
                     "history": safe_history,
-                    "sdk_session_id": data.get("sdk_session_id"),
                     # Phase-2 troubleshooting/project-memory fields — default
                     # to empty for sessions created before these were added.
                     "project_name": data.get("project_name"),
@@ -325,10 +248,8 @@ def create_session() -> str:
     """Create a new conversation session."""
     sid = str(uuid.uuid4())
     _sessions[sid] = {
-        # The Agent SDK manages conversation history via its own session
-        # store; we keep "history" for backward compat with old .sessions.json.
+        # API message history — replayed each turn for multi-turn context.
         "history": [],
-        "sdk_session_id": None,
         "display_messages": [],
         "created_at": time.time(),
         "first_message": None,
@@ -374,7 +295,6 @@ def get_session(session_id: str) -> dict | None:
 def delete_session_by_id(session_id: str) -> bool:
     deleted = _sessions.pop(session_id, None) is not None
     if deleted:
-        close_warm_client(session_id)
         _save_sessions()
     return deleted
 
@@ -399,35 +319,76 @@ def cancel_session(session_id: str):
 
 
 # ── Agent loop ──────────────────────────────────────────────────────────
+# Streams via the Anthropic API directly (~1s TTFT). Tool calls dispatch
+# to src/tools.py:ALL_TOOLS handlers in-process — same implementations the
+# Agent SDK MCP server (app/agent.py, evals) uses.
+
+_anthropic_client: anthropic.Anthropic | None = None
 
 
-def _build_agent_options(session: dict, model: str) -> ClaudeAgentOptions:
-    """Build SDK options for a session turn.
+def _client() -> anthropic.Anthropic:
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.Anthropic()
+    return _anthropic_client
 
-    The system prompt is built per-turn so that newly logged
-    experimental_outcomes are visible. The Agent SDK persists
-    conversation history via resume=, so we only manage
-    display_messages for UI rendering.
+
+def _emit_tool_result(
+    tool_name: str,
+    tool_input: dict,
+    result_str: str,
+    *,
+    safe_write,
+    session: dict,
+    assistant_blocks: list,
+) -> None:
+    """Emit SSE event(s) for a completed tool call and apply side effects.
+
+    Handles export_construct download/plot, log_experimental_outcome
+    session persistence, and display-message recording. Shared between
+    the streaming loop and any future callers so behaviour stays in sync.
     """
-    return ClaudeAgentOptions(
-        system_prompt=_build_system_prompt(session),
-        mcp_servers=build_mcp_servers(),
-        permission_mode="acceptEdits",
-        model=model,
-        max_turns=15,
-        cwd=str(PROJECT_ROOT),
-        can_use_tool=_auto_approve,
-        include_partial_messages=True,
-        resume=session.get("sdk_session_id"),
-    )
+    if (
+        tool_name == "log_experimental_outcome"
+        and result_str.startswith("[OUTCOME_LOGGED]")
+    ):
+        session.setdefault("experimental_outcomes", []).append({
+            "status": tool_input.get("status"),
+            "observation": tool_input.get("observation"),
+            "construct_name": tool_input.get("construct_name", ""),
+            "timestamp": time.time(),
+        })
+        _save_sessions()
+    display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
+    event_data = {
+        "type": "tool_result",
+        "tool": tool_name,
+        "input": tool_input,
+        "content": display_result,
+    }
+    if tool_name == "export_construct":
+        event_data["download_content"] = result_str
+        fmt = tool_input.get("output_format", "raw")
+        cname = tool_input.get("construct_name", "construct")
+        ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
+        event_data["download_filename"] = cname + ext
+    safe_write(event_data)
+    plot = get_last_plot_json()
+    if tool_name == "export_construct" and plot:
+        safe_write({"type": "plot_data", "plot_json": json.loads(plot)})
+        clear_last_plot_json()
+    assistant_blocks.append({
+        "type": "tool_use",
+        "name": tool_name,
+        "input": tool_input,
+        "result": display_result,
+        "download_content": event_data.get("download_content"),
+        "download_filename": event_data.get("download_filename"),
+    })
 
 
 def run_agent_turn_streaming(user_message: str, session_id: str, write_event, model: str = MODEL):
-    """Run one agent turn with streaming, scoped to a session.
-
-    Bridges the async Agent SDK to the sync HTTP handler via asyncio.run().
-    Translates SDK message types to the SSE event contract the frontend expects.
-    """
+    """Run one agent turn with streaming, scoped to a session."""
     _cancelled_sessions.discard(session_id)
 
     session = get_session(session_id)
@@ -435,7 +396,18 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         write_event({"type": "error", "content": "Session not found"})
         return
 
+    tracker = ReferenceTracker()
+    set_tracker(tracker)
+    clear_last_plot_json()
+    export_called = False
+    # Build the system prompt once per turn (not per retry) so that
+    # prompt caching works. The prompt is dynamic because it includes
+    # per-session troubleshooting context (experimental_outcomes).
+    turn_system_prompt = _build_system_prompt(session)
+    history = session["history"]
+    history.append({"role": "user", "content": user_message})
     session["display_messages"].append({"role": "user", "content": user_message})
+
     if session["first_message"] is None:
         session["first_message"] = user_message[:80]
 
@@ -451,171 +423,171 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         except (BrokenPipeError, ConnectionResetError):
             disconnected = True
 
-    tracker = ReferenceTracker()
-    set_tracker(tracker)
-    clear_last_plot_json()
-
+    max_iterations = 15
+    max_retries = 3
     assistant_text = ""
     assistant_blocks: list[dict] = []
-    export_called = False
-    # Map tool_use_id -> {name, input} so we can pair tool results with calls.
-    pending_tools: dict[str, dict] = {}
-
-    # Acquire warm client on the HTTP thread (safe to block here; the bg
-    # loop must not block on _warming futures or it deadlocks).
-    warm_client = _take_warm_client(session_id)
-
-    async def _run():
-        nonlocal assistant_text, export_called
-        client = warm_client
-        if client is None:
-            options = _build_agent_options(session, model)
-            client = ClaudeSDKClient(options=options)
-            await client.__aenter__()
-        try:
-            await client.query(user_message)
-            async for message in client.receive_response():
-                if is_cancelled() or disconnected:
-                    try:
-                        await client.interrupt()
-                    except Exception:
-                        pass
-                    break
-
-                if isinstance(message, StreamEvent):
-                    ev = message.event
-                    et = ev.get("type")
-                    if et == "content_block_start":
-                        block = ev.get("content_block", {})
-                        bt = block.get("type")
-                        if bt == "thinking":
-                            safe_write({"type": "thinking_start"})
-                        elif bt == "text":
-                            safe_write({"type": "text_start"})
-                        elif bt == "tool_use":
-                            safe_write({
-                                "type": "tool_use_start",
-                                "tool": _strip_mcp_prefix(block.get("name", "")),
-                            })
-                    elif et == "content_block_delta":
-                        delta = ev.get("delta", {})
-                        dt = delta.get("type")
-                        if dt == "thinking_delta":
-                            safe_write({"type": "thinking_delta", "content": delta.get("thinking", "")})
-                        elif dt == "text_delta":
-                            text = delta.get("text", "")
-                            assistant_text += text
-                            safe_write({"type": "text_delta", "content": text})
-                    elif et == "content_block_stop":
-                        # We close text/thinking blocks here. Tool blocks are
-                        # closed when the result arrives (UserMessage below)
-                        # so the UI shows call+result as one unit.
-                        idx = ev.get("index")
-                        # We don't track block-type-by-index here; AssistantMessage
-                        # below records the complete blocks for display history.
-                        pass
-
-                elif isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            assistant_blocks.append({"type": "text", "content": block.text})
-                            safe_write({"type": "text_end"})
-                        elif isinstance(block, ThinkingBlock):
-                            assistant_blocks.append({"type": "thinking", "content": block.thinking})
-                            safe_write({"type": "thinking_end"})
-                        elif isinstance(block, ToolUseBlock):
-                            pending_tools[block.id] = {
-                                "name": _strip_mcp_prefix(block.name),
-                                "input": block.input,
-                            }
-
-                elif isinstance(message, UserMessage):
-                    if not isinstance(message.content, list):
-                        continue
-                    for block in message.content:
-                        if not isinstance(block, ToolResultBlock):
-                            continue
-                        call = pending_tools.pop(block.tool_use_id, {"name": "?", "input": {}})
-                        tool_name = call["name"]
-                        tool_input = call["input"]
-                        result_str = _tool_result_text(block.content)
-                        if tool_name == "export_construct":
-                            export_called = True
-                        # Intercept outcome-log marker and persist to session
-                        if (
-                            tool_name == "log_experimental_outcome"
-                            and result_str.startswith("[OUTCOME_LOGGED]")
-                        ):
-                            session.setdefault("experimental_outcomes", []).append({
-                                "status": tool_input.get("status"),
-                                "observation": tool_input.get("observation"),
-                                "construct_name": tool_input.get("construct_name", ""),
-                                "timestamp": time.time(),
-                            })
-                            _save_sessions()
-                        display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
-                        event_data = {
-                            "type": "tool_result",
-                            "tool": tool_name,
-                            "input": tool_input,
-                            "content": display_result,
-                        }
-                        if tool_name == "export_construct":
-                            event_data["download_content"] = result_str
-                            fmt = tool_input.get("output_format", "raw")
-                            cname = tool_input.get("construct_name", "construct")
-                            ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
-                            event_data["download_filename"] = cname + ext
-                        safe_write(event_data)
-                        plot = get_last_plot_json()
-                        if tool_name == "export_construct" and plot:
-                            safe_write({"type": "plot_data", "plot_json": json.loads(plot)})
-                            clear_last_plot_json()
-                        assistant_blocks.append({
-                            "type": "tool_use",
-                            "name": tool_name,
-                            "input": tool_input,
-                            "result": display_result,
-                            "download_content": event_data.get("download_content"),
-                            "download_filename": event_data.get("download_filename"),
-                        })
-
-                elif isinstance(message, SystemMessage):
-                    if message.subtype == "init":
-                        sid = message.data.get("session_id")
-                        if sid:
-                            session["sdk_session_id"] = sid
-
-                elif isinstance(message, ResultMessage):
-                    if message.is_error and not assistant_text:
-                        safe_write({"type": "error", "content": message.result or "Agent error"})
-                    # Emit token usage for the context-window indicator (PR #15).
-                    usage = getattr(message, "usage", None) or {}
-                    input_tokens = usage.get("input_tokens") if isinstance(usage, dict) else getattr(usage, "input_tokens", None)
-                    if input_tokens is not None:
-                        safe_write({
-                            "type": "token_usage",
-                            "input_tokens": input_tokens,
-                            "context_window": CONTEXT_WINDOW.get(model, 1_000_000),
-                        })
-                    break
-        finally:
-            # Keep the subprocess warm for the next turn unless the
-            # request was aborted (cancel/disconnect → state is unknown,
-            # close it to avoid leaking a half-consumed stream).
-            if is_cancelled() or disconnected:
-                try:
-                    await client.__aexit__(None, None, None)
-                except Exception:
-                    pass
-            else:
-                with _warm_lock:
-                    _warm_clients[session_id] = client
+    current_thinking_text = ""
+    current_text_content = ""
 
     try:
-        _run_on_loop(_run()).result()
+        for _ in range(max_iterations):
+            if is_cancelled() or disconnected:
+                break
+
+            stop_reason = None
+            final_message = None
+            tool_results: list = []
+
+            for retry_attempt in range(max_retries + 1):
+                # Reset per-API-call state on each retry. If a stream partially
+                # succeeded before rate-limiting, any tool_results accumulated
+                # reference tool_use_ids from the aborted stream — replaying
+                # them alongside the retry's fresh tool_use_ids causes a 400.
+                current_block_type = None
+                current_tool_name = None
+                current_tool_id = None
+                current_tool_input_json = ""
+                tool_results = []
+                try:
+                    with _client().messages.stream(
+                        model=model,
+                        max_tokens=16000,
+                        system=turn_system_prompt,
+                        tools=TOOLS,
+                        messages=history,
+                        thinking={"type": "enabled", "budget_tokens": 5000},
+                    ) as stream:
+                        for event in stream:
+                            if is_cancelled() or disconnected:
+                                stream.close()
+                                break
+
+                            if event.type == "content_block_start":
+                                block = event.content_block
+                                if block.type == "thinking":
+                                    current_block_type = "thinking"
+                                    current_thinking_text = ""
+                                    safe_write({"type": "thinking_start"})
+                                elif block.type == "text":
+                                    current_block_type = "text"
+                                    current_text_content = ""
+                                    safe_write({"type": "text_start"})
+                                elif block.type == "tool_use":
+                                    current_block_type = "tool_use"
+                                    current_tool_name = block.name
+                                    current_tool_id = block.id
+                                    current_tool_input_json = ""
+                                    safe_write({"type": "tool_use_start", "tool": block.name})
+
+                            elif event.type == "content_block_delta":
+                                delta = event.delta
+                                if delta.type == "thinking_delta":
+                                    current_thinking_text += delta.thinking
+                                    safe_write({"type": "thinking_delta", "content": delta.thinking})
+                                elif delta.type == "text_delta":
+                                    assistant_text += delta.text
+                                    current_text_content += delta.text
+                                    safe_write({"type": "text_delta", "content": delta.text})
+                                elif delta.type == "input_json_delta":
+                                    current_tool_input_json += delta.partial_json
+
+                            elif event.type == "content_block_stop":
+                                if current_block_type == "thinking":
+                                    assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
+                                    safe_write({"type": "thinking_end"})
+                                elif current_block_type == "text":
+                                    assistant_blocks.append({"type": "text", "content": current_text_content})
+                                    safe_write({"type": "text_end"})
+                                elif current_block_type == "tool_use":
+                                    if is_cancelled() or disconnected:
+                                        break
+                                    tool_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
+                                    result_str = _dispatch_tool(current_tool_name, tool_input)
+                                    if current_tool_name == "export_construct":
+                                        export_called = True
+                                    _emit_tool_result(
+                                        current_tool_name, tool_input, result_str,
+                                        safe_write=safe_write, session=session,
+                                        assistant_blocks=assistant_blocks,
+                                    )
+                                    tool_results.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": current_tool_id,
+                                        "content": result_str,
+                                    })
+                                current_block_type = None
+
+                            elif event.type == "message_delta":
+                                stop_reason = event.delta.stop_reason
+
+                        if is_cancelled() or disconnected:
+                            break
+
+                        final_message = stream.get_final_message()
+                        if final_message and hasattr(final_message, "usage"):
+                            safe_write({
+                                "type": "token_usage",
+                                "input_tokens": final_message.usage.input_tokens,
+                                "context_window": CONTEXT_WINDOW.get(model, 1_000_000),
+                            })
+                    break  # stream succeeded, leave retry loop
+
+                except (anthropic.RateLimitError, anthropic.InternalServerError) as e:
+                    if retry_attempt < max_retries:
+                        wait_time = 2 ** retry_attempt
+                        kind = "Rate limited" if isinstance(e, anthropic.RateLimitError) else "Server error"
+                        safe_write({"type": "text_delta", "content": f"\n[{kind}, retrying in {wait_time}s...]\n"})
+                        time.sleep(wait_time)
+                        continue
+                    safe_write({"type": "error", "content": f"{type(e).__name__} after retries. Please try again."})
+                    break
+                except Exception:
+                    if is_cancelled() or disconnected:
+                        break
+                    raise
+
+            if is_cancelled() or disconnected or final_message is None:
+                break
+
+            # Convert content blocks to plain dicts to strip extra SDK fields
+            # (e.g. parsed_output) that cause 400 errors on replay. Unknown
+            # block types are dropped — passing them through can fail when
+            # the SDK emits a new type we don't handle.
+            filtered_content = []
+            for b in final_message.content:
+                btype = getattr(b, "type", None)
+                if btype == "thinking":
+                    continue
+                if btype == "text":
+                    filtered_content.append({"type": "text", "text": b.text})
+                elif btype == "tool_use":
+                    filtered_content.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
+                else:
+                    logger.warning("Dropping unknown content block type from history: %s", btype or type(b).__name__)
+            history.append({"role": "assistant", "content": filtered_content})
+
+            if tool_results:
+                history.append({"role": "user", "content": tool_results})
+            else:
+                break
+
+            if stop_reason == "end_turn":
+                break
     finally:
         set_tracker(None)
+
+    # Flush any in-progress block that was interrupted mid-stream
+    if current_text_content and not any(
+        b.get("type") == "text" and b.get("content") == current_text_content
+        for b in assistant_blocks
+    ):
+        assistant_blocks.append({"type": "text", "content": current_text_content})
+    if current_thinking_text and not any(
+        b.get("type") == "thinking" and b.get("content") == current_thinking_text
+        for b in assistant_blocks
+    ):
+        assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
 
     # Append formatted references only when a sequence file was exported this turn
     if export_called and not (is_cancelled() or disconnected):
@@ -628,7 +600,6 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             safe_write({"type": "text_delta", "content": ref_block})
             safe_write({"type": "text_end"})
 
-    # Save assistant text and structured blocks to display messages
     if assistant_text or assistant_blocks:
         session["display_messages"].append({
             "role": "assistant",
@@ -636,8 +607,11 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             "blocks": assistant_blocks,
         })
     elif is_cancelled() or disconnected:
-        if session["display_messages"] and session["display_messages"][-1]["role"] == "user":
-            session["display_messages"].pop()
+        # Remove dangling user message if no response was generated
+        if history and history[-1]["role"] == "user" and isinstance(history[-1].get("content"), str):
+            history.pop()
+            if session["display_messages"] and session["display_messages"][-1]["role"] == "user":
+                session["display_messages"].pop()
 
     _save_sessions()
 
@@ -1310,25 +1284,6 @@ const sessionsListEl = document.getElementById('sessions-list');
 const reopenBtn = document.getElementById('sidebar-reopen-btn');
 const healthBadge = document.getElementById('health-badge');
 const healthText = document.getElementById('health-text');
-
-// Pre-spawn the agent subprocess so the first message doesn't pay the
-// ~2-3s SDK startup cost. Fires on page load and on textarea focus
-// (covers the "switch session, then type" path). Idempotent server-side.
-async function warmup() {
-  try {
-    const r = await fetch('/api/warmup', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({session_id: currentSessionId, model: modelSelect.value}),
-    });
-    const j = await r.json();
-    if (j.session_id && !currentSessionId) {
-      currentSessionId = j.session_id;
-      sessionStorage.setItem('plasmid_session_id', currentSessionId);
-    }
-  } catch (e) { /* warmup is best-effort */ }
-}
-inputEl.addEventListener('focus', warmup);
 
 // ── Helpers ──
 function escapeHtml(text) {
@@ -2394,74 +2349,60 @@ function downloadBatchFile(jobId, rowIdx, expIdx, filename) {
 # ── Batch job runner ────────────────────────────────────────────────────
 
 def _run_batch_agent(prompt: str, model: str, append_log, exports: list, *,
-                     resume: Optional[str] = None,
-                     row_name: Optional[str] = None) -> Optional[str]:
-    """Shared SDK runner for batch rows. Returns the SDK session_id for resume."""
+                     history: list,
+                     row_name: Optional[str] = None) -> None:
+    """Shared agent runner for batch rows. Mutates ``history`` in place so
+    follow-up messages (``_continue_batch_row``) replay the same context."""
     tracker = ReferenceTracker()
     set_tracker(tracker)
     clear_last_plot_json()
-    pending_tools: dict[str, dict] = {}
-    sdk_session_id = resume
-
-    async def _run():
-        nonlocal sdk_session_id
-        options = ClaudeAgentOptions(
-            system_prompt=SYSTEM_PROMPT,
-            mcp_servers=build_mcp_servers(),
-            permission_mode="acceptEdits",
-            model=model,
-            max_turns=15,
-            cwd=str(PROJECT_ROOT),
-            can_use_tool=_auto_approve,
-            resume=resume,
-        )
-        async with ClaudeSDKClient(options=options) as client:
-            await client.query(prompt)
-            async for message in client.receive_response():
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock) and block.text.strip():
-                            append_log({"type": "text", "content": block.text})
-                        elif isinstance(block, ToolUseBlock):
-                            pending_tools[block.id] = {
-                                "name": _strip_mcp_prefix(block.name),
-                                "input": block.input,
-                            }
-                elif isinstance(message, UserMessage) and isinstance(message.content, list):
-                    for block in message.content:
-                        if not isinstance(block, ToolResultBlock):
-                            continue
-                        call = pending_tools.pop(block.tool_use_id, {"name": "?", "input": {}})
-                        result = _tool_result_text(block.content)
-                        result_preview = result[:600] + ("\u2026" if len(result) > 600 else "")
-                        append_log({
-                            "type": "tool",
-                            "name": call["name"],
-                            "input": call["input"],
-                            "result": result_preview,
-                        })
-                        if call["name"] == "export_construct":
-                            fmt = call["input"].get("output_format", "genbank")
-                            ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
-                            plot = get_last_plot_json()
-                            exports.append({
-                                "filename": (row_name or "construct") + ext,
-                                "content": result,
-                                "plot_json": json.loads(plot) if plot else None,
-                            })
-                            clear_last_plot_json()
-                elif isinstance(message, SystemMessage) and message.subtype == "init":
-                    sid = message.data.get("session_id")
-                    if sid:
-                        sdk_session_id = sid
-                elif isinstance(message, ResultMessage):
-                    break
+    history.append({"role": "user", "content": prompt})
 
     try:
-        asyncio.run(_run())
+        for _ in range(15):
+            response = _client().messages.create(
+                model=model,
+                max_tokens=16000,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=history,
+            )
+            tool_results: list[dict] = []
+            filtered_content: list[dict] = []
+            for block in response.content:
+                btype = getattr(block, "type", None)
+                if btype == "text":
+                    if block.text.strip():
+                        append_log({"type": "text", "content": block.text})
+                    filtered_content.append({"type": "text", "text": block.text})
+                elif btype == "tool_use":
+                    result = _dispatch_tool(block.name, block.input)
+                    result_preview = result[:600] + ("\u2026" if len(result) > 600 else "")
+                    append_log({
+                        "type": "tool",
+                        "name": block.name,
+                        "input": block.input,
+                        "result": result_preview,
+                    })
+                    if block.name == "export_construct":
+                        fmt = block.input.get("output_format", "genbank")
+                        ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
+                        plot = get_last_plot_json()
+                        exports.append({
+                            "filename": (row_name or "construct") + ext,
+                            "content": result,
+                            "plot_json": json.loads(plot) if plot else None,
+                        })
+                        clear_last_plot_json()
+                    filtered_content.append({"type": "tool_use", "id": block.id, "name": block.name, "input": block.input})
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+            history.append({"role": "assistant", "content": filtered_content})
+            if tool_results:
+                history.append({"role": "user", "content": tool_results})
+            if response.stop_reason == "end_turn" or not tool_results:
+                break
     finally:
         set_tracker(None)
-    return sdk_session_id
 
 
 def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str) -> None:
@@ -2487,14 +2428,16 @@ def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str) -> None:
 
     try:
         exports: list[dict] = []
-        sdk_sid = _run_batch_agent(
+        history: list[dict] = []
+        _run_batch_agent(
             prompt, model,
             append_log=row_state["log"].append,
             exports=exports,
+            history=history,
             row_name=name,
         )
         row_state["exports"] = exports
-        row_state["sdk_session_id"] = sdk_sid
+        row_state["history"] = history
         row_state["status"] = "done" if exports else "no_export"
     except Exception as e:
         row_state["status"] = "error"
@@ -2519,7 +2462,7 @@ def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
             user_message, model,
             append_log=row_state["log"].append,
             exports=row_state["exports"],
-            resume=row_state.get("sdk_session_id"),
+            history=row_state.setdefault("history", []),
             row_name=name,
         )
         row_state["status"] = "done" if row_state["exports"] else "no_export"
@@ -2774,23 +2717,9 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 logger.exception("Agent error")
                 write_event({"type": "error", "content": str(e)})
 
-        elif path == "/api/warmup":
-            # Pre-spawn the SDK subprocess so the next /api/chat skips
-            # the ~2-3s startup overhead. Idempotent. Creates a session
-            # if one isn't provided so the frontend can warm before the
-            # first message is composed.
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(content_length)) if content_length else {}
-            session_id = body.get("session_id")
-            if not session_id or not get_session(session_id):
-                session_id = create_session()
-            warmup_session(session_id, body.get("model"))
-            self._send_json({"status": "warming", "session_id": session_id})
-
         elif path.startswith("/api/sessions/") and path.endswith("/cancel"):
             session_id = path.split("/")[3]
             cancel_session(session_id)
-            close_warm_client(session_id)
             self._send_json({"status": "ok"})
 
         elif path.startswith("/api/sessions/") and path.endswith("/outcome"):

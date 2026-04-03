@@ -42,10 +42,26 @@ Additional env vars enable optional data sources:
 
 | Env var | Effect | Availability |
 |---|---|---|
+| `ADDGENE_API_TOKEN` | Addgene developer API token. Required for automatic plasmid sequence retrieval from Addgene. Without this, sequences cannot be fetched automatically — users must manually upload GenBank files for any plasmid not already in the local library. See [Addgene API key setup](#addgene-api-key) below. | CLI + Web UI |
 | `PLASMID_USER_LIBRARY` | Path to a directory of user-provided GenBank files (`backbones/*.gb`, `inserts/*.gb`, `annotations/*.gb`). Backbone/insert entries appear with `user:` ID prefix. Annotation files extend pLannotate with custom feature recognition. | CLI + Web UI |
 | `BENCHLING_SUBDOMAIN` | Your Benchling workspace subdomain. Enables read+write access via Benchling's remote MCP. | CLI only¹ |
 | `PLASMID_ENABLE_PUBMED` | Default `1`. Set `0` to disable PubMed MCP (literature search + PMC full text). | CLI only¹ |
 | `UNPAYWALL_EMAIL` | Your email. Enables `fetch_oa_fulltext` for open-access papers outside PMC. | CLI + Web UI |
+
+### Addgene API key
+
+The Addgene API token enables automatic retrieval of plasmid sequences directly from [Addgene's developer API](https://api.developers.addgene.org). Without it, the tool cannot fetch sequences for plasmids not already in the local library — you will need to manually download GenBank files from Addgene and upload them via the `PLASMID_USER_LIBRARY` mechanism.
+
+**To set up:**
+
+1. Obtain an API token from the [Addgene developer portal](https://www.addgene.org/tools/api/).
+2. Add it to your `.env` file:
+
+```bash
+ADDGENE_API_TOKEN=your-token-here
+```
+
+The token is automatically picked up at startup. No restart is required if you add it while the server is not running.
 
 ¹ The web UI uses the raw Anthropic API (not the Agent SDK) and cannot attach external MCP servers. Benchling and PubMed tools are only available via `python app/agent.py` or the evals harness.
 
@@ -227,7 +243,7 @@ The MCP server (`src/server.py`) exposes 18 tools for Claude to use:
 
 - `search_backbones` / `get_backbone` — search and retrieve backbone vectors
 - `search_inserts` / `get_insert` — search and retrieve insert sequences
-- `search_addgene` / `get_addgene_plasmid` / `import_addgene_to_library` — Addgene integration
+- `search_addgene` / `fetch_addgene_sequence_with_metadata` / `import_addgene_to_library` — Addgene integration
 - `search_gene` / `fetch_gene` — NCBI gene search + CDS retrieval
 - `fuse_inserts` — protein tagging / fusion CDS assembly
 - `validate_sequence` — DNA validation (valid chars, GC content, codons)

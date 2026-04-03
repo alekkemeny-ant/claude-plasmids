@@ -28,7 +28,7 @@ try:
     from .addgene_integration import (
         AddgeneLibraryIntegration,
         search_addgene as _search_addgene,
-        get_addgene_plasmid as _get_addgene_plasmid,
+        fetch_addgene_sequence_with_metadata as _fetch_addgene_sequence_with_metadata,
     )
     ADDGENE_AVAILABLE = True
 except ImportError:
@@ -243,7 +243,7 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
-            name="get_addgene_plasmid",
+            name="fetch_addgene_sequence_with_metadata",
             description="Fetch detailed information about a specific plasmid from Addgene by its catalog number. Use this to get metadata and potentially sequence for plasmids not in the local library.",
             inputSchema={
                 "type": "object",
@@ -729,19 +729,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 if result.get('url'):
                     output += f"  URL: {result['url']}\n"
             
-            output += "\n*Use `get_addgene_plasmid` with the Addgene ID to fetch full details.*"
+            output += "\n*Use `fetch_addgene_sequence_with_metadata` with the Addgene ID to fetch full details.*"
             
             return [TextContent(type="text", text=output)]
         except Exception as e:
             return [TextContent(type="text", text=f"❌ Error searching Addgene: {str(e)}")]
     
-    elif name == "get_addgene_plasmid":
+    elif name == "fetch_addgene_sequence_with_metadata":
         if not ADDGENE_AVAILABLE:
             return [TextContent(type="text", text="❌ Addgene integration is not available.")]
         
         try:
             addgene_id = arguments["addgene_id"]
-            plasmid = _get_addgene_plasmid(addgene_id)
+            plasmid = _fetch_addgene_sequence_with_metadata(addgene_id)
             
             if not plasmid:
                 return [TextContent(type="text", text=f"❌ Could not fetch plasmid Addgene #{addgene_id}. It may not exist or there was a network error.")]

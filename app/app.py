@@ -101,7 +101,7 @@ from library import (
 try:
     from addgene_integration import (
         search_addgene as _search_addgene,
-        get_addgene_plasmid as _get_addgene_plasmid,
+        fetch_addgene_sequence_with_metadata as _fetch_addgene_sequence_with_metadata,
         AddgeneLibraryIntegration,
     )
     ADDGENE_AVAILABLE = True
@@ -277,7 +277,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "sequence": {"type": "string", "description": "Assembled construct DNA sequence (omit if using sequence_cache_key)"},
-                "sequence_cache_key": {"type": "string", "description": "Cache key returned by get_addgene_plasmid or other tools — use this instead of copying long sequences verbatim"},
+                "sequence_cache_key": {"type": "string", "description": "Cache key returned by fetch_addgene_sequence_with_metadata or other tools — use this instead of copying long sequences verbatim"},
                 "output_format": {"type": "string", "description": "Output format", "enum": ["raw", "fasta", "genbank"]},
                 "construct_name": {"type": "string", "description": "Name for the construct", "default": "construct"},
                 "backbone_name": {"type": "string", "description": "Backbone name for annotation", "default": ""},
@@ -319,7 +319,7 @@ TOOLS = [
         },
     },
     {
-        "name": "get_addgene_plasmid",
+        "name": "fetch_addgene_sequence_with_metadata",
         "description": "Fetch detailed info about a specific Addgene plasmid by catalog number.",
         "input_schema": {
             "type": "object",
@@ -417,7 +417,7 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by get_addgene_plasmid."},
+                "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by fetch_addgene_sequence_with_metadata."},
                 "insert_name": {"type": "string", "description": "Name of the gene or feature to extract (case-insensitive)."},
                 "start": {"type": "integer", "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly. If start >= end the feature is treated as origin-spanning (wraps around position 0)."},
                 "end": {"type": "integer", "description": "0-based end coordinate (exclusive). Origin-spanning: if start >= end, extracts seq[start:] + seq[:end]."},
@@ -436,7 +436,7 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by get_addgene_plasmid."},
+                "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by fetch_addgene_sequence_with_metadata."},
                 "insert_names": {"type": "array", "items": {"type": "string"}, "description": "List of gene/feature names to extract (case-insensitive)."},
             },
             "required": ["plasmid_sequence", "insert_names"],
@@ -1116,10 +1116,10 @@ def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = Non
                 lines.append(f"- {r.get('name','?')} (Addgene #{r.get('addgene_id','?')})")
             return "\n".join(lines)
 
-        elif name == "get_addgene_plasmid":
+        elif name == "fetch_addgene_sequence_with_metadata":
             if not ADDGENE_AVAILABLE:
                 return "Addgene integration not available."
-            plasmid = _get_addgene_plasmid(args["addgene_id"])
+            plasmid = _fetch_addgene_sequence_with_metadata(args["addgene_id"])
             if not plasmid:
                 return f"Could not fetch Addgene #{args['addgene_id']}"
             if tracker:

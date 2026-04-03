@@ -497,23 +497,11 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
         if not addgene_id:
             return None
 
-        logger.info(f"Found Addgene #{addgene_id} ({best.get('name', '?')}), fetching GenBank data...")
+        logger.info(f"Found Addgene #{addgene_id} ({best.get('name', '?')}), fetching plasmid data...")
 
-        # Fetch metadata
         plasmid = client.get_plasmid(addgene_id)
         if not plasmid:
             return None
-
-        # Fetch sequence + features from GenBank file
-        sequence, features, mcs_position = client.get_genbank_data(addgene_id)
-        if sequence:
-            plasmid.sequence = sequence
-            plasmid.sequence_source = "addgene"
-            plasmid.size_bp = len(sequence)
-        if features:
-            plasmid.parsed_features = features
-        if mcs_position:
-            plasmid.mcs_position = mcs_position
 
         backbone = plasmid.to_backbone_dict()
 
@@ -545,8 +533,7 @@ def get_backbone_by_id(backbone_id: str) -> Optional[dict]:
         logger.info(
             f"Cached Addgene #{addgene_id} as '{backbone['id']}' "
             f"({backbone.get('size_bp', '?')} bp, "
-            f"{len(features)} features, "
-            f"MCS: {'yes' if mcs_position else 'no'})"
+            f"{len(backbone.get('features', []))} features)"
         )
         return backbone
 

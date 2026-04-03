@@ -110,7 +110,7 @@ except ImportError:
 try:
     from .addgene_integration import (
         search_addgene as _search_addgene_fn,
-        get_addgene_plasmid as _get_addgene_plasmid_fn,
+        fetch_addgene_sequence_with_metadata as _fetch_addgene_sequence_with_metadata_fn,
         AddgeneLibraryIntegration,
     )
     ADDGENE_AVAILABLE = True
@@ -315,7 +315,7 @@ async def get_insert(args):
     {
         "type": "object",
         "properties": {
-            "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by get_addgene_plasmid."},
+            "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by fetch_addgene_sequence_with_metadata."},
             "insert_name": {"type": "string", "description": "Name of the gene or feature to extract (case-insensitive)."},
             "start": {"type": "integer", "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly. If start >= end the feature is treated as origin-spanning (wraps around position 0)."},
             "end": {"type": "integer", "description": "0-based end coordinate (exclusive). Origin-spanning: if start >= end, extracts seq[start:] + seq[:end]."},
@@ -351,7 +351,7 @@ async def extract_insert_from_plasmid_tool(args):
     {
         "type": "object",
         "properties": {
-            "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by get_addgene_plasmid."},
+            "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by fetch_addgene_sequence_with_metadata."},
             "insert_names": {"type": "array", "items": {"type": "string"}, "description": "List of gene/feature names to extract (case-insensitive)."},
         },
         "required": ["plasmid_sequence", "insert_names"],
@@ -538,7 +538,7 @@ async def assemble_construct(args):
         "type": "object",
         "properties": {
             "sequence": {"type": "string", "description": "Assembled construct DNA sequence (omit if using sequence_cache_key)"},
-            "sequence_cache_key": {"type": "string", "description": "Cache key returned by get_addgene_plasmid or other tools — use this instead of copying long sequences verbatim"},
+            "sequence_cache_key": {"type": "string", "description": "Cache key returned by fetch_addgene_sequence_with_metadata or other tools — use this instead of copying long sequences verbatim"},
             "output_format": {"type": "string", "description": "Output format", "enum": ["raw", "fasta", "genbank"]},
             "construct_name": {"type": "string", "description": "Name for the construct", "default": "construct"},
             "backbone_name": {"type": "string", "description": "Backbone name for annotation", "default": ""},
@@ -713,7 +713,7 @@ async def search_addgene(args):
 
 
 @tool(
-    "get_addgene_plasmid",
+    "fetch_addgene_sequence_with_metadata",
     "Fetch detailed info about a specific Addgene plasmid by catalog number.",
     {
         "type": "object",
@@ -724,10 +724,10 @@ async def search_addgene(args):
         "required": ["addgene_id"],
     },
 )
-async def get_addgene_plasmid(args):
+async def fetch_addgene_sequence_with_metadata(args):
     if not ADDGENE_AVAILABLE:
         return _error("Addgene integration not available.")
-    plasmid = _get_addgene_plasmid_fn(args["addgene_id"])
+    plasmid = _fetch_addgene_sequence_with_metadata_fn(args["addgene_id"])
     if not plasmid:
         return _text(f"Could not fetch Addgene #{args['addgene_id']}")
     _record("add_addgene_plasmid", plasmid.__dict__)
@@ -1444,7 +1444,7 @@ ALL_TOOLS = [
     export_construct,
     validate_construct,
     search_addgene,
-    get_addgene_plasmid,
+    fetch_addgene_sequence_with_metadata,
     import_addgene_to_library,
     search_all_tool,
     search_gene_tool,

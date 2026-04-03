@@ -41,13 +41,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-# Support both package import (`from .addgene_integration import ...`) and
-# bare import (`from addgene_integration import ...`) — app/app.py uses the
-# latter via sys.path manipulation.
 try:
-    from .addgene_integration import parse_genbank
+    from .genbank_utils import parse_genbank
 except ImportError:
-    from addgene_integration import parse_genbank
+    from genbank_utils import parse_genbank
 
 logger = logging.getLogger(__name__)
 

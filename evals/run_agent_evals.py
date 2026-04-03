@@ -1484,7 +1484,7 @@ AGENT_CASES = [
         name="Download Addgene #244170 and export as GenBank",
         prompt="Download the plasmid 244170 and export as a genbank file",
         description=(
-            "Agent must call get_addgene_plasmid(244170), then export_construct with "
+            "Agent must call fetch_addgene_sequence_with_metadata(244170), then export_construct with "
             "sequence_cache_key and output_format='genbank'. No assembly. "
             "Graded on transcript: GenBank output must be non-empty and contain "
             "expected feature annotations (mNeonGreen CDS, CMV promoter/enhancer, "

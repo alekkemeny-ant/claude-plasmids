@@ -1088,7 +1088,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=f"Fusion error: {str(e)}")]
 
     elif name == "extract_insert_from_plasmid":
-        breakpoint()
         result = _extract_insert_from_plasmid(
             plasmid_sequence=arguments["plasmid_sequence"],
             insert_name=arguments["insert_name"],

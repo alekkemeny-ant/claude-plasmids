@@ -1218,4 +1218,7 @@ def extract_insert_from_plasmid(
         "sequence": seq,
         "size_bp": len(seq),
         "source": "extracted_from_plasmid",
+        "start": int(row["qstart"]),
+        "end": int(row["qend"]),
+        "strand": int(row["sframe"]),
     }

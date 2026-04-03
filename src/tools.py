@@ -125,6 +125,20 @@ try:
 except ImportError:
     LITERATURE_AVAILABLE = False
 
+# FPbase integration (optional)
+try:
+    from .fpbase_integration import search_fpbase as _search_fpbase_fn
+    FPBASE_AVAILABLE = True
+except ImportError:
+    FPBASE_AVAILABLE = False
+
+# GenBank-with-plot export (optional — requires pLannotate, conda-only)
+try:
+    from .assembler import export_genbank_with_plot as _export_genbank_with_plot
+    PLOT_EXPORT_AVAILABLE = True
+except ImportError:
+    PLOT_EXPORT_AVAILABLE = False
+
 LIBRARY_PATH = Path(__file__).parent.parent / "library"
 
 # ── Per-run reference tracker ──────────────────────────────────────────
@@ -167,6 +181,22 @@ def _cache_sequence(key: str, sequence: str) -> None:
 
 def _get_cached_sequence(key: str) -> Optional[str]:
     return _sequence_cache.get(key)
+
+
+# ── Per-run plot capture ────────────────────────────────────────────────
+# export_construct stores the Bokeh plot JSON here so the web UI can emit
+# a plot_data SSE event after the export tool result. Same pattern as
+# set_tracker/get_tracker — caller clears before run, reads after.
+_last_plot_json: Optional[str] = None
+
+
+def get_last_plot_json() -> Optional[str]:
+    return _last_plot_json
+
+
+def clear_last_plot_json() -> None:
+    global _last_plot_json
+    _last_plot_json = None
 
 
 def _error(s: str) -> dict:
@@ -577,6 +607,23 @@ async def export_construct(args):
             desc = f"{iname} in {bname}, {len(seq)} bp" if bname else f"{len(seq)} bp"
             return _text(format_as_fasta(seq, cname, desc))
         elif fmt in ("genbank", "gb"):
+            global _last_plot_json
+            _last_plot_json = None
+            linear = bool(args.get("linear", False))
+            # export_genbank_with_plot requires pLannotate (conda-only). Fall
+            # back to plain format_as_genbank (no plot) if unavailable.
+            if PLOT_EXPORT_AVAILABLE:
+                try:
+                    gbk, plot_json = await asyncio.to_thread(
+                        _export_genbank_with_plot,
+                        sequence=seq, name=cname, backbone_name=bname,
+                        insert_name=iname, insert_position=ipos,
+                        insert_length=ilen, linear=linear,
+                    )
+                    _last_plot_json = plot_json
+                    return _text(gbk)
+                except Exception:
+                    pass  # fall through to non-plot path
             result = await asyncio.to_thread(
                 format_as_genbank,
                 sequence=seq, name=cname, backbone_name=bname,
@@ -1430,6 +1477,69 @@ async def fetch_oa_fulltext_tool(args):
     return _text("\n".join(lines))
 
 
+@tool(
+    "search_fpbase",
+    "Search FPbase (fpbase.org) for fluorescent proteins by name. FPbase is the "
+    "canonical reference for engineered FPs like mRuby, mScarlet, mNeonGreen — "
+    "these are NOT natural genes and won't be found in NCBI Gene. Use when the "
+    "user wants an FP not in the local library.",
+    {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Fluorescent protein name (e.g., 'mRuby', 'mScarlet')"},
+        },
+        "required": ["name"],
+    },
+)
+async def search_fpbase_tool(args):
+    if not FPBASE_AVAILABLE:
+        return _error("FPbase integration not available.")
+    results = _search_fpbase_fn(args["name"], limit=5)
+    if not results:
+        return _text(
+            f"No fluorescent proteins found on FPbase matching "
+            f"'{args['name']}'. Try a different spelling or check "
+            f"https://www.fpbase.org/"
+        )
+    lines = [f"FPbase results for '{args['name']}':"]
+    for r in results:
+        ex_em = ""
+        if r.get("ex_max") and r.get("em_max"):
+            ex_em = f" — Ex/Em {r['ex_max']}/{r['em_max']} nm"
+        lines.append(f"  - {r['name']} (slug: {r['slug']}){ex_em}")
+    lines.append("\nUse get_insert with the FP name to retrieve the DNA sequence.")
+    return _text("\n".join(lines))
+
+
+@tool(
+    "log_experimental_outcome",
+    "Record a wet-lab experimental outcome for a construct designed in this "
+    "session. The web UI persists this to session memory so future "
+    "troubleshooting turns can see what the user already tried.",
+    {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["success", "failed", "partial"]},
+            "observation": {"type": "string", "description": "What was observed in the lab"},
+            "construct_name": {"type": "string", "description": "Name of the construct tested", "default": ""},
+        },
+        "required": ["status", "observation"],
+    },
+)
+async def log_experimental_outcome_tool(args):
+    status = args["status"]
+    observation = args["observation"]
+    cname = args.get("construct_name", "")
+    # The web agent loop intercepts the [OUTCOME_LOGGED] marker to persist
+    # the outcome to session state. CLI/eval callers ignore the marker.
+    return _text(
+        f"[OUTCOME_LOGGED] status={status} "
+        f"construct={cname!r} observation={observation!r}\n\n"
+        f"Outcome recorded for this session: **{status}** — "
+        f"{observation}. Future troubleshooting turns will see this context."
+    )
+
+
 # Collect all tool objects
 ALL_TOOLS = [
     search_backbones,
@@ -1463,6 +1573,10 @@ ALL_TOOLS = [
     assemble_golden_gate_tool,
     # Literature
     fetch_oa_fulltext_tool,
+    # FPbase fluorescent protein search
+    search_fpbase_tool,
+    # Troubleshooting / project memory
+    log_experimental_outcome_tool,
 ]
 
 ALL_TOOL_NAMES = [t.name for t in ALL_TOOLS]

@@ -1770,7 +1770,59 @@ function appendTextDelta(text) {
   }
 }
 
+// ── Smooth streaming ──────────────────────────────────────────────────
+// API text_delta events arrive in ~40-100 char bursts every ~400-500ms.
+// Dumping each burst at once looks choppy. Buffer incoming chars and
+// drain via requestAnimationFrame so text "types" smoothly. The drain
+// rate adapts (1/8 of buffer per frame, clamped [2,12] chars) so it
+// never lags far behind the model (~180 ch/s) but stays smooth.
+let textBuffer = '';
+let drainHandle = null;
+
+function bufferTextDelta(text) {
+  textBuffer += text;
+  if (drainHandle === null) drainHandle = requestAnimationFrame(drainText);
+}
+
+function drainText() {
+  drainHandle = null;
+  if (textBuffer.length === 0) return;
+  const n = Math.max(2, Math.min(12, Math.ceil(textBuffer.length / 8)));
+  appendTextDelta(textBuffer.slice(0, n));
+  textBuffer = textBuffer.slice(n);
+  if (textBuffer.length > 0) drainHandle = requestAnimationFrame(drainText);
+}
+
+function flushTextBuffer() {
+  if (drainHandle !== null) { cancelAnimationFrame(drainHandle); drainHandle = null; }
+  if (textBuffer) { appendTextDelta(textBuffer); textBuffer = ''; }
+}
+
+// Show a blinking cursor immediately on send so the user sees activity
+// during TTFT, before any text/thinking/tool event arrives.
+let pendingCursorEl = null;
+
+function showPendingCursor() {
+  clearPendingCursor();
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble-assistant';
+  const cursor = document.createElement('span');
+  cursor.className = 'streaming-cursor';
+  bubble.appendChild(cursor);
+  div.appendChild(bubble);
+  getInner().appendChild(div);
+  pendingCursorEl = div;
+  scrollToBottom();
+}
+
+function clearPendingCursor() {
+  if (pendingCursorEl) { pendingCursorEl.remove(); pendingCursorEl = null; }
+}
+
 function endTextBlock() {
+  flushTextBuffer();
   if (currentTextDiv) {
     const cursor = currentTextDiv.querySelector('.streaming-cursor');
     if (cursor) cursor.remove();
@@ -1879,6 +1931,7 @@ async function sendMessage() {
   userDiv.innerHTML = '<div class="msg-bubble-user">' + escapeHtml(text) + '</div>';
   inner.appendChild(userDiv);
   scrollToBottom();
+  showPendingCursor();
 
   abortController = new AbortController();
 
@@ -1920,17 +1973,18 @@ async function sendMessage() {
             saveSessionId(event.session_id);
             loadSessions();
             break;
-          case 'thinking_start': startThinkingBlock(); break;
+          case 'thinking_start': clearPendingCursor(); startThinkingBlock(); break;
           case 'thinking_delta': appendThinkingDelta(event.content); break;
           case 'thinking_end': endThinkingBlock(); break;
-          case 'text_start': startTextBlock(); break;
-          case 'text_delta': appendTextDelta(event.content); break;
+          case 'text_start': clearPendingCursor(); flushTextBuffer(); startTextBlock(); break;
+          case 'text_delta': bufferTextDelta(event.content); break;
           case 'text_end': endTextBlock(); break;
-          case 'tool_use_start': startToolBlock(event.tool); break;
+          case 'tool_use_start': clearPendingCursor(); startToolBlock(event.tool); break;
           case 'tool_result': finishToolBlock(event.tool, event.input || {}, event.content, event.download_content, event.download_filename); break;
           case 'plot_data': addPlasmidPlot(event.plot_json); break;
           case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
           case 'error':
+            clearPendingCursor();
             startTextBlock();
             appendTextDelta('Error: ' + event.content);
             endTextBlock();
@@ -1943,12 +1997,14 @@ async function sendMessage() {
     }
   } catch (err) {
     if (err.name !== 'AbortError') {
+      clearPendingCursor();
       startTextBlock();
       appendTextDelta('Connection error: ' + err.message);
       endTextBlock();
     }
   }
 
+  clearPendingCursor();
   isStreaming = false;
   abortController = null;
   streamingInner = null;

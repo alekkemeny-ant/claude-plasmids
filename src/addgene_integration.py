@@ -283,22 +283,9 @@ class AddgeneClient:
         Returns:
             List of search results with basic info
         """
-        if self.use_official_api:
-            return self._search_api(query, limit)
-        else:
-            return self._search_scrape(query, limit)
+        return self._search_scrape(query, limit)
     
-    def _search_api(self, query: str, limit: int) -> List[Dict]:
-        """Search using official API."""
-        try:
-            breakpoint() #Search is not a supported function of the current API --- IGNORE ---
-            url = f"{self.API_BASE_URL}/v1/plasmids/search?q={quote(query)}&limit={limit}"
-            data = self._fetch_json(url)
-            return data.get("results", [])
-        except Exception as e:
-            logger.error(f"API search error: {e}")
-            return []
-    
+
     def _search_scrape(self, query: str, limit: int) -> List[Dict]:
         """Search by scraping the search page."""
         try:

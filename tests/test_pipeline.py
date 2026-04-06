@@ -35,7 +35,7 @@ from assembler import (
     clean_sequence,
 )
 from library import get_backbone_by_id, get_insert_by_id
-from addgene_integration import get_addgene_sequence
+from addgene_integration import fetch_addgene_sequence
 from evals.rubric import score_construct, RubricResult
 from evals.test_cases import (
     TIER_1_CASES,
@@ -103,7 +103,7 @@ def _run_pipeline_case(tc: TestCase) -> Optional[RubricResult]:
     if tc.addgene_ground_truth_id:
         aid = tc.addgene_ground_truth_id
         if aid not in _addgene_sequence_cache:
-            _addgene_sequence_cache[aid] = get_addgene_sequence(aid)
+            _addgene_sequence_cache[aid] = fetch_addgene_sequence(aid)
         ground_truth = _addgene_sequence_cache[aid]
 
     # Generate GenBank output for Output Verification checks

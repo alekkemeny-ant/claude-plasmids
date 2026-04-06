@@ -42,10 +42,26 @@ Additional env vars enable optional data sources:
 
 | Env var | Effect | Availability |
 |---|---|---|
-| `PLASMID_USER_LIBRARY` | Path to a directory of user-provided GenBank files (`backbones/*.gb`, `inserts/*.gb`). Entries appear with `user:` ID prefix. | CLI + Web UI |
+| `ADDGENE_API_TOKEN` | Addgene developer API token. Required for automatic plasmid sequence retrieval from Addgene. Without this, sequences cannot be fetched automatically — users must manually upload GenBank files for any plasmid not already in the local library. See [Addgene API key setup](#addgene-api-key) below. | CLI + Web UI |
+| `PLASMID_USER_LIBRARY` | Path to a directory of user-provided GenBank files (`backbones/*.gb`, `inserts/*.gb`, `annotations/*.gb`). Backbone/insert entries appear with `user:` ID prefix. Annotation files extend pLannotate with custom feature recognition. | CLI + Web UI |
 | `BENCHLING_SUBDOMAIN` | Your Benchling workspace subdomain. Enables read+write access via Benchling's remote MCP. | CLI only¹ |
 | `PLASMID_ENABLE_PUBMED` | Default `1`. Set `0` to disable PubMed MCP (literature search + PMC full text). | CLI only¹ |
 | `UNPAYWALL_EMAIL` | Your email. Enables `fetch_oa_fulltext` for open-access papers outside PMC. | CLI + Web UI |
+
+### Addgene API key
+
+The Addgene API token enables automatic retrieval of plasmid sequences directly from [Addgene's developer API](https://api.developers.addgene.org). Without it, the tool cannot fetch sequences for plasmids not already in the local library — you will need to manually download GenBank files from Addgene and upload them via the `PLASMID_USER_LIBRARY` mechanism.
+
+**To set up:**
+
+1. Obtain an API token from the [Addgene developer portal](https://www.addgene.org/tools/api/).
+2. Add it to your `.env` file:
+
+```bash
+ADDGENE_API_TOKEN=your-token-here
+```
+
+The token is automatically picked up at startup. No restart is required if you add it while the server is not running.
 
 ¹ The web UI uses the raw Anthropic API (not the Agent SDK) and cannot attach external MCP servers. Benchling and PubMed tools are only available via `python app/agent.py` or the evals harness.
 
@@ -227,7 +243,7 @@ The MCP server (`src/server.py`) exposes 18 tools for Claude to use:
 
 - `search_backbones` / `get_backbone` — search and retrieve backbone vectors
 - `search_inserts` / `get_insert` — search and retrieve insert sequences
-- `search_addgene` / `get_addgene_plasmid` / `import_addgene_to_library` — Addgene integration
+- `search_addgene` / `fetch_addgene_sequence_with_metadata` / `import_addgene_to_library` — Addgene integration
 - `search_gene` / `fetch_gene` — NCBI gene search + CDS retrieval
 - `fuse_inserts` — protein tagging / fusion CDS assembly
 - `validate_sequence` — DNA validation (valid chars, GC content, codons)
@@ -246,6 +262,60 @@ python -m src.server
 ## Backbone Library
 
 21 curated backbones including pcDNA3.1(+/-), pUC19, pEGFP-N1, pGEX-4T-1, pBABE-puro, pAAV-CMV, pLKO.1-puro, pCDNA3, and more. When a backbone isn't found locally, it is automatically fetched from Addgene — the GenBank file is parsed for sequence, feature annotations (promoters, resistance genes, origins, polyA signals, MCS), and cached in `backbones.json` for future fast lookups. Backbones with feature annotations get full biological sanity checks in the rubric.
+
+## Custom Annotations
+
+The custom annotation system lets you extend pLannotate's feature recognition with your own sequences — useful for lab-private constructs or recently-published sequences not yet in any public database.
+
+### Setup
+
+Place annotated GenBank files in an `annotations/` subdirectory of your `PLASMID_USER_LIBRARY`:
+
+```
+$PLASMID_USER_LIBRARY/
+    backbones/          ← existing BYOL backbones
+    inserts/            ← existing BYOL inserts
+    annotations/        ← custom annotation GenBank files (NEW)
+        my_promoter.gb
+        new_fluorophore.gb
+        ...
+```
+
+Each GenBank file can contain one or more annotated features. Any feature with a `/label`, `/gene`, or `/product` qualifier is extracted and becomes a BLAST target. The feature type (CDS, promoter, misc_feature, etc.) and label are preserved in the annotation output.
+
+### How it works
+
+On startup, the app automatically:
+1. Scans `annotations/*.gb` for annotated features
+2. Builds a local BLAST database from those features (stored in `annotations/.blast_db/`)
+3. Rebuilds only when the source files change (MD5 manifest cache)
+
+When you call `extract_insert_from_plasmid` or `extract_inserts_from_plasmid`, results from your custom database are merged with pLannotate's output. Custom annotations take priority when they cover the same region at equal or higher identity.
+
+### Privacy
+
+All annotation sequences stay on your local machine. The BLAST database is built and queried entirely via local subprocesses — no sequences are transmitted to any external service.
+
+### Requirements
+
+BLAST+ must be available (it is installed automatically with the conda environment):
+
+```bash
+conda activate claude-plasmids
+which makeblastdb   # should resolve to the conda env bin
+```
+
+If BLAST is not found, custom annotations are silently disabled and pLannotate-only behaviour is preserved.
+
+### Example
+
+Given a GenBank file `annotations/mCerulean3.gb` with a CDS feature labelled `mCerulean3`, the agent can then extract it by name from any plasmid that contains it:
+
+```
+"Extract mCerulean3 from the sequence I uploaded"
+```
+
+The feature will be found even if pLannotate's built-in databases don't include it.
 
 ## Batch Design
 

@@ -66,14 +66,16 @@ Use tools to obtain both sequences. Follow this resolution order:
 1. Search with `search_backbones` or `get_backbone`. If the backbone isn't in the local library, it will automatically be fetched from Addgene (sequence + feature annotations) and cached locally.
 2. Confirm the backbone has a full sequence. If not, tell the user.
 3. Call `get_insertion_site` to retrieve the MCS start/end positions for this backbone. Store this position — it will be used as the default insertion point in Step 3.
-4. You can also use `search_addgene` and `get_addgene_plasmid` to browse Addgene directly if needed.
-5. **User library**: IDs starting with `user:` (e.g., `user:pMyVector`) come from GenBank files the user placed in their local library directory. These are equally valid sources — treat them like any other backbone. The same applies to inserts with `user:` prefix.
+4. You can also use `search_addgene` and `fetch_addgene_sequence_with_metadata` to browse Addgene directly if needed.
+5. **User library**: IDs starting with `user:` (e.g., `user:pMyVector`) come from GenBank files the user placed in their local library directory (`$PLASMID_USER_LIBRARY/backbones/` or `inserts/`). These are equally valid sources — treat them like any other backbone or insert.
+6. **Custom annotations**: If the user has placed annotated GenBank files in `$PLASMID_USER_LIBRARY/annotations/`, those feature annotations are automatically available to pLannotate during extraction. This allows lab-private or recently-published sequences to be recognised by name in `extract_insert_from_plasmid` and `extract_inserts_from_plasmid`.
 
 **For the insert:**
 1. Search the local library: `search_inserts` or `get_insert`
 2. If not in the local library → use `search_gene` to find it on NCBI, then `fetch_gene` to get the CDS
 3. If the user provides a raw sequence, validate it with `validate_sequence`
 4. `get_insert` will also auto-fallback to NCBI if the insert isn't in the local library
+5. If the insert cannot be found in the library or NCBI, but a full plasmid sequence is available (user-provided or fetched from Addgene) → use `extract_insert_from_plasmid` to locate and extract the CDS by name using pLannotate annotation for a single gene, or `extract_inserts_from_plasmid` if the user is looking for a specific insert region (or series of genes) from a plasmid (such as many genes including their specific linker sequences.)
 
 **For protein fusions / tagging:**
 1. Retrieve all component sequences (tag + gene) using the steps above
@@ -179,8 +181,9 @@ Check the validation report. All Critical checks must pass. If any fail, diagnos
 
 ### Step 5: Export and Present
 
-Call `export_construct` to format the output:
+Call `export_construct` to format the output. Use `sequence=` for assembled constructs, or `sequence_cache_key=` when exporting a sequence fetched by `fetch_addgene_sequence_with_metadata` (use the cache key it returns — do not copy the raw sequence):
 ```
+# Assembled construct:
 export_construct(
   sequence="<assembled sequence>",
   output_format="genbank",
@@ -190,7 +193,16 @@ export_construct(
   insert_position=895,
   insert_length=720
 )
+
+# Whole Addgene plasmid (no assembly):
+export_construct(
+  sequence_cache_key="addgene:244170",
+  output_format="genbank",
+  construct_name="L4312-IL10Rb"
+)
 ```
+
+**Topology**: By default, exported sequences are recorded as circular (plasmid). If exporting a linear fragment — such as a CDS extracted with `extract_insert_from_plasmid` or  `extract_inserts_from_plasmid`— pass `linear=true` to `export_construct`.
 
 Present the user with:
 1. A summary of the construct (backbone, insert, total size, key features)
@@ -352,6 +364,8 @@ Use this knowledge to make design decisions and catch errors — but always use 
 | `search_inserts` | Search inserts by name/category |
 | `get_backbone` | Get full backbone info (optionally with sequence) |
 | `get_insert` | Get full insert info with sequence (auto-fallback to NCBI) |
+| `extract_insert_from_plasmid` | Extract a CDS from a full plasmid sequence by name (pLannotate-based fallback) |
+| `extract_inserts_from_plasmid` | Extract a series of coding sequences from a full plasmid sequence by names (pLannotate-based fallback) |
 | `get_insertion_site` | Get MCS position for a backbone |
 
 ### NCBI Gene Integration
@@ -374,7 +388,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 | Tool | Purpose |
 |------|---------|
 | `search_addgene` | Search Addgene catalog |
-| `get_addgene_plasmid` | Fetch plasmid details from Addgene |
+| `fetch_addgene_sequence_with_metadata` | Fetch plasmid details from Addgene |
 | `import_addgene_to_library` | Import an Addgene plasmid to local library |
 
 ### Assembly & Validation
@@ -512,6 +526,10 @@ When a session has prior experimental outcomes logged (shown in your context as 
 ### Tool Routing Decision Tree
 
 ```
+User wants to download / export a plasmid as-is (no assembly)
+  ├─ Has Addgene ID? → fetch_addgene_sequence_with_metadata(addgene_id) → export_construct(sequence_cache_key=..., output_format=...)
+  └─ User provided raw sequence? → export_construct(sequence=..., output_format=...)
+
 User wants to build a construct
   ├─ Is this a Golden Gate / MoClo / Type IIS assembly?
   │   ├─ Yes → follow Golden Gate Workflow (see ## Golden Gate Assembly section)
@@ -529,6 +547,9 @@ User wants to build a construct
   │   │   ├─ Species not specified? → STOP. Ask user: "Which species — human, mouse, etc.?" End turn. No tools.
   │   │   ├─ Multiple variants found? → STOP. Present options, ask user to choose (e.g., H2B subtypes). End turn.
   │   │   └─ Single unambiguous match → proceed
+  │   ├─ Addgene plasmid fetched and contains the gene/insert?
+  │   │   ├─ Yes, insert contains a single gene, extract_insert_from_plasmid(plasmid_sequence, insert_name)
+  │   │   └─ Yes, insert contains many genes, extract_inserts_from_plasmid(plasmid_sequence, insert_names)
   │   ├─ User provided raw sequence? → validate_sequence
   │   └─ None of the above? → ask user for sequence
   ├─ Is this a fusion / tagged protein?

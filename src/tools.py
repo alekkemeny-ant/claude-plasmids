@@ -33,6 +33,8 @@ from .library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    extract_insert_from_plasmid as _extract_insert_from_plasmid,
+    extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
     infer_species_from_cell_line,
 )
 from .assembler import (
@@ -108,7 +110,7 @@ except ImportError:
 try:
     from .addgene_integration import (
         search_addgene as _search_addgene_fn,
-        get_addgene_plasmid as _get_addgene_plasmid_fn,
+        fetch_addgene_sequence_with_metadata as _fetch_addgene_sequence_with_metadata_fn,
         AddgeneLibraryIntegration,
     )
     ADDGENE_AVAILABLE = True
@@ -122,6 +124,20 @@ try:
     LITERATURE_AVAILABLE = True
 except ImportError:
     LITERATURE_AVAILABLE = False
+
+# FPbase integration (optional)
+try:
+    from .fpbase_integration import search_fpbase as _search_fpbase_fn
+    FPBASE_AVAILABLE = True
+except ImportError:
+    FPBASE_AVAILABLE = False
+
+# GenBank-with-plot export (optional — requires pLannotate, conda-only)
+try:
+    from .assembler import export_genbank_with_plot as _export_genbank_with_plot
+    PLOT_EXPORT_AVAILABLE = True
+except ImportError:
+    PLOT_EXPORT_AVAILABLE = False
 
 LIBRARY_PATH = Path(__file__).parent.parent / "library"
 
@@ -151,6 +167,36 @@ def _record(method_name: str, *args, **kwargs) -> None:
 def _text(s: str) -> dict:
     """Helper to build a tool result."""
     return {"content": [{"type": "text", "text": s}]}
+
+
+# ── Sequence cache ──────────────────────────────────────────────────────
+# Stores full sequences fetched during a session so tools can reference
+# them by key without the model copying long strings verbatim.
+_sequence_cache: dict[str, str] = {}
+
+
+def _cache_sequence(key: str, sequence: str) -> None:
+    _sequence_cache[key] = sequence
+
+
+def _get_cached_sequence(key: str) -> Optional[str]:
+    return _sequence_cache.get(key)
+
+
+# ── Per-run plot capture ────────────────────────────────────────────────
+# export_construct stores the Bokeh plot JSON here so the web UI can emit
+# a plot_data SSE event after the export tool result. Same pattern as
+# set_tracker/get_tracker — caller clears before run, reads after.
+_last_plot_json: Optional[str] = None
+
+
+def get_last_plot_json() -> Optional[str]:
+    return _last_plot_json
+
+
+def clear_last_plot_json() -> None:
+    global _last_plot_json
+    _last_plot_json = None
 
 
 def _error(s: str) -> dict:
@@ -294,6 +340,71 @@ async def get_insert(args):
 
 
 @tool(
+    "extract_insert_from_plasmid",
+    "Extract a single CDS insert from a full plasmid sequence by name. Uses pLannotate to annotate the plasmid and locate the feature. Use this when an insert cannot be found in the local library or NCBI — for example, when the user provides a plasmid sequence or an Addgene plasmid has been fetched and contains the gene of interest.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by fetch_addgene_sequence_with_metadata."},
+            "insert_name": {"type": "string", "description": "Name of the gene or feature to extract (case-insensitive)."},
+            "start": {"type": "integer", "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly. If start >= end the feature is treated as origin-spanning (wraps around position 0)."},
+            "end": {"type": "integer", "description": "0-based end coordinate (exclusive). Origin-spanning: if start >= end, extracts seq[start:] + seq[:end]."},
+            "strand": {"type": "integer", "description": "1 (forward, default) or -1 (reverse complement the extracted region). Only used with explicit start/end; inferred automatically when using pLannotate annotation.", "enum": [1, -1]},
+        },
+        "required": ["plasmid_sequence", "insert_name"],
+    },
+)
+async def extract_insert_from_plasmid_tool(args):
+    plasmid_seq = args["plasmid_sequence"]
+    if plasmid_seq in _sequence_cache:
+        plasmid_seq = _sequence_cache[plasmid_seq]
+    result = _extract_insert_from_plasmid(
+        plasmid_sequence=plasmid_seq,
+        insert_name=args["insert_name"],
+        start=args.get("start"),
+        end=args.get("end"),
+        strand=args.get("strand", 1),
+    )
+    if not result:
+        return _text(f"Could not extract '{args['insert_name']}' from the provided plasmid sequence.")
+    seq = result["sequence"]
+    return _text(
+        f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
+        f"Source: {result['source']}\n\n"
+        f"DNA Sequence:\n{seq}"
+    )
+
+
+@tool(
+    "extract_inserts_from_plasmid",
+    "Extract multiple named CDS inserts from a full plasmid sequence in a single pLannotate annotation pass. Use when you need to pull several genes out of the same plasmid.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by fetch_addgene_sequence_with_metadata."},
+            "insert_names": {"type": "array", "items": {"type": "string"}, "description": "List of gene/feature names to extract (case-insensitive)."},
+        },
+        "required": ["plasmid_sequence", "insert_names"],
+    },
+)
+async def extract_inserts_from_plasmid_tool(args):
+    plasmid_seq = args["plasmid_sequence"]
+    if plasmid_seq in _sequence_cache:
+        plasmid_seq = _sequence_cache[plasmid_seq]
+    result = _extract_inserts_from_plasmid(
+        plasmid_sequence=plasmid_seq,
+        insert_names=args["insert_names"],
+    )
+    if not result:
+        return _text(f"Could not extract any of {args['insert_names']} from the provided plasmid sequence.")
+    return _text(
+        f"Extracted region spanning: {result['name']} ({result['size_bp']} bp)\n"
+        f"Source: {result['source']}\n\n"
+        f"DNA Sequence:\n{result['sequence']}"
+    )
+
+
+@tool(
     "list_all_backbones",
     "List all available backbone plasmids in the library.",
     {"type": "object", "properties": {}},
@@ -429,6 +540,8 @@ async def assemble_construct(args):
 
     bb_name = backbone_data["name"] if backbone_data else "custom"
     ins_name = insert_data["name"] if insert_data else "custom"
+    assembly_key = f"assembly:{bb_name}:{ins_name}"
+    _cache_sequence(assembly_key, result.sequence)
 
     out = f"Assembly Successful: {ins_name} in {bb_name}\n"
     out += f"Total size: {result.total_size_bp} bp\n"
@@ -440,7 +553,11 @@ async def assemble_construct(args):
     out += f"Reading frame ok: {'Yes' if result.insert_length_valid else 'No'}\n"
     if result.warnings:
         out += "Warnings:\n" + "\n".join(f"- {w}" for w in result.warnings) + "\n"
-    out += f"\nAssembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
+    out += (
+        f"\nAssembled sequence ({result.total_size_bp} bp) — cached as \"{assembly_key}\".\n"
+        f"To export, call export_construct with sequence_cache_key=\"{assembly_key}\" "
+        f"instead of copying the raw sequence."
+    )
     return _text(out)
 
 
@@ -450,7 +567,8 @@ async def assemble_construct(args):
     {
         "type": "object",
         "properties": {
-            "sequence": {"type": "string", "description": "Assembled construct DNA sequence"},
+            "sequence": {"type": "string", "description": "Assembled construct DNA sequence (omit if using sequence_cache_key)"},
+            "sequence_cache_key": {"type": "string", "description": "Cache key returned by fetch_addgene_sequence_with_metadata or other tools — use this instead of copying long sequences verbatim"},
             "output_format": {"type": "string", "description": "Output format", "enum": ["raw", "fasta", "genbank"]},
             "construct_name": {"type": "string", "description": "Name for the construct", "default": "construct"},
             "backbone_name": {"type": "string", "description": "Backbone name for annotation", "default": ""},
@@ -458,12 +576,22 @@ async def assemble_construct(args):
             "insert_position": {"type": "integer", "description": "Insert start position", "default": 0},
             "insert_length": {"type": "integer", "description": "Insert length in bp", "default": 0},
             "reverse_complement_insert": {"type": "boolean", "description": "True if insert was inserted in reverse complement orientation", "default": False},
+            "linear": {"type": "boolean", "description": "Export as linear sequence (default: circular/plasmid)", "default": False},
         },
-        "required": ["sequence", "output_format"],
+        "required": ["output_format"],
     },
 )
 async def export_construct(args):
-    seq = clean_sequence(args["sequence"])
+    cache_key = args.get("sequence_cache_key")
+    if cache_key:
+        cached = _get_cached_sequence(cache_key)
+        if not cached:
+            return _error(f"No cached sequence found for key '{cache_key}'.")
+        seq = clean_sequence(cached)
+    elif args.get("sequence"):
+        seq = clean_sequence(args["sequence"])
+    else:
+        return _error("Provide either 'sequence' or 'sequence_cache_key'.")
     fmt = args["output_format"]
     cname = args.get("construct_name", "construct")
     bname = args.get("backbone_name", "")
@@ -479,6 +607,23 @@ async def export_construct(args):
             desc = f"{iname} in {bname}, {len(seq)} bp" if bname else f"{len(seq)} bp"
             return _text(format_as_fasta(seq, cname, desc))
         elif fmt in ("genbank", "gb"):
+            global _last_plot_json
+            _last_plot_json = None
+            linear = bool(args.get("linear", False))
+            # export_genbank_with_plot requires pLannotate (conda-only). Fall
+            # back to plain format_as_genbank (no plot) if unavailable.
+            if PLOT_EXPORT_AVAILABLE:
+                try:
+                    gbk, plot_json = await asyncio.to_thread(
+                        _export_genbank_with_plot,
+                        sequence=seq, name=cname, backbone_name=bname,
+                        insert_name=iname, insert_position=ipos,
+                        insert_length=ilen, linear=linear,
+                    )
+                    _last_plot_json = plot_json
+                    return _text(gbk)
+                except Exception:
+                    pass  # fall through to non-plot path
             result = await asyncio.to_thread(
                 format_as_genbank,
                 sequence=seq, name=cname, backbone_name=bname,
@@ -615,7 +760,7 @@ async def search_addgene(args):
 
 
 @tool(
-    "get_addgene_plasmid",
+    "fetch_addgene_sequence_with_metadata",
     "Fetch detailed info about a specific Addgene plasmid by catalog number.",
     {
         "type": "object",
@@ -626,18 +771,24 @@ async def search_addgene(args):
         "required": ["addgene_id"],
     },
 )
-async def get_addgene_plasmid(args):
+async def fetch_addgene_sequence_with_metadata(args):
     if not ADDGENE_AVAILABLE:
         return _error("Addgene integration not available.")
-    plasmid = _get_addgene_plasmid_fn(args["addgene_id"])
+    plasmid = _fetch_addgene_sequence_with_metadata_fn(args["addgene_id"])
     if not plasmid:
         return _text(f"Could not fetch Addgene #{args['addgene_id']}")
     _record("add_addgene_plasmid", plasmid.__dict__)
+    cache_key = f"addgene:{args['addgene_id']}"
     out = f"Addgene #{args['addgene_id']}: {plasmid.name}\n"
     out += f"Size: {plasmid.size_bp} bp\n"
     out += f"Resistance: {plasmid.bacterial_resistance}\n"
     if plasmid.sequence:
-        out += f"Sequence: {len(plasmid.sequence)} bp available"
+        _cache_sequence(cache_key, plasmid.sequence)
+        out += (
+            f"Sequence: {len(plasmid.sequence)} bp — cached as \"{cache_key}\".\n"
+            f"To export, call export_construct with sequence_cache_key=\"{cache_key}\" "
+            f"instead of copying the raw sequence."
+        )
     else:
         out += "Sequence: not available"
     return _text(out)
@@ -1326,6 +1477,69 @@ async def fetch_oa_fulltext_tool(args):
     return _text("\n".join(lines))
 
 
+@tool(
+    "search_fpbase",
+    "Search FPbase (fpbase.org) for fluorescent proteins by name. FPbase is the "
+    "canonical reference for engineered FPs like mRuby, mScarlet, mNeonGreen — "
+    "these are NOT natural genes and won't be found in NCBI Gene. Use when the "
+    "user wants an FP not in the local library.",
+    {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Fluorescent protein name (e.g., 'mRuby', 'mScarlet')"},
+        },
+        "required": ["name"],
+    },
+)
+async def search_fpbase_tool(args):
+    if not FPBASE_AVAILABLE:
+        return _error("FPbase integration not available.")
+    results = _search_fpbase_fn(args["name"], limit=5)
+    if not results:
+        return _text(
+            f"No fluorescent proteins found on FPbase matching "
+            f"'{args['name']}'. Try a different spelling or check "
+            f"https://www.fpbase.org/"
+        )
+    lines = [f"FPbase results for '{args['name']}':"]
+    for r in results:
+        ex_em = ""
+        if r.get("ex_max") and r.get("em_max"):
+            ex_em = f" — Ex/Em {r['ex_max']}/{r['em_max']} nm"
+        lines.append(f"  - {r['name']} (slug: {r['slug']}){ex_em}")
+    lines.append("\nUse get_insert with the FP name to retrieve the DNA sequence.")
+    return _text("\n".join(lines))
+
+
+@tool(
+    "log_experimental_outcome",
+    "Record a wet-lab experimental outcome for a construct designed in this "
+    "session. The web UI persists this to session memory so future "
+    "troubleshooting turns can see what the user already tried.",
+    {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["success", "failed", "partial"]},
+            "observation": {"type": "string", "description": "What was observed in the lab"},
+            "construct_name": {"type": "string", "description": "Name of the construct tested", "default": ""},
+        },
+        "required": ["status", "observation"],
+    },
+)
+async def log_experimental_outcome_tool(args):
+    status = args["status"]
+    observation = args["observation"]
+    cname = args.get("construct_name", "")
+    # The web agent loop intercepts the [OUTCOME_LOGGED] marker to persist
+    # the outcome to session state. CLI/eval callers ignore the marker.
+    return _text(
+        f"[OUTCOME_LOGGED] status={status} "
+        f"construct={cname!r} observation={observation!r}\n\n"
+        f"Outcome recorded for this session: **{status}** — "
+        f"{observation}. Future troubleshooting turns will see this context."
+    )
+
+
 # Collect all tool objects
 ALL_TOOLS = [
     search_backbones,
@@ -1340,13 +1554,15 @@ ALL_TOOLS = [
     export_construct,
     validate_construct,
     search_addgene,
-    get_addgene_plasmid,
+    fetch_addgene_sequence_with_metadata,
     import_addgene_to_library,
     search_all_tool,
     search_gene_tool,
     fetch_gene_tool,
     get_cell_line_info_tool,
     fuse_inserts_tool,
+    extract_insert_from_plasmid_tool,
+    extract_inserts_from_plasmid_tool,
     # Phase-2 advanced design tools
     score_construct_confidence_tool,
     predict_fusion_sites_tool,
@@ -1357,9 +1573,39 @@ ALL_TOOLS = [
     assemble_golden_gate_tool,
     # Literature
     fetch_oa_fulltext_tool,
+    # FPbase fluorescent protein search
+    search_fpbase_tool,
+    # Troubleshooting / project memory
+    log_experimental_outcome_tool,
 ]
 
 ALL_TOOL_NAMES = [t.name for t in ALL_TOOLS]
+
+
+def get_anthropic_tool_schemas() -> list[dict]:
+    """Project ALL_TOOLS into Anthropic API ``tools=`` format.
+
+    The web UI calls the Anthropic API directly for low-latency streaming
+    but dispatches tool calls in-process to the same handlers the Agent
+    SDK MCP server uses (see :func:`get_tool_dispatch`). The ``@tool``
+    decorator stores ``name``/``description``/``input_schema`` directly on
+    each :class:`SdkMcpTool`, so this is a straight projection — single
+    source of truth shared with ``app/agent.py`` and the eval harness.
+    """
+    return [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for t in ALL_TOOLS
+    ]
+
+
+def get_tool_dispatch() -> dict[str, Any]:
+    """Return ``{tool_name: async_handler}`` for in-process dispatch.
+
+    Handlers are the bare ``async def fn(args: dict)`` functions wrapped
+    by ``@tool`` and return MCP-shaped results
+    (``{"content": [{"type": "text", "text": ...}]}``).
+    """
+    return {t.name: t.handler for t in ALL_TOOLS}
 
 
 def create_plasmid_tools():

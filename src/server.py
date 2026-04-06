@@ -28,7 +28,7 @@ try:
     from .addgene_integration import (
         AddgeneLibraryIntegration,
         search_addgene as _search_addgene,
-        get_addgene_plasmid as _get_addgene_plasmid,
+        fetch_addgene_sequence_with_metadata as _fetch_addgene_sequence_with_metadata,
     )
     ADDGENE_AVAILABLE = True
 except ImportError:
@@ -63,6 +63,8 @@ from .library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    extract_insert_from_plasmid as _extract_insert_from_plasmid,
+    extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
 )
 
 logger = logging.getLogger(__name__)
@@ -241,7 +243,7 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
-            name="get_addgene_plasmid",
+            name="fetch_addgene_sequence_with_metadata",
             description="Fetch detailed information about a specific plasmid from Addgene by its catalog number. Use this to get metadata and potentially sequence for plasmids not in the local library.",
             inputSchema={
                 "type": "object",
@@ -450,6 +452,38 @@ async def list_tools() -> list[Tool]:
                         "description": "Organism (e.g., 'human', 'mouse')"
                     }
                 }
+            }
+        ),
+        Tool(
+            name="extract_insert_from_plasmid",
+            description=(
+                "Extract a CDS insert from a full plasmid sequence by name. "
+                "Uses pLannotate to annotate the plasmid and locate the feature. "
+                "Use this when an insert cannot be found in the local library or NCBI — "
+                "for example, when the user provides a plasmid sequence or an Addgene plasmid "
+                "has been fetched and contains the gene of interest."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "plasmid_sequence": {
+                        "type": "string",
+                        "description": "Full plasmid DNA sequence to search within."
+                    },
+                    "insert_name": {
+                        "type": "string",
+                        "description": "Name of the gene or feature to extract (case-insensitive)."
+                    },
+                    "start": {
+                        "type": "integer",
+                        "description": "0-based start coordinate. If provided along with end, skips annotation and slices directly."
+                    },
+                    "end": {
+                        "type": "integer",
+                        "description": "0-based end coordinate (exclusive). If provided along with start, skips annotation and slices directly."
+                    },
+                },
+                "required": ["plasmid_sequence", "insert_name"]
             }
         ),
         Tool(
@@ -695,19 +729,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 if result.get('url'):
                     output += f"  URL: {result['url']}\n"
             
-            output += "\n*Use `get_addgene_plasmid` with the Addgene ID to fetch full details.*"
+            output += "\n*Use `fetch_addgene_sequence_with_metadata` with the Addgene ID to fetch full details.*"
             
             return [TextContent(type="text", text=output)]
         except Exception as e:
             return [TextContent(type="text", text=f"❌ Error searching Addgene: {str(e)}")]
     
-    elif name == "get_addgene_plasmid":
+    elif name == "fetch_addgene_sequence_with_metadata":
         if not ADDGENE_AVAILABLE:
             return [TextContent(type="text", text="❌ Addgene integration is not available.")]
         
         try:
             addgene_id = arguments["addgene_id"]
-            plasmid = _get_addgene_plasmid(addgene_id)
+            plasmid = _fetch_addgene_sequence_with_metadata(addgene_id)
             
             if not plasmid:
                 return [TextContent(type="text", text=f"❌ Could not fetch plasmid Addgene #{addgene_id}. It may not exist or there was a network error.")]
@@ -1052,6 +1086,37 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=output)]
         except ValueError as e:
             return [TextContent(type="text", text=f"Fusion error: {str(e)}")]
+
+    elif name == "extract_insert_from_plasmid":
+        breakpoint()
+        result = _extract_insert_from_plasmid(
+            plasmid_sequence=arguments["plasmid_sequence"],
+            insert_name=arguments["insert_name"],
+            start=arguments.get("start"),
+            end=arguments.get("end"),
+        )
+        if not result:
+            return [TextContent(type="text", text=f"Could not extract '{arguments['insert_name']}' from the provided plasmid sequence.")]
+        seq = result["sequence"]
+        output = (
+            f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
+            f"Source: {result['source']}\n\n"
+            f"DNA Sequence:\n{seq}"
+        )
+        return [TextContent(type="text", text=output)]
+    elif name == "extract_inserts_from_plasmid":
+        result = _extract_inserts_from_plasmid(
+            plasmid_sequence=arguments["plasmid_sequence"],
+            insert_names=arguments["insert_names"],
+        )
+        if not result:
+            return [TextContent(type="text", text=f"Could not extract any of {arguments['insert_names']} from the provided plasmid sequence.")]
+        output = (
+            f"Extracted region spanning: {result['name']} ({result['size_bp']} bp)\n"
+            f"Source: {result['source']}\n\n"
+            f"DNA Sequence:\n{result['sequence']}"
+        )
+        return [TextContent(type="text", text=output)]
 
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]

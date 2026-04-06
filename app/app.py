@@ -3,7 +3,9 @@
 Plasmid Design Agent — Web UI
 
 A chat interface for the Claude-powered plasmid design agent.
-Uses the Anthropic API with tool-use to orchestrate the MCP tools locally.
+Streams via the Anthropic API directly for low TTFT, dispatching tool
+calls in-process to the same handlers (src/tools.py:ALL_TOOLS) that
+back the Agent SDK MCP server used by app/agent.py and the eval harness.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
@@ -11,6 +13,7 @@ Usage:
     # Open http://localhost:8000 in your browser
 """
 
+import asyncio
 import csv
 import io
 import json
@@ -28,129 +31,26 @@ import time
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent / ".env") 
+    load_dotenv(Path(__file__).parent / ".env")
 except ImportError:
     pass  # dotenv not installed; rely on environment variables
 
+# Add project root to path so src/ is importable as a package (matches
+# app/agent.py and evals/run_agent_evals.py).
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 import anthropic
 
-# Add src/ to path
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-from assembler import (
-    assemble_construct as _assemble_construct,
-    fuse_sequences as _fuse_sequences,
-    assemble_golden_gate as _assemble_golden_gate,
-    GG_ENZYMES,
-    reverse_complement,
-    find_mcs_insertion_point,
-    resolve_insertion_point,
-    clean_sequence,
-    validate_dna,
-    format_as_fasta,
-    format_as_genbank,
-    export_genbank_with_plot,
+from src.tools import (
+    get_anthropic_tool_schemas,
+    get_tool_dispatch,
+    set_tracker,
+    get_last_plot_json,
+    clear_last_plot_json,
 )
-
-# Stores plot JSON from the most recent genbank export, read by the SSE handler.
-# Uses threading.local() so concurrent SSE requests don't see each other's plots.
-_thread_local = threading.local()
-
-
-def _get_last_plot_json() -> Optional[str]:
-    return getattr(_thread_local, "last_plot_json", None)
-
-
-def _set_last_plot_json(val: Optional[str]):
-    _thread_local.last_plot_json = val
-
-try:
-    from ncbi_integration import (
-        search_gene as _search_gene_fn,
-        fetch_gene_sequence as _fetch_gene_fn,
-    )
-    NCBI_AVAILABLE = True
-except ImportError:
-    NCBI_AVAILABLE = False
-try:
-    from literature import fetch_oa_fulltext as _fetch_oa_fulltext
-    LITERATURE_AVAILABLE = True
-except ImportError:
-    LITERATURE_AVAILABLE = False
-from library import (
-    get_backbone_by_id,
-    get_insert_by_id,
-    search_backbones,
-    search_inserts,
-    search_all_sources as _search_all_sources,
-    get_all_backbones,
-    get_all_inserts,
-    validate_dna_sequence,
-    format_backbone_summary,
-    format_insert_summary,
-    infer_species_from_cell_line,
-)
-
-try:
-    from addgene_integration import (
-        search_addgene as _search_addgene,
-        get_addgene_plasmid as _get_addgene_plasmid,
-        AddgeneLibraryIntegration,
-    )
-    ADDGENE_AVAILABLE = True
-except ImportError:
-    ADDGENE_AVAILABLE = False
-
-try:
-    from fpbase_integration import (
-        search_fpbase as _search_fpbase,
-        fetch_fpbase_sequence as _fetch_fpbase,
-    )
-    FPBASE_AVAILABLE = True
-except ImportError:
-    FPBASE_AVAILABLE = False
-
-# ── Phase-2 advanced design modules (Design Confidence, Protein Analysis,
-#    Mutations, Bespoke Promoters). These are new modules that may not exist
-#    in every deployment — guard each import so the app still loads.
-
-try:
-    from confidence import compute_confidence, format_confidence_report
-    CONFIDENCE_AVAILABLE = True
-except ImportError:
-    CONFIDENCE_AVAILABLE = False
-
-try:
-    from protein_analysis import translate as _translate_dna, find_fusion_sites as _find_fusion_sites
-    PROTEIN_ANALYSIS_AVAILABLE = True
-except ImportError:
-    PROTEIN_ANALYSIS_AVAILABLE = False
-
-try:
-    from mutations import (
-        lookup_known_mutations as _lookup_known_mutations,
-        apply_point_mutation as _apply_point_mutation,
-        design_premature_stop as _design_premature_stop,
-        parse_mutation_notation as _parse_mutation_notation,
-    )
-    MUTATIONS_AVAILABLE = True
-except ImportError:
-    MUTATIONS_AVAILABLE = False
-
-try:
-    from ncbi_integration import fetch_genomic_upstream as _fetch_genomic_upstream
-    GENOMIC_UPSTREAM_AVAILABLE = True
-except ImportError:
-    GENOMIC_UPSTREAM_AVAILABLE = False
-
-try:
-    from library import is_known_promoter as _is_known_promoter
-    PROMOTER_DETECTION_AVAILABLE = True
-except ImportError:
-    PROMOTER_DETECTION_AVAILABLE = False
-
-from references import ReferenceTracker
+from src.references import ReferenceTracker
+from src.library import load_backbones, load_inserts
 
 logger = logging.getLogger(__name__)
 
@@ -161,1410 +61,45 @@ LIBRARY_PATH = PROJECT_ROOT / "library"
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "system_prompt.md"  # lives in app/
 SYSTEM_PROMPT = SYSTEM_PROMPT_PATH.read_text() if SYSTEM_PROMPT_PATH.exists() else ""
 
-# ── Tool definitions for the Anthropic API ──────────────────────────────
+# ── Tool schemas + dispatch ─────────────────────────────────────────────
+# Tool definitions live in src/tools.py:ALL_TOOLS — the same list the
+# Agent SDK MCP server (app/agent.py, evals) is built from. We project
+# them into Anthropic API format and dispatch in-process so the web UI
+# gets ~1s direct-API TTFT instead of the SDK subprocess's ~5s, while
+# tool implementations stay single-sourced.
 
-TOOLS = [
-    {
-        "name": "search_backbones",
-        "description": "Search for plasmid backbone vectors by name, features, or organism.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
-                "organism": {"type": "string", "description": "Filter by organism type", "enum": ["mammalian", "bacterial", "lentiviral_packaging"]},
-                "promoter": {"type": "string", "description": "Filter by promoter type"},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "get_backbone",
-        "description": "Get complete information about a specific plasmid backbone, including sequence if requested.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "backbone_id": {"type": "string", "description": "Backbone ID or name"},
-                "include_sequence": {"type": "boolean", "description": "Include full DNA sequence", "default": False},
-            },
-            "required": ["backbone_id"],
-        },
-    },
-    {
-        "name": "search_inserts",
-        "description": "Search for insert sequences (fluorescent proteins, tags, reporters) by name or category.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
-                "category": {"type": "string", "description": "Filter by category", "enum": ["fluorescent_protein", "reporter", "epitope_tag"]},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "get_insert",
-        "description": "Get complete information about a specific insert including its DNA sequence. Fallback chain: local library → FPbase (fluorescent proteins) → NCBI Gene. If the gene query is ambiguous across species, returns a disambiguation list instead of guessing.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "insert_id": {"type": "string", "description": "Insert ID, gene symbol, or fluorescent protein name"},
-                "organism": {"type": "string", "description": "Species for NCBI fallback (e.g., 'human', 'mouse'). Required when the gene exists in multiple species."},
-            },
-            "required": ["insert_id"],
-        },
-    },
-    {
-        "name": "list_all_backbones",
-        "description": "List all available backbone plasmids in the library.",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "list_all_inserts",
-        "description": "List all available insert sequences in the library.",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "get_insertion_site",
-        "description": "Get MCS (multiple cloning site) position info for a backbone.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "backbone_id": {"type": "string", "description": "Backbone ID or name"},
-            },
-            "required": ["backbone_id"],
-        },
-    },
-    {
-        "name": "validate_sequence",
-        "description": "Validate a DNA sequence and get basic statistics (length, GC content, start/stop codons).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "sequence": {"type": "string", "description": "DNA sequence to validate"},
-            },
-            "required": ["sequence"],
-        },
-    },
-    {
-        "name": "assemble_construct",
-        "description": (
-            "Assemble an expression construct by splicing an insert into a backbone. "
-            "Use library IDs to auto-resolve sequences and MCS positions, or provide raw sequences."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "backbone_id": {"type": "string", "description": "Backbone ID from library"},
-                "insert_id": {"type": "string", "description": "Insert ID from library"},
-                "backbone_sequence": {"type": "string", "description": "Raw backbone DNA sequence"},
-                "insert_sequence": {"type": "string", "description": "Raw insert DNA sequence"},
-                "insertion_position": {"type": "integer", "description": "0-based insertion position"},
-                "replace_region_end": {"type": "integer", "description": "End of region to replace"},
-                "reverse_complement_insert": {"type": "boolean", "description": "Reverse-complement insert before insertion", "default": False},
-            },
-        },
-    },
-    {
-        "name": "export_construct",
-        "description": "Export an assembled construct sequence in raw, FASTA, or GenBank format.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "sequence": {"type": "string", "description": "Assembled construct DNA sequence"},
-                "output_format": {"type": "string", "description": "Output format", "enum": ["raw", "fasta", "genbank"]},
-                "construct_name": {"type": "string", "description": "Name for the construct", "default": "construct"},
-                "backbone_name": {"type": "string", "description": "Backbone name for annotation", "default": ""},
-                "insert_name": {"type": "string", "description": "Insert name for annotation", "default": ""},
-                "insert_position": {"type": "integer", "description": "Insert start position", "default": 0},
-                "insert_length": {"type": "integer", "description": "Insert length in bp", "default": 0},
-                "reverse_complement_insert": {"type": "boolean", "description": "True if insert was inserted in reverse complement orientation", "default": False},
-            },
-            "required": ["sequence", "output_format"],
-        },
-    },
-    {
-        "name": "validate_construct",
-        "description": "Validate an assembled construct against ground-truth sequences from the library/NCBI. Checks backbone preservation, insert presence/position/orientation, size, and codons. Prefer passing backbone_id/insert_id (the tool will fetch canonical sequences and verify identity). Only pass insert_sequence directly for custom/fused inserts — in that case identity cannot be verified.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "construct_sequence": {"type": "string", "description": "Assembled construct to validate"},
-                "backbone_id": {"type": "string", "description": "Backbone library ID (preferred — resolved to canonical sequence)"},
-                "insert_id": {"type": "string", "description": "Insert library ID or gene symbol (preferred — resolved to canonical sequence for ground-truth identity check)"},
-                "backbone_sequence": {"type": "string", "description": "Raw backbone sequence (only if backbone_id unavailable)"},
-                "insert_sequence": {"type": "string", "description": "Raw insert sequence (for custom/fused inserts — identity will NOT be verified)"},
-                "expected_insert_position": {"type": "integer", "description": "Expected 0-indexed insert position in the construct"},
-            },
-            "required": ["construct_sequence"],
-        },
-    },
-    {
-        "name": "search_addgene",
-        "description": "Search Addgene's plasmid repository. Use when a plasmid is not in the local library.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
-                "limit": {"type": "integer", "description": "Max results", "default": 10},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "get_addgene_plasmid",
-        "description": "Fetch detailed info about a specific Addgene plasmid by catalog number.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "addgene_id": {"type": "string", "description": "Addgene catalog number"},
-                "include_sequence": {"type": "boolean", "description": "Return full DNA sequence text in the response (default False — sequence is large). Set True only when you need the raw sequence.", "default": False},
-            },
-            "required": ["addgene_id"],
-        },
-    },
-    {
-        "name": "import_addgene_to_library",
-        "description": "Import a plasmid from Addgene into the local library.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "addgene_id": {"type": "string", "description": "Addgene catalog number"},
-                "include_sequence": {"type": "boolean", "description": "Fetch and store sequence", "default": True},
-            },
-            "required": ["addgene_id"],
-        },
-    },
-    {
-        "name": "search_all",
-        "description": (
-            "Search local library, NCBI Gene, and Addgene concurrently in a single call. "
-            "Returns combined results from all sources. Use this as the first search step "
-            "when you don't know whether the query is a local insert, an NCBI gene, or an "
-            "Addgene plasmid. Faster than calling search_inserts, search_gene, and search_addgene separately."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Gene symbol, plasmid name, or search term"},
-                "organism": {"type": "string", "description": "Organism filter (e.g., 'human', 'mouse')"},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "search_gene",
-        "description": "Search NCBI Gene database by gene symbol or name. Returns matching genes with IDs, symbols, organisms, and aliases. Use when a user mentions a gene not in the local insert library.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Gene symbol or name (e.g., 'TP53', 'MyD88')"},
-                "organism": {"type": "string", "description": "Organism filter (e.g., 'human', 'mouse')"},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "search_fpbase",
-        "description": "Search FPbase (fpbase.org) for fluorescent proteins by name. FPbase is the canonical reference for engineered FPs like mRuby, mScarlet, mNeonGreen — these are NOT natural genes and won't be found in NCBI Gene. Use when the user wants an FP not in the local library.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Fluorescent protein name (e.g., 'mRuby', 'mScarlet')"},
-            },
-            "required": ["name"],
-        },
-    },
-    {
-        "name": "get_cell_line_info",
-        "description": "Look up the species for a common cell line name (e.g., HEK293 → human, RAW 264.7 → mouse). Use when the user mentions a cell line but not a species, to infer the likely organism for gene retrieval. IMPORTANT: this infers the cell line's species — the user might still want a gene from a DIFFERENT species. Confirm with the user when the species matters.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "cell_line": {"type": "string", "description": "Cell line name (e.g., 'HEK293', 'RAW 264.7', 'NIH3T3')"},
-            },
-            "required": ["cell_line"],
-        },
-    },
-    {
-        "name": "fetch_gene",
-        "description": "Fetch the coding DNA sequence (CDS) for a gene from NCBI RefSeq. Returns the CDS sequence, accession, organism, and metadata.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "gene_id": {"type": "string", "description": "NCBI Gene ID (e.g., '7157' for human TP53)"},
-                "gene_symbol": {"type": "string", "description": "Gene symbol (e.g., 'TP53')"},
-                "organism": {"type": "string", "description": "Organism (e.g., 'human', 'mouse')"},
-            },
-        },
-    },
-    {
-        "name": "fuse_inserts",
-        "description": "Fuse multiple coding sequences into a single CDS for protein tagging or fusion proteins. Handles start/stop codon management at junctions. For protein fusions (H2B-EGFP), the ATG is automatically removed from non-first 'protein' parts — set type='tag' to preserve ATG for small epitope tags (FLAG, HA, Myc). Use for N-terminal tags (FLAG-GeneX), C-terminal tags (GeneX-FLAG), or multi-domain fusions.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "inserts": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "insert_id": {"type": "string", "description": "Insert ID from library (e.g., 'FLAG_tag', 'EGFP')"},
-                            "sequence": {"type": "string", "description": "Raw DNA sequence (if not using library ID)"},
-                            "name": {"type": "string", "description": "Name for this sequence"},
-                            "type": {
-                                "type": "string",
-                                "enum": ["protein", "tag"],
-                                "description": "Sequence type: 'protein' (default) removes ATG from non-first positions to keep the reading frame in a fusion; 'tag' preserves ATG for small epitope tags (FLAG, HA, Myc, His) that either lack ATG or need it kept intact.",
-                            },
-                        },
-                    },
-                    "description": "Ordered list of sequences to fuse (N-terminal first, C-terminal last)",
-                },
-                "linker": {
-                    "type": "string",
-                    "description": "Linker DNA sequence between fusion partners. Omit for default (GGGGS)x4 flexible linker. Pass empty string '' for direct concatenation (epitope tags).",
-                },
-            },
-            "required": ["inserts"],
-        },
-    },
-    {
-        "name": "score_construct_confidence",
-        "description": (
-            "Compute a Design Confidence Score (0-100) for an insert/CDS. "
-            "Checks for cryptic polyA/splice signals, codon adaptation index (CAI), "
-            "Kozak context, GC content, fusion linker adequacy, repeat runs, and "
-            "promoter count. Use this before presenting a final design to flag "
-            "potential expression problems."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "insert_sequence": {"type": "string", "description": "Insert/CDS DNA sequence to analyze"},
-                "backbone_id": {"type": "string", "description": "Optional backbone ID (for promoter-count check)"},
-                "fusion_parts": {
-                    "type": "array",
-                    "description": "Optional fusion part metadata for linker adequacy check",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "aa_length": {"type": "integer"},
-                            "is_linker": {"type": "boolean"},
-                        },
-                    },
-                },
-            },
-            "required": ["insert_sequence"],
-        },
-    },
-    {
-        "name": "predict_fusion_sites",
-        "description": (
-            "Predict disordered regions in a protein as candidate fusion-insertion sites. "
-            "Use when designing an internal (loop) fusion rather than terminal fusion, "
-            "or when troubleshooting a terminal fusion that failed. Accepts either an "
-            "amino-acid sequence OR a DNA CDS (which will be translated). "
-            "Returns ranked disordered windows (longest + most disordered first). "
-            "NOTE: This is a sequence-based heuristic, not a full structure prediction. "
-            "For high-stakes designs, verify against AlphaFold2."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "protein_sequence": {"type": "string", "description": "Amino-acid sequence (single-letter code)"},
-                "dna_sequence": {"type": "string", "description": "Alternative: DNA CDS (will be translated in frame 0)"},
-                "min_window": {"type": "integer", "description": "Minimum disordered-window length in residues (default 10)", "default": 10},
-            },
-        },
-    },
-    {
-        "name": "lookup_known_mutations",
-        "description": (
-            "Look up curated gain-of-function (GoF) or loss-of-function (LoF) mutations "
-            "for common oncogenes and tumor suppressors (BRAF, KRAS, TP53, EGFR, PTEN, "
-            "PIK3CA, IDH1/2, etc.). Returns mutation notation, phenotype, and PMID. "
-            "Use when the user wants a constitutively active, dominant-negative, or "
-            "kinase-dead version of a gene."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "gene_symbol": {"type": "string", "description": "Gene symbol (e.g., 'BRAF', 'TP53')"},
-                "mutation_type": {"type": "string", "description": "Filter: 'GoF' or 'LoF' (optional)", "enum": ["GoF", "LoF"]},
-            },
-            "required": ["gene_symbol"],
-        },
-    },
-    {
-        "name": "apply_mutation",
-        "description": (
-            "Apply a deterministic point mutation or premature stop codon to a CDS. "
-            "For point mutations: swaps ONE codon at the specified AA position for the "
-            "preferred human codon for the target AA. For premature stop: introduces an "
-            "in-frame TGA at ~position_fraction through the CDS. The rest of the sequence "
-            "is preserved exactly. Returns the modified sequence plus change details. "
-            "SAFETY: This is targeted single-codon editing only — no sequence is invented."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "dna_sequence": {"type": "string", "description": "Input CDS DNA sequence (in-frame from position 0)"},
-                "method": {
-                    "type": "string",
-                    "enum": ["point_mutation", "premature_stop"],
-                    "description": "Mutation method (default: point_mutation)",
-                    "default": "point_mutation",
-                },
-                "mutation": {"type": "string", "description": "Standard notation like 'V600E' (for point_mutation)"},
-                "aa_position": {"type": "integer", "description": "1-indexed AA position (alternative to 'mutation' param)"},
-                "new_aa": {"type": "string", "description": "Target amino acid single-letter code (with aa_position)"},
-                "position_fraction": {"type": "number", "description": "For premature_stop: where to place the stop (0-1, default 0.1)", "default": 0.1},
-            },
-            "required": ["dna_sequence"],
-        },
-    },
-    {
-        "name": "fetch_promoter_region",
-        "description": (
-            "Fetch the native upstream genomic region of a gene from NCBI (~2kb 5' of "
-            "the TSS). Use this ONLY for bespoke promoter requests when the user "
-            "explicitly chooses option (c) — fetch native upstream region — after you've "
-            "offered the three options (Addgene search / paste sequence / native upstream). "
-            "IMPORTANT: This is the endogenous regulatory region, NOT a validated minimal "
-            "promoter. Warn the user about this in your design summary."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "gene_id": {"type": "string", "description": "NCBI Gene ID (e.g., '7157' for human TP53). Required if gene_symbol not given."},
-                "gene_symbol": {"type": "string", "description": "Gene symbol (e.g., 'TP53'). Will be resolved to gene_id via search."},
-                "organism": {"type": "string", "description": "Organism for symbol→ID resolution (e.g., 'human')"},
-                "bp_upstream": {"type": "integer", "description": "How many bp upstream to fetch (100-10000, default 2000)", "default": 2000},
-            },
-        },
-    },
-    {
-        "name": "assemble_golden_gate",
-        "description": (
-            "Perform in-silico Golden Gate assembly. "
-            "Digests the backbone vector at its Type IIS restriction enzyme sites "
-            "to open the cloning window (discarding the dropout cassette). "
-            "Each part is excised from its carrier vector using the same enzyme. "
-            "Parts are ligated in the order dictated by complementary 4-nt overhangs. "
-            "Use this for Allen Institute modular expression system parts or any "
-            "standard Golden Gate workflow. "
-            "Parts must have category='part_in_vector' and a 'plasmid_sequence' field."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "backbone_id": {
-                    "type": "string",
-                    "description": "Library ID of the backbone vector (must contain Type IIS sites).",
-                },
-                "part_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Library IDs of the parts to assemble, in approximate order. "
-                        "Exact order is inferred from overhang matching."
-                    ),
-                },
-                "enzyme_name": {
-                    "type": "string",
-                    "enum": list(GG_ENZYMES.keys()),
-                    "description": (
-                        "Type IIS restriction enzyme used for the assembly "
-                        "(Esp3I, BsmBI, BsaI, or BbsI). Defaults to Esp3I."
-                    ),
-                },
-            },
-            "required": ["backbone_id", "part_ids"],
-        },
-    },
-    {
-        "name": "log_experimental_outcome",
-        "description": (
-            "Record a wet-lab outcome for the current design session. The outcome is "
-            "stored in session memory and will be injected into future turns' context "
-            "for troubleshooting mode. Use when the user reports that a construct "
-            "worked, didn't express, had wrong size, was toxic, etc."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string", "enum": ["success", "failed", "partial"], "description": "Experimental outcome"},
-                "observation": {"type": "string", "description": "What was observed (e.g., 'no fluorescence', 'wrong size on Western', 'low yield')"},
-                "construct_name": {"type": "string", "description": "Name/description of the construct tested (optional)"},
-            },
-            "required": ["status", "observation"],
-        },
-    },
-    {
-        "name": "fetch_oa_fulltext",
-        "description": "Look up a paper by DOI on Unpaywall to find open-access full-text URLs. Use when the user references a paper and you need to find its methods section for plasmid construction details. Returns PDF URL and OA status.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "doi": {"type": "string", "description": "DOI (e.g., '10.1038/nature12373')"},
-            },
-            "required": ["doi"],
-        },
-    },
-]
+TOOLS = get_anthropic_tool_schemas()
+_TOOL_HANDLERS = get_tool_dispatch()
 
 
-# ── Sequence truncation for agent-visible output ──
-# Large sequences (e.g., BRCA1 CDS is ~5.6 kb) dumped verbatim into tool
-# results cause token bloat and rate limiting. The system prompt instructs
-# the agent to use insert_id rather than copying sequence text, so we can
-# safely truncate. Full sequences are always available via the library
-# (assemble_construct resolves by ID, not by pasted text).
-_SEQ_TRUNC_THRESHOLD = 4000  # bp — show full seq below this
+def _tool_result_text(content) -> str:
+    """Flatten an MCP-shaped tool result content into a string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return "" if content is None else str(content)
 
-def _fmt_seq_for_agent(seq: str, label: str = "Sequence") -> str:
-    """Format a DNA sequence for agent output, truncating if large.
 
-    Below threshold: full sequence. Above: head + tail with note that
-    the full sequence is used internally when referenced by ID.
+def _dispatch_tool(name: str, args: dict) -> str:
+    """Run a tool handler in-process and return its text result.
+
+    Handlers are async (defined for the SDK MCP server), so we drive them
+    with a short-lived event loop. They return MCP-shaped
+    ``{"content": [{"type": "text", "text": ...}]}`` which we flatten.
     """
-    n = len(seq)
-    if n <= _SEQ_TRUNC_THRESHOLD:
-        return f"{label} ({n} bp):\n{seq}"
-    head, tail = seq[:200], seq[-200:]
-    return (
-        f"{label} ({n} bp, truncated for context):\n"
-        f"{head}\n... [{n-400} bp omitted] ...\n{tail}\n"
-        f"[Full sequence is stored and used internally. Reference by ID in "
-        f"assemble_construct/validate_construct rather than copying this text.]"
-    )
-
-
-# ── Tool execution ──────────────────────────────────────────────────────
-
-def execute_tool(name: str, args: dict, tracker: "ReferenceTracker | None" = None) -> str:
-    """Execute a tool call and return the result as a string."""
+    handler = _TOOL_HANDLERS.get(name)
+    if handler is None:
+        return f"Unknown tool: {name}"
     try:
-        if name == "search_backbones":
-            results = search_backbones(args["query"], args.get("organism"), args.get("promoter"))
-            if not results:
-                return f"No backbones found matching '{args['query']}'"
-            return "\n\n---\n\n".join(format_backbone_summary(bb) for bb in results)
-
-        elif name == "get_backbone":
-            bb = get_backbone_by_id(args["backbone_id"])
-            if not bb:
-                return f"Backbone '{args['backbone_id']}' not found in library or on Addgene."
-            if tracker:
-                tracker.add_backbone(bb)
-            out = format_backbone_summary(bb)
-            if bb.get("unconfirmed"):
-                out += (
-                    "\n\n⚠️ **Unconfirmed Addgene match** — this backbone was "
-                    "fuzzy-matched from Addgene search results and has NOT been "
-                    "cached. Please confirm this is the intended plasmid before "
-                    "proceeding.\n"
-                )
-                alts = bb.get("addgene_search_alternatives", [])
-                if alts:
-                    out += "\nOther Addgene search results for this query:\n"
-                    for a in alts:
-                        out += f"  - {a.get('name')} (Addgene #{a.get('addgene_id')})\n"
-                out += (
-                    "\nIf correct, call `import_addgene_to_library` with the "
-                    "confirmed addgene_id to cache it. If wrong, ask the user "
-                    "for the exact plasmid name or Addgene catalog number."
-                )
-            if args.get("include_sequence") and bb.get("sequence"):
-                out += f"\n\nDNA Sequence ({len(bb['sequence'])} bp):\n{bb['sequence'][:200]}... [{len(bb['sequence'])} bp total]"
-            return out
-
-        elif name == "search_inserts":
-            results = search_inserts(args["query"], args.get("category"))
-            if not results:
-                return f"No inserts found matching '{args['query']}'"
-            return "\n\n---\n\n".join(format_insert_summary(ins) for ins in results)
-
-        elif name == "get_insert":
-            ins = get_insert_by_id(args["insert_id"], organism=args.get("organism"))
-            if not ins:
-                return (
-                    f"Insert '{args['insert_id']}' not found in local library, "
-                    f"FPbase, or NCBI Gene. Please provide the DNA sequence "
-                    f"directly, or check the spelling/species."
-                )
-            # ── Disambiguation signals ──
-            if ins.get("needs_disambiguation"):
-                reason = ins.get("reason", "")
-                if reason == "gene_family":
-                    out = (
-                        f"⚠️ **Ambiguous gene family**: '{args['insert_id']}' is "
-                        f"a family name, not a specific gene. I cannot "
-                        f"auto-select. Please specify which family member:\n\n"
-                    )
-                    for m in ins.get("members", []):
-                        out += f"  - {m}\n"
-                    out += "\nAsk the user which one they want, then retry with the specific name."
-                    return out
-                if reason == "fpbase_no_dna":
-                    out = (
-                        f"✅ Found on FPbase: **{ins.get('fpbase_name')}**\n"
-                        f"  URL: {ins.get('fpbase_url')}\n"
-                        f"  Protein: {ins.get('aa_length', '?')} amino acids"
-                    )
-                    if ins.get("ex_max") and ins.get("em_max"):
-                        out += f", Ex/Em {ins['ex_max']}/{ins['em_max']} nm"
-                    out += (
-                        f"\n\n❌ **No DNA sequence available on FPbase** — only "
-                        f"the amino-acid sequence is stored.\n\n"
-                        f"I cannot synthesize a DNA sequence (every nucleotide "
-                        f"must come from a verified source). Please ask the user "
-                        f"to provide the DNA coding sequence for "
-                        f"{ins.get('fpbase_name')} — they can find it in:\n"
-                        f"  - The original publication\n"
-                        f"  - Addgene (many FP plasmids have depositor sequences)\n"
-                        f"  - A codon-optimized version they have on hand\n\n"
-                        f"Then pass it as insert_sequence to assemble_construct."
-                    )
-                    return out
-                # Multiple species (NCBI fallback)
-                out = (
-                    f"⚠️ **Ambiguous gene query**: '{args['insert_id']}' matched "
-                    f"multiple entries across different species. I cannot "
-                    f"auto-select. Please specify which one:\n\n"
-                )
-                for opt in ins.get("options", []):
-                    out += (
-                        f"  - {opt.get('symbol', '?')} ({opt.get('organism', '?')}) — "
-                        f"{opt.get('full_name', '')}\n"
-                        f"    gene_id: {opt.get('gene_id', '?')}\n"
-                    )
-                out += (
-                    "\nEither tell me which species you want, or call "
-                    "fetch_gene with the specific gene_id."
-                )
-                return out
-            if tracker:
-                tracker.add_insert(ins)
-            out = format_insert_summary(ins)
-            if ins.get("sequence"):
-                out += f"\n\n{_fmt_seq_for_agent(ins['sequence'], 'DNA Sequence')}"
-            return out
-
-        elif name == "list_all_backbones":
-            bbs = get_all_backbones()
-            lines = [f"Available Backbones ({len(bbs)} total):\n"]
-            for bb in bbs:
-                has_seq = "seq" if bb.get("sequence") else "no seq"
-                lines.append(f"- {bb['id']} ({bb['size_bp']} bp, {bb.get('organism','?')}, {bb.get('promoter','?')}, {has_seq})")
-            return "\n".join(lines)
-
-        elif name == "list_all_inserts":
-            inserts = get_all_inserts()
-            lines = [f"Available Inserts ({len(inserts)} total):\n"]
-            for ins in inserts:
-                lines.append(f"- {ins['id']} ({ins['size_bp']} bp, {ins.get('category','?')})")
-            return "\n".join(lines)
-
-        elif name == "get_insertion_site":
-            bb = get_backbone_by_id(args["backbone_id"])
-            if not bb:
-                return f"Backbone '{args['backbone_id']}' not found."
-            mcs = bb.get("mcs_position")
-            if not mcs:
-                return f"No MCS info for {bb['id']}."
-            return f"MCS for {bb['id']}: position {mcs['start']}-{mcs['end']}. {mcs.get('description','')}"
-
-        elif name == "validate_sequence":
-            result = validate_dna_sequence(args["sequence"])
-            return json.dumps(result, indent=2)
-
-        elif name == "assemble_construct":
-            # Resolve backbone
-            backbone_seq = args.get("backbone_sequence")
-            backbone_data = None
-            if not backbone_seq and args.get("backbone_id"):
-                backbone_data = get_backbone_by_id(args["backbone_id"])
-                if backbone_data:
-                    backbone_seq = backbone_data.get("sequence")
-            if not backbone_seq:
-                return "Error: No backbone sequence available. Provide backbone_id (with sequence in library) or backbone_sequence."
-            if backbone_data and tracker:
-                tracker.add_backbone(backbone_data)
-
-            # Resolve insert
-            insert_seq = args.get("insert_sequence")
-            insert_data = None
-            if not insert_seq and args.get("insert_id"):
-                insert_data = get_insert_by_id(args["insert_id"])
-                if insert_data:
-                    if insert_data.get("needs_disambiguation"):
-                        return (
-                            f"Error: insert '{args['insert_id']}' is ambiguous "
-                            f"(matched multiple species on NCBI). Resolve with "
-                            f"get_insert(insert_id=..., organism=...) first, "
-                            f"then pass the resolved insert_id."
-                        )
-                    insert_seq = insert_data.get("sequence")
-            if not insert_seq:
-                return "Error: No insert sequence available. Provide insert_id or insert_sequence."
-            if insert_data and tracker:
-                tracker.add_insert(insert_data)
-
-            # Resolve position
-            pos = args.get("insertion_position")
-            auto_rc = False
-            if pos is None and backbone_data:
-                pos, auto_rc = resolve_insertion_point(backbone_data, backbone_seq)
-            if pos is None:
-                return "Error: No insertion position. Provide insertion_position or use a backbone with MCS data."
-
-            result = _assemble_construct(
-                backbone_seq=backbone_seq,
-                insert_seq=insert_seq,
-                insertion_position=pos,
-                replace_region_end=args.get("replace_region_end"),
-                reverse_complement_insert=args.get("reverse_complement_insert", False) or auto_rc,
-                backbone=backbone_data,
-            )
-
-            if not result.success:
-                return "Assembly FAILED:\n" + "\n".join(f"- {e}" for e in result.errors)
-
-            bb_name = backbone_data["name"] if backbone_data else "custom"
-            ins_name = insert_data["name"] if insert_data else "custom"
-
-            out = f"Assembly Successful: {ins_name} in {bb_name}\n"
-            out += f"Total size: {result.total_size_bp} bp\n"
-            out += f"Insert position: {result.insert_position}\n"
-            out += f"Backbone preserved: Yes\n"
-            out += f"Insert preserved: Yes\n"
-            out += f"Start codon (ATG): {'Yes' if result.insert_has_start_codon else 'No'}\n"
-            out += f"Stop codon: {'Yes' if result.insert_has_stop_codon else 'No'}\n"
-            out += f"Reading frame ok: {'Yes' if result.insert_length_valid else 'No'}\n"
-            if result.warnings:
-                out += "Warnings:\n" + "\n".join(f"- {w}" for w in result.warnings) + "\n"
-            # NOTE: full sequence is required here — the agent passes it to
-            # validate_construct and export_construct. Do not truncate.
-            out += f"\nAssembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
-            return out
-
-        elif name == "export_construct":
-            _set_last_plot_json(None)
-            seq = clean_sequence(args["sequence"])
-            fmt = args["output_format"]
-            cname = args.get("construct_name", "construct")
-            bname = args.get("backbone_name", "")
-            iname = args.get("insert_name", "")
-            ipos = args.get("insert_position", 0)
-            ilen = args.get("insert_length", 0)
-            rc_insert = args.get("reverse_complement_insert", False)
-
-            if fmt == "raw":
-                return seq
-            elif fmt == "fasta":
-                desc = f"{iname} in {bname}, {len(seq)} bp" if bname else f"{len(seq)} bp"
-                return format_as_fasta(seq, cname, desc)
-            elif fmt in ("genbank", "gb"):
-                # export_genbank_with_plot requires pLannotate (conda-only).
-                # In pip environments it raises RuntimeError — fall back to
-                # format_as_genbank (no plot) rather than failing the export.
-                try:
-                    gbk, plot_json = export_genbank_with_plot(
-                        sequence=seq, name=cname, backbone_name=bname,
-                        insert_name=iname, insert_position=ipos, insert_length=ilen,
-                        reverse_complement_insert=rc_insert,
-                    )
-                    _set_last_plot_json(plot_json)
-                    return gbk
-                except RuntimeError as e:
-                    logger.info(
-                        f"pLannotate unavailable ({e}); falling back to "
-                        f"basic GenBank export without plasmid map."
-                    )
-                    return format_as_genbank(
-                        sequence=seq, name=cname, backbone_name=bname,
-                        insert_name=iname, insert_position=ipos,
-                        insert_length=ilen,
-                        reverse_complement_insert=rc_insert,
-                    )
-            else:
-                return f"Unknown format: {fmt}"
-
-        elif name == "validate_construct":
-            construct_seq = clean_sequence(args["construct_sequence"])
-
-            # ── Resolve backbone (ground truth) ──
-            backbone_data = None
-            backbone_seq = args.get("backbone_sequence")
-            backbone_source = "agent-supplied"
-            if args.get("backbone_id"):
-                backbone_data = get_backbone_by_id(args["backbone_id"])
-                if backbone_data and backbone_data.get("sequence"):
-                    backbone_seq = backbone_data.get("sequence")
-                    backbone_source = (
-                        f"library/Addgene ({backbone_data.get('id', args['backbone_id'])})"
-                    )
-
-            # ── Resolve insert (ground truth) ──
-            insert_seq = args.get("insert_sequence")
-            insert_source = "agent-supplied"
-            if args.get("insert_id"):
-                ins = get_insert_by_id(args["insert_id"])
-                if ins and ins.get("sequence"):
-                    insert_seq = ins.get("sequence")
-                    insert_source = f"library/NCBI ({ins.get('id', args['insert_id'])})"
-                    if ins.get("needs_disambiguation"):
-                        insert_source += " ⚠️ AMBIGUOUS"
-
-            checks = []
-            warnings = []
-
-            # ── Valid DNA ──
-            ok, _errs = validate_dna(construct_seq)
-            checks.append(f"Valid DNA: {'PASS' if ok else 'FAIL (CRITICAL)'}")
-            checks.append(f"Size: {len(construct_seq)} bp")
-
-            # ── Source provenance ──
-            if insert_seq:
-                checks.append(f"Insert sequence source: {insert_source}")
-                if insert_source == "agent-supplied":
-                    warnings.append(
-                        "Insert identity UNVERIFIED — validation only confirms the "
-                        "supplied sequence is present, not that it is the correct "
-                        "gene. Pass insert_id for ground-truth identity check."
-                    )
-            if backbone_seq:
-                checks.append(f"Backbone sequence source: {backbone_source}")
-
-            # ── Find insert in construct (try 8 variants) ──
-            found_seq = None
-            found_desc = ""
-            if insert_seq:
-                insert_seq = clean_sequence(insert_seq)
-                _has_atg = insert_seq[:3] == "ATG"
-                _has_stop = insert_seq[-3:] in ("TAA", "TAG", "TGA")
-                _candidates = [
-                    (insert_seq, ""),
-                    (reverse_complement(insert_seq), "reverse complement"),
-                ]
-                if _has_atg:
-                    _no_atg = insert_seq[3:]
-                    _candidates += [
-                        (_no_atg, "ATG removed"),
-                        (reverse_complement(_no_atg), "ATG removed, reverse complement"),
-                    ]
-                if _has_stop:
-                    _no_stop = insert_seq[:-3]
-                    _candidates += [
-                        (_no_stop, "stop removed"),
-                        (reverse_complement(_no_stop), "stop removed, reverse complement"),
-                    ]
-                if _has_atg and _has_stop:
-                    _no_both = insert_seq[3:-3]
-                    _candidates += [
-                        (_no_both, "ATG and stop removed"),
-                        (reverse_complement(_no_both), "ATG and stop removed, reverse complement"),
-                    ]
-
-                for _seq, _desc in _candidates:
-                    if len(_seq) >= 9 and _seq in construct_seq:
-                        found_seq, found_desc = _seq, _desc
-                        break
-
-                found = found_seq is not None
-                _suffix = f" ({found_desc})" if found_desc else ""
-                checks.append(
-                    f"Insert found in construct: {'PASS' + _suffix if found else 'FAIL (CRITICAL)'}"
-                )
-
-                # ── Orientation check against backbone MCS direction ──
-                if found and backbone_data and backbone_seq:
-                    try:
-                        _, auto_rc = resolve_insertion_point(backbone_data, backbone_seq)
-                        is_rc = "reverse complement" in found_desc
-                        if auto_rc != is_rc:
-                            checks.append(
-                                f"Orientation: FAIL (CRITICAL) — backbone MCS expects "
-                                f"{'RC' if auto_rc else 'forward'} insert but found "
-                                f"{'RC' if is_rc else 'forward'}"
-                            )
-                        else:
-                            checks.append(
-                                f"Orientation: PASS ({'RC' if is_rc else 'forward'}, "
-                                f"matches backbone MCS direction)"
-                            )
-                    except Exception as e:
-                        checks.append(f"Orientation: could not determine ({e})")
-
-                if found:
-                    pos = construct_seq.index(found_seq)
-                    checks.append(f"Insert position: {pos}")
-                    exp = args.get("expected_insert_position")
-                    if exp is not None:
-                        checks.append(
-                            f"Position correct: {'PASS' if pos == exp else 'FAIL — expected ' + str(exp)}"
-                        )
-                    # Codon checks on the expressed (sense) orientation
-                    expressed = (
-                        reverse_complement(found_seq)
-                        if "reverse complement" in found_desc
-                        else found_seq
-                    )
-                    start_ok = expressed[:3] == "ATG"
-                    stop_ok = expressed[-3:] in ("TAA", "TAG", "TGA")
-                    checks.append(
-                        f"Start codon: {'PASS' if start_ok else 'Note — ATG absent (expected for non-N-terminal fusion parts)'}"
-                    )
-                    checks.append(
-                        f"Stop codon: {'PASS' if stop_ok else 'Note — stop absent (expected for non-C-terminal fusion parts)'}"
-                    )
-
-            # ── Backbone preservation ──
-            if backbone_seq and found_seq:
-                backbone_seq = clean_sequence(backbone_seq)
-                ipos = construct_seq.index(found_seq)
-                up_ok = construct_seq[:ipos] == backbone_seq[:ipos]
-                dn_ok = (
-                    construct_seq[ipos + len(found_seq):] == backbone_seq[ipos:]
-                )
-                checks.append(
-                    f"Backbone upstream preserved: {'PASS' if up_ok else 'FAIL (CRITICAL)'}"
-                )
-                checks.append(
-                    f"Backbone downstream preserved: {'PASS' if dn_ok else 'FAIL (CRITICAL)'}"
-                )
-                exp_size = len(backbone_seq) + len(found_seq)
-                checks.append(
-                    f"Expected size {exp_size} bp: {'PASS' if len(construct_seq) == exp_size else 'FAIL'}"
-                )
-
-            out = "Validation Report:\n" + "\n".join(f"  {c}" for c in checks)
-            if warnings:
-                out += "\n\n⚠️ Warnings:\n" + "\n".join(f"  - {w}" for w in warnings)
-            return out
-
-        elif name == "search_addgene":
-            if not ADDGENE_AVAILABLE:
-                return "Addgene integration not available."
-            results = _search_addgene(args["query"], args.get("limit", 10))
-            if not results:
-                return f"No Addgene results for '{args['query']}'"
-            lines = [f"Addgene results for '{args['query']}':"]
-            for r in results:
-                lines.append(f"- {r.get('name','?')} (Addgene #{r.get('addgene_id','?')})")
-            return "\n".join(lines)
-
-        elif name == "get_addgene_plasmid":
-            if not ADDGENE_AVAILABLE:
-                return "Addgene integration not available."
-            plasmid = _get_addgene_plasmid(args["addgene_id"])
-            if not plasmid:
-                return f"Could not fetch Addgene #{args['addgene_id']}"
-            if tracker:
-                tracker.add_addgene_plasmid(plasmid.__dict__)
-            out = f"Addgene #{args['addgene_id']}: {plasmid.name}\n"
-            out += f"Size: {plasmid.size_bp} bp\n"
-            out += f"Resistance: {plasmid.bacterial_resistance}\n"
-            if plasmid.sequence:
-                out += f"Sequence: {len(plasmid.sequence)} bp available\n"
-                # If explicitly requested, include the full sequence text so the
-                # agent can pass it directly to assemble_construct.
-                if args.get("include_sequence", False):
-                    out += f"\nSequence ({len(plasmid.sequence)} bp):\n{plasmid.sequence}"
-                else:
-                    out += "(Use get_backbone or import_addgene_to_library to make it available by ID, or set include_sequence=true to retrieve raw text.)"
-            else:
-                out += "Sequence: not available (Addgene may require login for this plasmid's depositor sequence)"
-            return out
-
-        elif name == "import_addgene_to_library":
-            if not ADDGENE_AVAILABLE:
-                return "Addgene integration not available."
-            integration = AddgeneLibraryIntegration(LIBRARY_PATH)
-            bb = integration.import_plasmid(args["addgene_id"], args.get("include_sequence", True))
-            if not bb:
-                return f"Failed to import Addgene #{args['addgene_id']}"
-            if tracker:
-                tracker.add_backbone(bb)
-            out = f"Imported: {bb['id']} ({bb['size_bp']} bp)"
-            if bb.get("sequence"):
-                out += f", sequence: {len(bb['sequence'])} bp"
-            return out
-
-        elif name == "search_all":
-            results = _search_all_sources(args["query"], args.get("organism"))
-            lines = [f"Concurrent search results for '{args['query']}':"]
-            if results["local_inserts"]:
-                lines.append(f"\n--- Local Inserts ({len(results['local_inserts'])} found) ---")
-                for ins in results["local_inserts"]:
-                    lines.append(f"  - {ins['id']} ({ins['size_bp']} bp, {ins.get('category', '?')})")
-            if results["local_backbones"]:
-                lines.append(f"\n--- Local Backbones ({len(results['local_backbones'])} found) ---")
-                for bb in results["local_backbones"]:
-                    lines.append(f"  - {bb['id']} ({bb['size_bp']} bp, {bb.get('organism', '?')}, {bb.get('promoter', '?')})")
-            if results["ncbi_genes"]:
-                lines.append(f"\n--- NCBI Gene ({len(results['ncbi_genes'])} found) ---")
-                for g in results["ncbi_genes"]:
-                    aliases = f" (aliases: {g['aliases']})" if g.get("aliases") else ""
-                    lines.append(f"  - {g['symbol']} (ID: {g['gene_id']}) — {g['full_name']} [{g['organism']}]{aliases}")
-            if results["addgene_plasmids"]:
-                lines.append(f"\n--- Addgene ({len(results['addgene_plasmids'])} found) ---")
-                for p in results["addgene_plasmids"]:
-                    lines.append(f"  - {p.get('name', '?')} (Addgene #{p.get('addgene_id', '?')})")
-            if results["errors"]:
-                lines.append(f"\n--- Errors ---")
-                for src, err in results["errors"].items():
-                    lines.append(f"  - {src}: {err}")
-            total = (len(results["local_inserts"]) + len(results["local_backbones"]) +
-                     len(results["ncbi_genes"]) + len(results["addgene_plasmids"]))
-            if total == 0:
-                lines.append("\nNo results found in any source.")
-            lines.append(f"\nSources searched: {', '.join(results['sources_searched'])}")
-            return "\n".join(lines)
-
-        elif name == "search_gene":
-            if not NCBI_AVAILABLE:
-                return "NCBI integration not available. Install biopython: pip install biopython"
-            results = _search_gene_fn(args["query"], args.get("organism"))
-            if not results:
-                return f"No genes found matching '{args['query']}'"
-            lines = [f"NCBI Gene results for '{args['query']}':"]
-            for r in results:
-                aliases = f" (aliases: {r['aliases']})" if r.get("aliases") else ""
-                lines.append(f"- {r['symbol']} (Gene ID: {r['gene_id']}) — {r['full_name']} [{r['organism']}]{aliases}")
-            return "\n".join(lines)
-
-        elif name == "fetch_gene":
-            if not NCBI_AVAILABLE:
-                return "NCBI integration not available. Install biopython: pip install biopython"
-            result = _fetch_gene_fn(
-                gene_id=args.get("gene_id"),
-                gene_symbol=args.get("gene_symbol"),
-                organism=args.get("organism"),
-            )
-            if not result:
-                return "Could not fetch gene sequence from NCBI."
-            # Disambiguation signal — multiple species matched, no organism given
-            if result.get("needs_disambiguation"):
-                out = (
-                    f"⚠️ **Ambiguous gene**: '{args.get('gene_symbol', '?')}' "
-                    f"matched {len(result.get('options', []))} entries across "
-                    f"multiple species. Please specify organism:\n\n"
-                )
-                for opt in result.get("options", []):
-                    out += (
-                        f"  - {opt.get('symbol')} ({opt.get('organism')}) — "
-                        f"{opt.get('full_name')}\n"
-                        f"    gene_id: {opt.get('gene_id')}\n"
-                    )
-                out += "\nRetry with organism set, or pass gene_id directly."
-                return out
-            if tracker:
-                tracker.add_ncbi_gene(result)
-            out = f"Gene: {result['symbol']} ({result['organism']})\n"
-            out += f"Accession: {result['accession']}\n"
-            out += f"Full name: {result['full_name']}\n"
-            out += f"CDS length: {result['length']} bp\n"
-            out += f"\n{_fmt_seq_for_agent(result['sequence'], 'CDS Sequence')}"
-            return out
-
-        elif name == "search_fpbase":
-            if not FPBASE_AVAILABLE:
-                return "FPbase integration not available."
-            results = _search_fpbase(args["name"], limit=5)
-            if not results:
-                return (
-                    f"No fluorescent proteins found on FPbase matching "
-                    f"'{args['name']}'. Try a different spelling or check "
-                    f"https://www.fpbase.org/"
-                )
-            lines = [f"FPbase results for '{args['name']}':"]
-            for r in results:
-                ex_em = ""
-                if r.get("ex_max") and r.get("em_max"):
-                    ex_em = f" — Ex/Em {r['ex_max']}/{r['em_max']} nm"
-                lines.append(
-                    f"  - {r['name']} (slug: {r['slug']}){ex_em}"
-                )
-            lines.append(
-                "\nUse get_insert with the FP name to retrieve the DNA sequence."
-            )
-            return "\n".join(lines)
-
-        elif name == "get_cell_line_info":
-            cl = args["cell_line"]
-            species = infer_species_from_cell_line(cl)
-            if species:
-                return (
-                    f"Cell line '{cl}' is from species: **{species}**\n"
-                    f"Note: confirm with the user before assuming the gene of "
-                    f"interest is also {species} — they may want a different "
-                    f"species' gene expressed in {cl} cells."
-                )
-            return (
-                f"Cell line '{cl}' not found in the known cell lines database. "
-                f"Ask the user what species it is."
-            )
-
-        elif name == "fuse_inserts":
-            sequences = []
-            atg_removals = []
-            for i, item in enumerate(args["inserts"]):
-                seq = item.get("sequence")
-                seq_name = item.get("name", "")
-                seq_type = item.get("type", "protein")
-                if not seq and item.get("insert_id"):
-                    ins = get_insert_by_id(item["insert_id"])
-                    if not ins:
-                        return f"Insert '{item['insert_id']}' not found in library, FPbase, or NCBI."
-                    if ins.get("needs_disambiguation"):
-                        return (
-                            f"Cannot fuse: insert '{item['insert_id']}' is ambiguous "
-                            f"(matched multiple species). Call get_insert first "
-                            f"with an organism, or specify gene_id directly."
-                        )
-                    seq = ins.get("sequence")
-                    seq_name = seq_name or ins.get("name", item["insert_id"])
-                    if tracker:
-                        tracker.add_insert(ins)
-                if not seq:
-                    return f"No sequence available for '{seq_name or 'unknown'}'."
-                sequences.append({"sequence": seq, "name": seq_name, "type": seq_type})
-                if i > 0 and seq_type == "protein":
-                    from assembler import clean_sequence as _clean_seq
-                    if _clean_seq(seq)[:3] == "ATG":
-                        atg_removals.append(seq_name or f"sequence_{i}")
-
-            try:
-                fused = _fuse_sequences(sequences, args.get("linker"))
-            except ValueError as e:
-                return f"Fusion error: {e}"
-
-            names = [s["name"] for s in sequences]
-            out = f"Fused CDS: {'-'.join(names)}\n"
-            out += f"Length: {len(fused)} bp\n"
-            out += f"Start codon: {'Yes' if fused[:3] == 'ATG' else 'No'}\n"
-            out += f"Stop codon: {'Yes' if fused[-3:] in ('TAA', 'TAG', 'TGA') else 'No'}\n"
-            out += f"In frame: {'Yes' if len(fused) % 3 == 0 else 'No'}\n"
-            if atg_removals:
-                out += f"\nNote: Start codon (ATG) removed from: {', '.join(atg_removals)}\n"
-                out += "This is correct for a protein fusion — translation initiates from the first ATG only.\n"
-            out += f"\nFused sequence ({len(fused)} bp):\n{fused}"
-            return out
-
-        elif name == "score_construct_confidence":
-            if not CONFIDENCE_AVAILABLE:
-                return "Design Confidence module not available in this deployment."
-            insert_seq = clean_sequence(args["insert_sequence"])
-            backbone = None
-            if args.get("backbone_id"):
-                backbone = get_backbone_by_id(args["backbone_id"])
-            report = compute_confidence(
-                insert_seq=insert_seq,
-                backbone=backbone,
-                fusion_parts=args.get("fusion_parts"),
-            )
-            return format_confidence_report(report)
-
-        elif name == "predict_fusion_sites":
-            if not PROTEIN_ANALYSIS_AVAILABLE:
-                return "Protein Analysis module not available in this deployment."
-            # Accept either AA or DNA input
-            aa_seq = args.get("protein_sequence")
-            if not aa_seq and args.get("dna_sequence"):
-                dna = clean_sequence(args["dna_sequence"])
-                aa_seq = _translate_dna(dna)
-            if not aa_seq:
-                return "Error: provide either protein_sequence (AA) or dna_sequence (CDS)."
-            aa_seq = aa_seq.upper().strip()
-            min_window = args.get("min_window", 10)
-            sites = _find_fusion_sites(aa_seq, min_window=min_window)
-            if not sites:
-                return (
-                    f"No disordered regions ≥{min_window} residues found in this "
-                    f"protein ({len(aa_seq)} aa). The protein may be highly "
-                    f"structured throughout — terminal fusion is likely the only "
-                    f"option. Consider a longer flexible linker if terminal fusion "
-                    f"has failed."
-                )
-            lines = [
-                f"Found {len(sites)} candidate fusion site(s) in protein "
-                f"({len(aa_seq)} aa), ranked by suitability:\n"
-            ]
-            for i, s in enumerate(sites[:5], 1):
-                lines.append(
-                    f"  {i}. Residues {s['start']+1}-{s['end']} "
-                    f"({s['length']} aa, mean disorder {s['mean_disorder']:.2f}) "
-                    f"— context: ...{s['context']}..."
-                )
-            lines.append(
-                "\nNote: Disorder prediction is a sequence-based heuristic. "
-                "For high-stakes designs, verify against AlphaFold2 pLDDT "
-                "or published domain boundaries."
-            )
-            return "\n".join(lines)
-
-        elif name == "lookup_known_mutations":
-            if not MUTATIONS_AVAILABLE:
-                return "Mutation Design module not available in this deployment."
-            muts = _lookup_known_mutations(
-                args["gene_symbol"], args.get("mutation_type")
-            )
-            if not muts:
-                filter_txt = f" ({args['mutation_type']})" if args.get("mutation_type") else ""
-                return (
-                    f"No curated{filter_txt} mutations found for "
-                    f"'{args['gene_symbol']}'. The curated database covers "
-                    f"common oncogenes (BRAF, KRAS, EGFR, PIK3CA, IDH1/2, "
-                    f"NRAS, CTNNB1, AKT1, MYC) and tumor suppressors (TP53, "
-                    f"PTEN, RB1, FBXW7). For other genes, ask the user for "
-                    f"the specific mutation they want, or offer a premature-stop "
-                    f"LoF design."
-                )
-            lines = [
-                f"Curated mutations for {args['gene_symbol'].upper()}"
-                f"{' (' + args['mutation_type'] + ')' if args.get('mutation_type') else ''}:\n"
-            ]
-            for m in muts:
-                ref = f" [{m['reference']}]" if m.get("reference") else ""
-                lines.append(
-                    f"  • {m['mutation']} ({m['type']}): {m['phenotype']}{ref}"
-                )
-                if m.get("codon_change"):
-                    lines.append(f"    Codon change: {m['codon_change']}")
-            return "\n".join(lines)
-
-        elif name == "apply_mutation":
-            if not MUTATIONS_AVAILABLE:
-                return "Mutation Design module not available in this deployment."
-            dna = clean_sequence(args["dna_sequence"])
-            method = args.get("method", "point_mutation")
-
-            if method == "premature_stop":
-                frac = args.get("position_fraction", 0.1)
-                result = _design_premature_stop(dna, position_fraction=frac)
-                out = (
-                    f"Premature stop introduced:\n"
-                    f"  AA position: {result['stop_position_aa']}\n"
-                    f"  DNA position: {result['stop_position_dna']}\n"
-                    f"  Original codon: {result['original_codon']} "
-                    f"({result['original_aa']})\n"
-                    f"  New codon: TGA (*)\n"
-                    f"  Sequence length preserved: "
-                    f"{len(result['sequence'])} bp\n\n"
-                    f"Mutated sequence:\n{result['sequence']}"
-                )
-                return out
-
-            # point_mutation — accept either 'mutation' (V600E notation)
-            # or aa_position + new_aa
-            aa_pos = args.get("aa_position")
-            new_aa = args.get("new_aa")
-            if args.get("mutation"):
-                parsed = _parse_mutation_notation(args["mutation"])
-                if not parsed:
-                    return (
-                        f"Could not parse mutation notation '{args['mutation']}'. "
-                        f"Use standard format like 'V600E' or pass aa_position "
-                        f"+ new_aa directly."
-                    )
-                aa_pos = parsed["position"]
-                new_aa = parsed["new_aa"]
-                expected_original = parsed["original_aa"]
-            else:
-                expected_original = None
-
-            if aa_pos is None or not new_aa:
-                return (
-                    "Error: for point_mutation, provide either 'mutation' "
-                    "(e.g., 'V600E') or both 'aa_position' and 'new_aa'."
-                )
-
-            result = _apply_point_mutation(dna, aa_position=aa_pos, new_aa=new_aa)
-
-            # Sanity check: did the original AA match what the notation said?
-            warning = ""
-            if expected_original and result["original_aa"] != expected_original:
-                warning = (
-                    f"\n\n⚠️ WARNING: Mutation notation '{args['mutation']}' "
-                    f"expects original AA '{expected_original}' at position "
-                    f"{aa_pos}, but the sequence has '{result['original_aa']}'. "
-                    f"This may be the wrong transcript/isoform, or the position "
-                    f"is off by one. Please verify the sequence and position."
-                )
-
-            out = (
-                f"Point mutation applied: {result['original_aa']}{aa_pos}"
-                f"{result['new_aa']}\n"
-                f"  DNA position: {result['dna_position']}\n"
-                f"  Original codon: {result['original_codon']} → "
-                f"New codon: {result['new_codon']}\n"
-                f"  Sequence length preserved: "
-                f"{len(result['sequence'])} bp\n"
-                f"{warning}\n\n"
-                f"Mutated sequence:\n{result['sequence']}"
-            )
-            return out
-
-        elif name == "fetch_promoter_region":
-            if not GENOMIC_UPSTREAM_AVAILABLE:
-                return (
-                    "Genomic upstream fetch not available (requires Biopython "
-                    "+ NCBI access)."
-                )
-            gene_id = args.get("gene_id")
-            bp_upstream = args.get("bp_upstream", 2000)
-
-            # Resolve symbol → gene_id if needed
-            if not gene_id and args.get("gene_symbol"):
-                if not NCBI_AVAILABLE:
-                    return "NCBI gene search not available."
-                genes = _search_gene_fn(args["gene_symbol"], args.get("organism"))
-                if not genes:
-                    return f"Gene '{args['gene_symbol']}' not found on NCBI."
-                if len(genes) > 1 and not args.get("organism"):
-                    organisms = {g.get("organism", "") for g in genes}
-                    if len(organisms) > 1:
-                        return (
-                            f"Gene '{args['gene_symbol']}' is ambiguous across "
-                            f"species: {', '.join(sorted(organisms))}. "
-                            f"Specify organism and retry."
-                        )
-                gene_id = genes[0]["gene_id"]
-
-            if not gene_id:
-                return "Error: provide gene_id or gene_symbol."
-
-            result = _fetch_genomic_upstream(gene_id=gene_id, bp_upstream=bp_upstream)
-            if not result:
-                return (
-                    f"Could not fetch upstream region for gene_id={gene_id}. "
-                    f"The gene may not have annotated genomic coordinates, "
-                    f"or NCBI is temporarily unavailable."
-                )
-            out = (
-                f"Native upstream region for {result['gene_symbol']} "
-                f"(gene_id={result['gene_id']}):\n"
-                f"  Organism: {result.get('organism', '?')}\n"
-                f"  Chromosome: {result.get('chromosome_accession', '?')}\n"
-                f"  Strand: {result.get('strand', '?')}\n"
-                f"  Length: {result['length']} bp\n\n"
-                f"⚠️ {result['warning']}\n\n"
-                f"Upstream sequence ({result['length']} bp):\n"
-                f"{result['sequence']}"
-            )
-            return out
-
-        elif name == "assemble_golden_gate":
-            backbone_id = args["backbone_id"]
-            part_ids = args["part_ids"]
-            enzyme_name = args.get("enzyme_name", "Esp3I")
-
-            backbone = get_backbone_by_id(backbone_id)
-            if not backbone:
-                return f"Backbone {backbone_id!r} not found in library."
-            bb_seq = backbone.get("plasmid_sequence") or backbone.get("sequence", "")
-            if not bb_seq:
-                return f"Backbone {backbone_id!r} has no plasmid_sequence."
-
-            parts = []
-            for pid in part_ids:
-                part = get_insert_by_id(pid)
-                if not part:
-                    return f"Part {pid!r} not found in library."
-                ps = part.get("plasmid_sequence") or part.get("sequence", "")
-                if not ps:
-                    return (
-                        f"Part {pid!r} has no plasmid_sequence. "
-                        "Golden Gate requires the full carrier vector sequence."
-                    )
-                parts.append({
-                    "name": part.get("name", pid),
-                    "plasmid_sequence": ps,
-                    "overhang_l": part.get("overhang_l"),
-                    "overhang_r": part.get("overhang_r"),
-                })
-
-            result = _assemble_golden_gate(
-                backbone_plasmid_seq=bb_seq,
-                parts=parts,
-                enzyme_name=enzyme_name,
-            )
-
-            if not result.success:
-                return "Golden Gate assembly failed:\n" + "\n".join(
-                    f"  • {e}" for e in result.errors
-                )
-
-            warnings_block = ""
-            if result.warnings:
-                warnings_block = "\n\nWarnings:\n" + "\n".join(
-                    f"  ⚠ {w}" for w in result.warnings
-                )
-
-            junctions = " → ".join(result.junction_overhangs)
-            order_str = " → ".join(result.assembly_order) if result.assembly_order else "(backbone only)"
-
-            return (
-                f"Golden Gate assembly successful ({enzyme_name}).\n\n"
-                f"Assembly order : {order_str}\n"
-                f"Junctions (4-nt): {junctions}\n"
-                f"Total size     : {result.total_size_bp} bp\n\n"
-                # NOTE: full sequence must be returned here so the agent can pass it
-                # directly to validate_construct and export_construct. Do NOT truncate.
-                f"Assembled sequence ({result.total_size_bp} bp):\n{result.sequence}"
-                + warnings_block
-            )
-
-        elif name == "log_experimental_outcome":
-            # This tool needs session context to store the outcome. The
-            # execute_tool dispatcher doesn't have session access, so we
-            # return a marker the agent-loop can intercept (or, simpler:
-            # just format for display and rely on the caller to persist).
-            # For now, return a special prefix the agent loop can detect.
-            status = args["status"]
-            observation = args["observation"]
-            cname = args.get("construct_name", "")
-            return (
-                f"[OUTCOME_LOGGED] status={status} "
-                f"construct={cname!r} observation={observation!r}\n\n"
-                f"Outcome recorded for this session: **{status}** — "
-                f"{observation}. Future troubleshooting turns will see this "
-                f"context."
-            )
-
-        elif name == "fetch_oa_fulltext":
-            if not LITERATURE_AVAILABLE:
-                return "Literature integration not available."
-            result = _fetch_oa_fulltext(args["doi"])
-            if not result.get("found"):
-                return f"Unpaywall lookup failed: {result.get('error', 'unknown')}"
-            if not result.get("is_oa"):
-                return (
-                    f"Paper found but no open-access copy available.\n"
-                    f"Title: {result.get('title')}\n"
-                    f"Journal: {result.get('journal')} ({result.get('year')})"
-                )
-            lines = [
-                "Open-access copy found:",
-                f"  Title: {result.get('title')}",
-                f"  Journal: {result.get('journal')} ({result.get('year')})",
-                f"  Host: {result.get('host_type')} (license: {result.get('license') or 'unspecified'})",
-            ]
-            if result.get("pdf_url"):
-                lines.append(f"  PDF: {result['pdf_url']}")
-            if result.get("landing_url"):
-                lines.append(f"  Landing page: {result['landing_url']}")
-            return "\n".join(lines)
-
-        else:
-            return f"Unknown tool: {name}"
-
-    except Exception as e:
-        return f"Tool error ({name}): {str(e)}"
-
+        result = asyncio.run(handler(args))
+    except Exception as e:  # noqa: BLE001 — surface tool errors to the model
+        return f"Tool error ({name}): {e}"
+    if isinstance(result, dict) and "content" in result:
+        return _tool_result_text(result["content"])
+    return _tool_result_text(result)
 
 
 # ── Session management ──────────────────────────────────────────────────
@@ -1578,6 +113,14 @@ _batch_jobs: dict[str, dict] = {}
 SESSIONS_FILE = Path(__file__).parent / ".sessions.json"
 
 MODEL = "claude-opus-4-6"
+
+# Context window sizes by model (tokens)
+CONTEXT_WINDOW = {
+    "claude-opus-4-6":          1_000_000,
+    "claude-sonnet-4-6":        1_000_000,
+    "claude-haiku-4-5-20251001":  200_000,
+}
+
 
 
 def _serialize_content(content):
@@ -1705,6 +248,7 @@ def create_session() -> str:
     """Create a new conversation session."""
     sid = str(uuid.uuid4())
     _sessions[sid] = {
+        # API message history — replayed each turn for multi-turn context.
         "history": [],
         "display_messages": [],
         "created_at": time.time(),
@@ -1775,6 +319,72 @@ def cancel_session(session_id: str):
 
 
 # ── Agent loop ──────────────────────────────────────────────────────────
+# Streams via the Anthropic API directly (~1s TTFT). Tool calls dispatch
+# to src/tools.py:ALL_TOOLS handlers in-process — same implementations the
+# Agent SDK MCP server (app/agent.py, evals) uses.
+
+_anthropic_client: anthropic.Anthropic | None = None
+
+
+def _client() -> anthropic.Anthropic:
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.Anthropic()
+    return _anthropic_client
+
+
+def _emit_tool_result(
+    tool_name: str,
+    tool_input: dict,
+    result_str: str,
+    *,
+    safe_write,
+    session: dict,
+    assistant_blocks: list,
+) -> None:
+    """Emit SSE event(s) for a completed tool call and apply side effects.
+
+    Handles export_construct download/plot, log_experimental_outcome
+    session persistence, and display-message recording. Shared between
+    the streaming loop and any future callers so behaviour stays in sync.
+    """
+    if (
+        tool_name == "log_experimental_outcome"
+        and result_str.startswith("[OUTCOME_LOGGED]")
+    ):
+        session.setdefault("experimental_outcomes", []).append({
+            "status": tool_input.get("status"),
+            "observation": tool_input.get("observation"),
+            "construct_name": tool_input.get("construct_name", ""),
+            "timestamp": time.time(),
+        })
+        _save_sessions()
+    display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
+    event_data = {
+        "type": "tool_result",
+        "tool": tool_name,
+        "input": tool_input,
+        "content": display_result,
+    }
+    if tool_name == "export_construct":
+        event_data["download_content"] = result_str
+        fmt = tool_input.get("output_format", "raw")
+        cname = tool_input.get("construct_name", "construct")
+        ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
+        event_data["download_filename"] = cname + ext
+    safe_write(event_data)
+    plot = get_last_plot_json()
+    if tool_name == "export_construct" and plot:
+        safe_write({"type": "plot_data", "plot_json": json.loads(plot)})
+        clear_last_plot_json()
+    assistant_blocks.append({
+        "type": "tool_use",
+        "name": tool_name,
+        "input": tool_input,
+        "result": display_result,
+        "download_content": event_data.get("download_content"),
+        "download_filename": event_data.get("download_filename"),
+    })
 
 
 def run_agent_turn_streaming(user_message: str, session_id: str, write_event, model: str = MODEL):
@@ -1787,12 +397,13 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         return
 
     tracker = ReferenceTracker()
+    set_tracker(tracker)
+    clear_last_plot_json()
     export_called = False
     # Build the system prompt once per turn (not per retry) so that
     # prompt caching works. The prompt is dynamic because it includes
     # per-session troubleshooting context (experimental_outcomes).
     turn_system_prompt = _build_system_prompt(session)
-    client = anthropic.Anthropic()
     history = session["history"]
     history.append({"role": "user", "content": user_message})
     session["display_messages"].append({"role": "user", "content": user_message})
@@ -1815,192 +426,156 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
     max_iterations = 15
     max_retries = 3
     assistant_text = ""
-    assistant_blocks = []
+    assistant_blocks: list[dict] = []
     current_thinking_text = ""
     current_text_content = ""
 
-    for _ in range(max_iterations):
-        if is_cancelled() or disconnected:
-            break
-
-        stop_reason = None
-        final_message = None
-        tool_results: list = []  # also reset inside retry loop; init here for static analysis
-
-        # Retry loop for rate limits
-        for retry_attempt in range(max_retries + 1):
-            # Reset per-API-call state on each retry. If a stream partially
-            # succeeded before rate-limiting, any tool_results accumulated
-            # reference tool_use_ids from the aborted stream — replaying them
-            # alongside the retry's fresh tool_use_ids causes a 400 error
-            # (tool_use/tool_result ID mismatch).
-            current_block_type = None
-            current_tool_name = None
-            current_tool_id = None
-            current_tool_input_json = ""
-            tool_results = []
-            try:
-                with client.messages.stream(
-                    model=model,
-                    max_tokens=16000,
-                    system=turn_system_prompt,
-                    tools=TOOLS,
-                    messages=history,
-                    thinking={"type": "enabled", "budget_tokens": 5000},
-                ) as stream:
-                    for event in stream:
-                        if is_cancelled() or disconnected:
-                            stream.close()
-                            break
-
-                        if event.type == "content_block_start":
-                            block = event.content_block
-                            if block.type == "thinking":
-                                current_block_type = "thinking"
-                                current_thinking_text = ""
-                                safe_write({"type": "thinking_start"})
-                            elif block.type == "text":
-                                current_block_type = "text"
-                                current_text_content = ""
-                                safe_write({"type": "text_start"})
-                            elif block.type == "tool_use":
-                                current_block_type = "tool_use"
-                                current_tool_name = block.name
-                                current_tool_id = block.id
-                                current_tool_input_json = ""
-                                safe_write({"type": "tool_use_start", "tool": block.name})
-
-                        elif event.type == "content_block_delta":
-                            delta = event.delta
-                            if delta.type == "thinking_delta":
-                                current_thinking_text += delta.thinking
-                                safe_write({"type": "thinking_delta", "content": delta.thinking})
-                            elif delta.type == "text_delta":
-                                assistant_text += delta.text
-                                current_text_content += delta.text
-                                safe_write({"type": "text_delta", "content": delta.text})
-                            elif delta.type == "input_json_delta":
-                                current_tool_input_json += delta.partial_json
-
-                        elif event.type == "content_block_stop":
-                            if current_block_type == "thinking":
-                                assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
-                                safe_write({"type": "thinking_end"})
-                            elif current_block_type == "text":
-                                assistant_blocks.append({"type": "text", "content": current_text_content})
-                                safe_write({"type": "text_end"})
-                            elif current_block_type == "tool_use":
-                                if is_cancelled() or disconnected:
-                                    break
-                                tool_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
-                                result_str = execute_tool(current_tool_name, tool_input, tracker)
-                                if current_tool_name == "export_construct":
-                                    export_called = True
-                                # Intercept outcome-log marker and persist to session
-                                if (
-                                    current_tool_name == "log_experimental_outcome"
-                                    and result_str.startswith("[OUTCOME_LOGGED]")
-                                ):
-                                    session.setdefault("experimental_outcomes", []).append({
-                                        "status": tool_input.get("status"),
-                                        "observation": tool_input.get("observation"),
-                                        "construct_name": tool_input.get("construct_name", ""),
-                                        "timestamp": time.time(),
-                                    })
-                                    _save_sessions()
-                                display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
-                                event_data = {
-                                    "type": "tool_result",
-                                    "tool": current_tool_name,
-                                    "input": tool_input,
-                                    "content": display_result,
-                                }
-                                # For export_construct, include full content for download
-                                if current_tool_name == "export_construct":
-                                    event_data["download_content"] = result_str
-                                    fmt = tool_input.get("output_format", "raw")
-                                    cname = tool_input.get("construct_name", "construct")
-                                    ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
-                                    event_data["download_filename"] = cname + ext
-                                safe_write(event_data)
-                                # Emit plasmid plot after genbank export
-                                _plot = _get_last_plot_json()
-                                if current_tool_name == "export_construct" and _plot:
-                                    safe_write({"type": "plot_data", "plot_json": json.loads(_plot)})
-                                tool_results.append({
-                                    "type": "tool_result",
-                                    "tool_use_id": current_tool_id,
-                                    "content": result_str,
-                                })
-                                assistant_blocks.append({
-                                    "type": "tool_use",
-                                    "name": current_tool_name,
-                                    "input": tool_input,
-                                    "result": display_result,
-                                    "download_content": event_data.get("download_content"),
-                                    "download_filename": event_data.get("download_filename"),
-                                })
-                            current_block_type = None
-
-                        elif event.type == "message_delta":
-                            stop_reason = event.delta.stop_reason
-
-                    if is_cancelled() or disconnected:
-                        break
-
-                    final_message = stream.get_final_message()
-                # Stream succeeded, break out of retry loop
+    try:
+        for _ in range(max_iterations):
+            if is_cancelled() or disconnected:
                 break
 
-            except anthropic.RateLimitError:
-                if retry_attempt < max_retries:
-                    wait_time = 2 ** retry_attempt  # 1s, 2s, 4s
-                    safe_write({"type": "text_delta", "content": f"\n[Rate limited, retrying in {wait_time}s...]\n"})
-                    time.sleep(wait_time)
+            stop_reason = None
+            final_message = None
+            tool_results: list = []
+
+            for retry_attempt in range(max_retries + 1):
+                # Reset per-API-call state on each retry. If a stream partially
+                # succeeded before rate-limiting, any tool_results accumulated
+                # reference tool_use_ids from the aborted stream — replaying
+                # them alongside the retry's fresh tool_use_ids causes a 400.
+                current_block_type = None
+                current_tool_name = None
+                current_tool_id = None
+                current_tool_input_json = ""
+                tool_results = []
+                try:
+                    with _client().messages.stream(
+                        model=model,
+                        max_tokens=16000,
+                        system=turn_system_prompt,
+                        tools=TOOLS,
+                        messages=history,
+                        thinking={"type": "enabled", "budget_tokens": 5000},
+                    ) as stream:
+                        for event in stream:
+                            if is_cancelled() or disconnected:
+                                stream.close()
+                                break
+
+                            if event.type == "content_block_start":
+                                block = event.content_block
+                                if block.type == "thinking":
+                                    current_block_type = "thinking"
+                                    current_thinking_text = ""
+                                    safe_write({"type": "thinking_start"})
+                                elif block.type == "text":
+                                    current_block_type = "text"
+                                    current_text_content = ""
+                                    safe_write({"type": "text_start"})
+                                elif block.type == "tool_use":
+                                    current_block_type = "tool_use"
+                                    current_tool_name = block.name
+                                    current_tool_id = block.id
+                                    current_tool_input_json = ""
+                                    safe_write({"type": "tool_use_start", "tool": block.name})
+
+                            elif event.type == "content_block_delta":
+                                delta = event.delta
+                                if delta.type == "thinking_delta":
+                                    current_thinking_text += delta.thinking
+                                    safe_write({"type": "thinking_delta", "content": delta.thinking})
+                                elif delta.type == "text_delta":
+                                    assistant_text += delta.text
+                                    current_text_content += delta.text
+                                    safe_write({"type": "text_delta", "content": delta.text})
+                                elif delta.type == "input_json_delta":
+                                    current_tool_input_json += delta.partial_json
+
+                            elif event.type == "content_block_stop":
+                                if current_block_type == "thinking":
+                                    assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
+                                    safe_write({"type": "thinking_end"})
+                                elif current_block_type == "text":
+                                    assistant_blocks.append({"type": "text", "content": current_text_content})
+                                    safe_write({"type": "text_end"})
+                                elif current_block_type == "tool_use":
+                                    if is_cancelled() or disconnected:
+                                        break
+                                    tool_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
+                                    result_str = _dispatch_tool(current_tool_name, tool_input)
+                                    if current_tool_name == "export_construct":
+                                        export_called = True
+                                    _emit_tool_result(
+                                        current_tool_name, tool_input, result_str,
+                                        safe_write=safe_write, session=session,
+                                        assistant_blocks=assistant_blocks,
+                                    )
+                                    tool_results.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": current_tool_id,
+                                        "content": result_str,
+                                    })
+                                current_block_type = None
+
+                            elif event.type == "message_delta":
+                                stop_reason = event.delta.stop_reason
+
+                        if is_cancelled() or disconnected:
+                            break
+
+                        final_message = stream.get_final_message()
+                        if final_message and hasattr(final_message, "usage"):
+                            safe_write({
+                                "type": "token_usage",
+                                "input_tokens": final_message.usage.input_tokens,
+                                "context_window": CONTEXT_WINDOW.get(model, 1_000_000),
+                            })
+                    break  # stream succeeded, leave retry loop
+
+                except (anthropic.RateLimitError, anthropic.InternalServerError) as e:
+                    if retry_attempt < max_retries:
+                        wait_time = 2 ** retry_attempt
+                        kind = "Rate limited" if isinstance(e, anthropic.RateLimitError) else "Server error"
+                        safe_write({"type": "text_delta", "content": f"\n[{kind}, retrying in {wait_time}s...]\n"})
+                        time.sleep(wait_time)
+                        continue
+                    safe_write({"type": "error", "content": f"{type(e).__name__} after retries. Please try again."})
+                    break
+                except Exception:
+                    if is_cancelled() or disconnected:
+                        break
+                    raise
+
+            if is_cancelled() or disconnected or final_message is None:
+                break
+
+            # Convert content blocks to plain dicts to strip extra SDK fields
+            # (e.g. parsed_output) that cause 400 errors on replay. Unknown
+            # block types are dropped — passing them through can fail when
+            # the SDK emits a new type we don't handle.
+            filtered_content = []
+            for b in final_message.content:
+                btype = getattr(b, "type", None)
+                if btype == "thinking":
                     continue
+                if btype == "text":
+                    filtered_content.append({"type": "text", "text": b.text})
+                elif btype == "tool_use":
+                    filtered_content.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
                 else:
-                    safe_write({"type": "error", "content": "Rate limit exceeded after retries. Please try again later."})
-                    break
-            except Exception:
-                if is_cancelled() or disconnected:
-                    break
-                raise
+                    logger.warning("Dropping unknown content block type from history: %s", btype or type(b).__name__)
+            history.append({"role": "assistant", "content": filtered_content})
 
-        if is_cancelled() or disconnected:
-            break
-
-        # Guard: if all retries were exhausted (rate limit) or the stream
-        # broke before get_final_message, final_message is None. Don't try
-        # to append history — just exit the agent loop.
-        if final_message is None:
-            break
-
-        # Convert content blocks to plain dicts to strip extra SDK fields
-        # (e.g. parsed_output) that cause 400 errors on replay.
-        # Unknown block types are DROPPED — passing them through can cause
-        # 400 errors on the next API call when the SDK emits a new block type
-        # we don't handle (redacted_thinking, server_tool_use, etc.).
-        filtered_content = []
-        for b in final_message.content:
-            btype = getattr(b, 'type', None)
-            if btype == 'thinking':
-                continue
-            elif btype == 'text':
-                filtered_content.append({"type": "text", "text": b.text})
-            elif btype == 'tool_use':
-                filtered_content.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
+            if tool_results:
+                history.append({"role": "user", "content": tool_results})
             else:
-                logger.warning(f"Dropping unknown content block type from history: {btype or type(b).__name__}")
-                continue
-        history.append({"role": "assistant", "content": filtered_content})
+                break
 
-        if tool_results:
-            history.append({"role": "user", "content": tool_results})
-        else:
-            break
-
-        if stop_reason == "end_turn":
-            break
+            if stop_reason == "end_turn":
+                break
+    finally:
+        set_tracker(None)
 
     # Flush any in-progress block that was interrupted mid-stream
     if current_text_content and not any(
@@ -2025,7 +600,6 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             safe_write({"type": "text_delta", "content": ref_block})
             safe_write({"type": "text_end"})
 
-    # Save assistant text and structured blocks to display messages
     if assistant_text or assistant_blocks:
         session["display_messages"].append({
             "role": "assistant",
@@ -2039,7 +613,6 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             if session["display_messages"] and session["display_messages"][-1]["role"] == "user":
                 session["display_messages"].pop()
 
-    # Persist updated session to disk
     _save_sessions()
 
     if not disconnected:
@@ -2410,6 +983,23 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .model-select:hover { border-color: var(--sand-300); }
   .model-select:focus { border-color: var(--brand-fig); }
+  .token-indicator {
+    display: none; align-items: center; gap: 5px;
+    margin-left: 8px; font-size: 11px; color: var(--sand-400);
+    white-space: nowrap;
+  }
+  .token-indicator.visible { display: flex; }
+  .token-bar-track {
+    width: 48px; height: 4px; border-radius: 2px;
+    background: var(--sand-200); overflow: hidden;
+  }
+  .token-bar-fill {
+    height: 100%; border-radius: 2px;
+    background: var(--brand-aqua);
+    transition: width 0.4s ease, background 0.4s ease;
+  }
+  .token-bar-fill.warn  { background: var(--brand-fig); }
+  .token-bar-fill.alert { background: var(--brand-orange); }
   .input-buttons { position: absolute; right: 12px; bottom: 12px; }
   .send-btn, .stop-btn {
     width: 36px; height: 36px; border: none; border-radius: 12px;
@@ -2626,6 +1216,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <option value="claude-sonnet-4-6">Sonnet 4.6</option>
             <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
           </select>
+          <div class="token-indicator" id="token-indicator">
+            <div class="token-bar-track"><div class="token-bar-fill" id="token-bar"></div></div>
+            <span id="token-label"></span>
+          </div>
         </div>
         <div class="input-buttons">
           <button class="send-btn" id="send-btn" onclick="sendMessage()">
@@ -2652,6 +1246,23 @@ let currentSessionId = sessionStorage.getItem('plasmid_session_id') || null;
 let sessions = [];
 let isStreaming = false;
 let abortController = null;
+
+// ── Token indicator ──
+function updateTokenIndicator(inputTokens, contextWindow) {
+  const indicator = document.getElementById('token-indicator');
+  const bar = document.getElementById('token-bar');
+  const label = document.getElementById('token-label');
+  if (!indicator || !bar || !label) return;
+  const pct = Math.min(inputTokens / contextWindow, 1);
+  const remaining = contextWindow - inputTokens;
+  const remainingK = remaining >= 1000
+    ? (remaining / 1000).toFixed(0) + 'k'
+    : remaining.toString();
+  bar.style.width = (pct * 100).toFixed(1) + '%';
+  bar.className = 'token-bar-fill' + (pct >= 0.9 ? ' alert' : pct >= 0.7 ? ' warn' : '');
+  label.textContent = remainingK + ' context window tokens left';
+  indicator.classList.add('visible');
+}
 
 function saveSessionId(id) {
   currentSessionId = id;
@@ -3159,7 +1770,59 @@ function appendTextDelta(text) {
   }
 }
 
+// ── Smooth streaming ──────────────────────────────────────────────────
+// API text_delta events arrive in ~40-100 char bursts every ~400-500ms.
+// Dumping each burst at once looks choppy. Buffer incoming chars and
+// drain via requestAnimationFrame so text "types" smoothly. The drain
+// rate adapts (1/8 of buffer per frame, clamped [2,12] chars) so it
+// never lags far behind the model (~180 ch/s) but stays smooth.
+let textBuffer = '';
+let drainHandle = null;
+
+function bufferTextDelta(text) {
+  textBuffer += text;
+  if (drainHandle === null) drainHandle = requestAnimationFrame(drainText);
+}
+
+function drainText() {
+  drainHandle = null;
+  if (textBuffer.length === 0) return;
+  const n = Math.max(2, Math.min(12, Math.ceil(textBuffer.length / 8)));
+  appendTextDelta(textBuffer.slice(0, n));
+  textBuffer = textBuffer.slice(n);
+  if (textBuffer.length > 0) drainHandle = requestAnimationFrame(drainText);
+}
+
+function flushTextBuffer() {
+  if (drainHandle !== null) { cancelAnimationFrame(drainHandle); drainHandle = null; }
+  if (textBuffer) { appendTextDelta(textBuffer); textBuffer = ''; }
+}
+
+// Show a blinking cursor immediately on send so the user sees activity
+// during TTFT, before any text/thinking/tool event arrives.
+let pendingCursorEl = null;
+
+function showPendingCursor() {
+  clearPendingCursor();
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble-assistant';
+  const cursor = document.createElement('span');
+  cursor.className = 'streaming-cursor';
+  bubble.appendChild(cursor);
+  div.appendChild(bubble);
+  getInner().appendChild(div);
+  pendingCursorEl = div;
+  scrollToBottom();
+}
+
+function clearPendingCursor() {
+  if (pendingCursorEl) { pendingCursorEl.remove(); pendingCursorEl = null; }
+}
+
 function endTextBlock() {
+  flushTextBuffer();
   if (currentTextDiv) {
     const cursor = currentTextDiv.querySelector('.streaming-cursor');
     if (cursor) cursor.remove();
@@ -3188,15 +1851,18 @@ function startToolBlock(toolName) {
 }
 
 function addPlasmidPlot(plotJson) {
+  var bokehItem = plotJson.plot !== undefined ? plotJson.plot : plotJson;
+  var isLinear = plotJson.linear === true;
+  var label = isLinear ? 'Linear DNA Map' : 'Plasmid Map';
   const plotId = 'plot-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
   const div = document.createElement('div');
   div.className = 'msg assistant';
   div.innerHTML = '<div class="msg-bubble-assistant" style="margin-top:8px;padding:12px;width:100%;max-width:640px;">' +
-    '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Plasmid Map</div>' +
+    '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">' + label + '</div>' +
     '<div id="' + plotId + '" style="width:100%;"></div>' +
   '</div>';
   getInner().appendChild(div);
-  Bokeh.embed.embed_item(plotJson, plotId);
+  Bokeh.embed.embed_item(bokehItem, plotId);
   scrollToBottom();
 }
 
@@ -3265,6 +1931,7 @@ async function sendMessage() {
   userDiv.innerHTML = '<div class="msg-bubble-user">' + escapeHtml(text) + '</div>';
   inner.appendChild(userDiv);
   scrollToBottom();
+  showPendingCursor();
 
   abortController = new AbortController();
 
@@ -3306,16 +1973,18 @@ async function sendMessage() {
             saveSessionId(event.session_id);
             loadSessions();
             break;
-          case 'thinking_start': startThinkingBlock(); break;
+          case 'thinking_start': clearPendingCursor(); startThinkingBlock(); break;
           case 'thinking_delta': appendThinkingDelta(event.content); break;
           case 'thinking_end': endThinkingBlock(); break;
-          case 'text_start': startTextBlock(); break;
-          case 'text_delta': appendTextDelta(event.content); break;
+          case 'text_start': clearPendingCursor(); flushTextBuffer(); startTextBlock(); break;
+          case 'text_delta': bufferTextDelta(event.content); break;
           case 'text_end': endTextBlock(); break;
-          case 'tool_use_start': startToolBlock(event.tool); break;
+          case 'tool_use_start': clearPendingCursor(); startToolBlock(event.tool); break;
           case 'tool_result': finishToolBlock(event.tool, event.input || {}, event.content, event.download_content, event.download_filename); break;
           case 'plot_data': addPlasmidPlot(event.plot_json); break;
+          case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
           case 'error':
+            clearPendingCursor();
             startTextBlock();
             appendTextDelta('Error: ' + event.content);
             endTextBlock();
@@ -3328,12 +1997,14 @@ async function sendMessage() {
     }
   } catch (err) {
     if (err.name !== 'AbortError') {
+      clearPendingCursor();
       startTextBlock();
       appendTextDelta('Connection error: ' + err.message);
       endTextBlock();
     }
   }
 
+  clearPendingCursor();
   isStreaming = false;
   abortController = null;
   streamingInner = null;
@@ -3733,6 +2404,63 @@ function downloadBatchFile(jobId, rowIdx, expIdx, filename) {
 
 # ── Batch job runner ────────────────────────────────────────────────────
 
+def _run_batch_agent(prompt: str, model: str, append_log, exports: list, *,
+                     history: list,
+                     row_name: Optional[str] = None) -> None:
+    """Shared agent runner for batch rows. Mutates ``history`` in place so
+    follow-up messages (``_continue_batch_row``) replay the same context."""
+    tracker = ReferenceTracker()
+    set_tracker(tracker)
+    clear_last_plot_json()
+    history.append({"role": "user", "content": prompt})
+
+    try:
+        for _ in range(15):
+            response = _client().messages.create(
+                model=model,
+                max_tokens=16000,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=history,
+            )
+            tool_results: list[dict] = []
+            filtered_content: list[dict] = []
+            for block in response.content:
+                btype = getattr(block, "type", None)
+                if btype == "text":
+                    if block.text.strip():
+                        append_log({"type": "text", "content": block.text})
+                    filtered_content.append({"type": "text", "text": block.text})
+                elif btype == "tool_use":
+                    result = _dispatch_tool(block.name, block.input)
+                    result_preview = result[:600] + ("\u2026" if len(result) > 600 else "")
+                    append_log({
+                        "type": "tool",
+                        "name": block.name,
+                        "input": block.input,
+                        "result": result_preview,
+                    })
+                    if block.name == "export_construct":
+                        fmt = block.input.get("output_format", "genbank")
+                        ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
+                        plot = get_last_plot_json()
+                        exports.append({
+                            "filename": (row_name or "construct") + ext,
+                            "content": result,
+                            "plot_json": json.loads(plot) if plot else None,
+                        })
+                        clear_last_plot_json()
+                    filtered_content.append({"type": "tool_use", "id": block.id, "name": block.name, "input": block.input})
+                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+            history.append({"role": "assistant", "content": filtered_content})
+            if tool_results:
+                history.append({"role": "user", "content": tool_results})
+            if response.stop_reason == "end_turn" or not tool_results:
+                break
+    finally:
+        set_tracker(None)
+
+
 def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str) -> None:
     """Worker for a single CSV row — runs the agent and stores exports + log in _batch_jobs."""
     job = _batch_jobs.get(job_id)
@@ -3752,95 +2480,25 @@ def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str) -> None:
 
     row_state["status"] = "running"
     row_state["log"] = []
-
-    def append_log(entry: dict):
-        row_state["log"].append(entry)
+    name = row.get("name", "").strip() or f"plasmid_{row_idx + 1:03d}"
 
     try:
-        client = anthropic.Anthropic()
-        tracker = ReferenceTracker()
-        history = [{"role": "user", "content": prompt}]
         exports: list[dict] = []
-
-        for _ in range(15):
-            response = client.messages.create(
-                model=model,
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=history,
-                thinking={"type": "enabled", "budget_tokens": 5000},
-            )
-
-            # Log any text blocks
-            for block in response.content:
-                if block.type == "text" and block.text.strip():
-                    append_log({"type": "text", "content": block.text})
-
-            if response.stop_reason == "end_turn":
-                break
-            if response.stop_reason != "tool_use":
-                break
-
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-                result = execute_tool(block.name, block.input, tracker)
-                # Truncate long results for the log display
-                result_preview = result[:600] + ("\u2026" if len(result) > 600 else "")
-                append_log({
-                    "type": "tool",
-                    "name": block.name,
-                    "input": block.input,
-                    "result": result_preview,
-                })
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result,
-                })
-                if block.name == "export_construct":
-                    fmt = block.input.get("output_format", "genbank")
-                    cname = block.input.get("construct_name", "construct")
-                    ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
-                    name = row.get("name", "").strip() or f"plasmid_{row_idx + 1:03d}"
-                    _plot_str = _get_last_plot_json()
-                    exports.append({
-                        "filename": name + ext,
-                        "content": result,
-                        "plot_json": json.loads(_plot_str) if _plot_str else None,
-                    })
-
-            history.append({"role": "assistant", "content": response.content})
-            history.append({"role": "user", "content": tool_results})
-
+        history: list[dict] = []
+        _run_batch_agent(
+            prompt, model,
+            append_log=row_state["log"].append,
+            exports=exports,
+            history=history,
+            row_name=name,
+        )
         row_state["exports"] = exports
-        row_state["history"] = history  # persist for follow-up turns
+        row_state["history"] = history
         row_state["status"] = "done" if exports else "no_export"
-
     except Exception as e:
         row_state["status"] = "error"
         row_state["error"] = str(e)
         row_state["log"].append({"type": "error", "content": str(e)})
-
-
-def _strip_thinking_blocks(history: list) -> list:
-    """Remove thinking blocks from assistant messages so follow-ups can run without thinking."""
-    clean = []
-    for msg in history:
-        content = msg.get("content")
-        if msg.get("role") == "assistant" and isinstance(content, list):
-            filtered = [
-                b for b in content
-                if not (getattr(b, "type", None) == "thinking" or
-                        (isinstance(b, dict) and b.get("type") == "thinking"))
-            ]
-            if filtered:
-                clean.append({"role": "assistant", "content": filtered})
-        else:
-            clean.append(msg)
-    return clean
 
 
 def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
@@ -3853,68 +2511,17 @@ def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
 
     row_state["status"] = "running"
     row_state["log"].append({"type": "user", "content": user_message})
-
-    # Strip thinking blocks so follow-up calls don't require thinking enabled
-    history = _strip_thinking_blocks(list(row_state.get("history", [])))
-    history.append({"role": "user", "content": user_message})
+    name = row_state.get("name", "").strip() or f"plasmid_{row_idx + 1:03d}"
 
     try:
-        client = anthropic.Anthropic()
-        tracker = ReferenceTracker()
-
-        for _ in range(15):
-            response = client.messages.create(
-                model=model,
-                max_tokens=8000,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=history,
-            )
-
-            for block in response.content:
-                if block.type == "text" and block.text.strip():
-                    row_state["log"].append({"type": "text", "content": block.text})
-
-            if response.stop_reason == "end_turn":
-                break
-            if response.stop_reason != "tool_use":
-                break
-
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-                result = execute_tool(block.name, block.input, tracker)
-                result_preview = result[:600] + ("\u2026" if len(result) > 600 else "")
-                row_state["log"].append({
-                    "type": "tool",
-                    "name": block.name,
-                    "input": block.input,
-                    "result": result_preview,
-                })
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result,
-                })
-                if block.name == "export_construct":
-                    fmt = block.input.get("output_format", "genbank")
-                    cname = block.input.get("construct_name", "construct")
-                    ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
-                    name = row_state.get("name", "").strip() or f"plasmid_{row_idx + 1:03d}"
-                    _plot_str = _get_last_plot_json()
-                    row_state["exports"].append({
-                        "filename": name + ext,
-                        "content": result,
-                        "plot_json": json.loads(_plot_str) if _plot_str else None,
-                    })
-
-            history.append({"role": "assistant", "content": response.content})
-            history.append({"role": "user", "content": tool_results})
-
-        row_state["history"] = history
+        _run_batch_agent(
+            user_message, model,
+            append_log=row_state["log"].append,
+            exports=row_state["exports"],
+            history=row_state.setdefault("history", []),
+            row_name=name,
+        )
         row_state["status"] = "done" if row_state["exports"] else "no_export"
-
     except Exception as e:
         row_state["status"] = "error"
         row_state["error"] = str(e)
@@ -3991,7 +2598,6 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self._send_json([], 404)
 
         elif path == "/api/user-library":
-            from library import load_backbones, load_inserts
             bb = [b for b in load_backbones()["backbones"] if b.get("source") == "user_library"]
             ins = [i for i in load_inserts()["inserts"] if i.get("source") == "user_library"]
             self._send_json({
@@ -4163,8 +2769,6 @@ class AgentHandler(SimpleHTTPRequestHandler):
 
             try:
                 run_agent_turn_streaming(user_message, session_id, write_event, model=request_model)
-            except anthropic.AuthenticationError:
-                write_event({"type": "error", "content": "Invalid or missing ANTHROPIC_API_KEY."})
             except Exception as e:
                 logger.exception("Agent error")
                 write_event({"type": "error", "content": str(e)})
@@ -4376,7 +2980,6 @@ def _cmd_list_library():
     if not lib_dir:
         print("PLASMID_USER_LIBRARY is not set.")
         return
-    from library import load_backbones, load_inserts
     backbones = [b for b in load_backbones()["backbones"] if b.get("source") == "user_library"]
     inserts = [i for i in load_inserts()["inserts"] if i.get("source") == "user_library"]
     print(f"User library: {lib_dir}")

@@ -32,6 +32,7 @@ Create a `.env` file in the `app/` directory:
 
 ```bash
 echo "ANTHROPIC_API_KEY=sk-ant-..." > app/.env
+export "ANTHROPIC_API_KEY=sk-ant-..." > app/.env
 ```
 
 You can get an API key at https://console.anthropic.com.

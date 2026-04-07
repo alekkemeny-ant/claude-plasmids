@@ -63,6 +63,8 @@ from .library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    annotate_plasmid as _annotate_plasmid,
+    swap_feature as _swap_feature,
     extract_insert_from_plasmid as _extract_insert_from_plasmid,
     extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
 )
@@ -453,6 +455,54 @@ async def list_tools() -> list[Tool]:
                     }
                 }
             }
+        ),
+        Tool(
+            name="annotate_plasmid",
+            description=(
+                "Annotate a plasmid sequence with pLannotate and return all detected features. "
+                "Use this to understand the architecture of an unknown plasmid before attempting "
+                "extractions or swaps — far more efficient than calling extract_insert_from_plasmid "
+                "repeatedly just to map the plasmid. Returns each feature's name, type, coordinates "
+                "(0-based, end exclusive), strand, length, and % identity."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "plasmid_sequence": {
+                        "type": "string",
+                        "description": "Full plasmid DNA sequence to annotate.",
+                    },
+                },
+                "required": ["plasmid_sequence"],
+            },
+        ),
+        Tool(
+            name="swap_feature",
+            description=(
+                "Replace a named feature in a plasmid with a new sequence in a single operation. "
+                "Use this for promoter swaps, terminator swaps, or any CDS replacement. "
+                "Provide the replacement in coding (5'→3') orientation; strand handling is automatic. "
+                "Returns the updated plasmid sequence. For multiple sequential swaps, pass the "
+                "returned sequence into the next call — do not recompute coordinates manually."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "plasmid_sequence": {
+                        "type": "string",
+                        "description": "Full plasmid DNA sequence to modify.",
+                    },
+                    "feature_name": {
+                        "type": "string",
+                        "description": "Name of the feature to replace (case-insensitive, matched via pLannotate).",
+                    },
+                    "replacement_sequence": {
+                        "type": "string",
+                        "description": "New DNA sequence in coding/functional orientation (5'→3'). Reverse-complemented automatically if the target is on the reverse strand.",
+                    },
+                },
+                "required": ["plasmid_sequence", "feature_name", "replacement_sequence"],
+            },
         ),
         Tool(
             name="extract_insert_from_plasmid",
@@ -1087,20 +1137,60 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         except ValueError as e:
             return [TextContent(type="text", text=f"Fusion error: {str(e)}")]
 
+    elif name == "annotate_plasmid":
+        features = _annotate_plasmid(plasmid_sequence=arguments["plasmid_sequence"])
+        if not features:
+            return [TextContent(type="text", text="pLannotate found no features in the provided plasmid sequence.")]
+        lines = [f"Plasmid features ({len(features)} total, coordinates 0-based, end exclusive):\n"]
+        for f in features:
+            strand_sym = "+" if f["strand"] >= 0 else "-"
+            span = f"{f['start']}..{f['end']}"
+            if f["origin_spanning"]:
+                span += " (origin-spanning)"
+            lines.append(
+                f"  [{strand_sym}] {f['name']}  |  {f['type']}  |  {span}  |  {f['length']} bp  |  {f['pct_identity']}% id"
+            )
+            if f["description"]:
+                lines.append(f"       {f['description']}")
+        return [TextContent(type="text", text="\n".join(lines))]
+
+    elif name == "swap_feature":
+        result = _swap_feature(
+            plasmid_sequence=arguments["plasmid_sequence"],
+            feature_name=arguments["feature_name"],
+            replacement_sequence=arguments["replacement_sequence"],
+        )
+        if "error" in result:
+            return [TextContent(type="text", text=f"swap_feature failed: {result['error']}")]
+        start, end = result["replaced_coords"]
+        strand_sym = "+" if result["replaced_strand"] >= 0 else "-"
+        output = (
+            f"Swapped '{result['replaced_feature']}' ({result['replaced_length']} bp, strand {strand_sym}) "
+            f"at {start}..{end} with {result['inserted_length']} bp replacement.\n"
+            f"Size delta: {result['size_delta']:+d} bp. New plasmid: {result['new_size']} bp.\n\n"
+            f"Updated plasmid sequence:\n{result['sequence']}"
+        )
+        return [TextContent(type="text", text=output)]
+
     elif name == "extract_insert_from_plasmid":
         result = _extract_insert_from_plasmid(
             plasmid_sequence=arguments["plasmid_sequence"],
             insert_name=arguments["insert_name"],
             start=arguments.get("start"),
             end=arguments.get("end"),
+            strand=arguments.get("strand", 1),
         )
         if not result:
             return [TextContent(type="text", text=f"Could not extract '{arguments['insert_name']}' from the provided plasmid sequence.")]
         seq = result["sequence"]
+        coord_info = ""
+        if result.get("start") is not None and result.get("end") is not None:
+            coord_info = f"Coordinates: {result['start']}..{result['end']} (strand: {result.get('strand', 1)})\n"
         output = (
             f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
-            f"Source: {result['source']}\n\n"
-            f"DNA Sequence:\n{seq}"
+            f"Source: {result['source']}\n"
+            f"{coord_info}"
+            f"\nDNA Sequence:\n{seq}"
         )
         return [TextContent(type="text", text=output)]
     elif name == "extract_inserts_from_plasmid":

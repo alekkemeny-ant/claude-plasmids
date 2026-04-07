@@ -961,6 +961,11 @@ def search_all_sources(
                     logger.warning(f"Concurrent search ({name}) timed out after {timeout}s")
 
 
+def _rc(seq: str) -> str:
+    comp = str.maketrans("ACGTN", "TGCAN")
+    return seq.translate(comp)[::-1]
+
+
 def _extract_circular_region(seq: str, start: int, end: int) -> str:
     """Extract a region from a circular sequence, handling origin-spanning coords.
 
@@ -971,11 +976,201 @@ def _extract_circular_region(seq: str, start: int, end: int) -> str:
         return seq[start:end]
     return seq[start:] + seq[:end]
 
+def annotate_plasmid(plasmid_sequence: str) -> list[dict]:
+    """Run pLannotate on a plasmid and return its feature annotations.
+
+    Returns a list of feature dicts sorted by start position, each with:
+      - name        : feature name (str)
+      - type        : feature type, e.g. "CDS", "promoter", "rep_origin" (str)
+      - start       : 0-based start position (int)
+      - end         : 0-based end position, exclusive (int)
+      - length      : feature length in bp (int)
+      - strand      : 1 (forward) or -1 (reverse) (int)
+      - origin_spanning : True if the feature wraps around position 0 (bool)
+      - pct_identity : % identity to the database reference (float, 0–100)
+      - description : free-text description from the pLannotate database (str)
+
+    Coordinates are 0-based, end is exclusive (Python slice convention).
+    Origin-spanning features have start > end; the feature covers
+    seq[start:] + seq[:end].
+
+    Returns an empty list if pLannotate is not installed or finds nothing.
+    """
+    import re as _re
+    import os, sys
+    plasmid_sequence = _re.sub(r'\s', '', plasmid_sequence.upper())
+
+    try:
+        from plannotate.annotate import annotate
+    except ImportError:
+        logger.error("pLannotate is not installed. Run: conda install -c bioconda plannotate")
+        return []
+
+    conda_bin = str(Path(sys.executable).parent)
+    if conda_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
+
+    try:
+        df = annotate(plasmid_sequence, linear=False)
+    except Exception as e:
+        logger.error(f"annotate_plasmid: pLannotate failed: {e}")
+        return []
+
+    if _CUSTOM_ANNOTATIONS_AVAILABLE:
+        custom_df = query_custom_db(plasmid_sequence)
+        if custom_df is not None:
+            df = merge_annotation_results(df, custom_df)
+
+    if df is None or df.empty:
+        return []
+
+    features = []
+    for _, row in df.iterrows():
+        qstart_0 = int(row["qstart"])   # 0-based
+        qend_0   = int(row["qend"])     # 0-based inclusive
+        strand   = int(row["sframe"])
+
+        # pLannotate qend is already 0-based exclusive
+        # Origin-spanning: after pLannotate's wrap-around adjustment, qstart > qend
+        origin_spanning = qstart_0 > qend_0
+
+        features.append({
+            "name":           str(row.get("Feature", "")),
+            "type":           str(row.get("Type", "")),
+            "start":          qstart_0,
+            "end":            qend_0,
+            "length":         int(row.get("length", abs(qend_0 - qstart_0) + 1)),
+            "strand":         strand,
+            "origin_spanning": origin_spanning,
+            "pct_identity":   round(float(row.get("pident", 0)), 1),
+            "description":    str(row.get("Description", "")),
+        })
+
+    features.sort(key=lambda f: f["start"])
+    return features
+
+
+def swap_feature(
+    plasmid_sequence: str,
+    feature_name: str,
+    replacement_sequence: str,
+) -> dict:
+    """Replace a named feature in a circular plasmid with a new sequence.
+
+    Locates feature_name via pLannotate, removes its region from the plasmid,
+    and splices in replacement_sequence at the same position.
+
+    Orientation handling: replacement_sequence must be provided in coding
+    (5'→3' functional) orientation. If the feature is on the reverse strand,
+    this function reverse-complements replacement_sequence before insertion so
+    it is stored correctly in the plasmid.
+
+    For multiple sequential swaps, pass the 'sequence' from this function's
+    return dict as the plasmid_sequence for the next call — coordinates shift
+    automatically because pLannotate re-annotates each time.
+
+    Origin-spanning features (feature wraps around position 0) are not supported;
+    returns an error dict in that case.
+
+    Args:
+        plasmid_sequence:    Full circular plasmid DNA sequence.
+        feature_name:        Name of the feature to replace (case-insensitive,
+                             matched via pLannotate annotation).
+        replacement_sequence: New sequence in coding orientation (5'→3').
+
+    Returns dict with keys:
+        sequence         : updated plasmid DNA string
+        replaced_feature : exact name matched by pLannotate
+        replaced_coords  : (start, end) 0-based, end exclusive
+        replaced_strand  : 1 or -1
+        replaced_length  : bp removed
+        inserted_length  : bp inserted
+        size_delta       : inserted_length - replaced_length
+        new_size         : total length of updated plasmid
+    Or on failure:
+        error            : human-readable error string
+    """
+    import re as _re
+    import os, sys
+
+    plasmid_sequence = _re.sub(r'\s', '', plasmid_sequence.upper())
+    replacement_sequence = _re.sub(r'\s', '', replacement_sequence.upper())
+
+    try:
+        from plannotate.annotate import annotate
+    except ImportError:
+        return {"error": "pLannotate is not installed. Run: conda install -c bioconda plannotate"}
+
+    conda_bin = str(Path(sys.executable).parent)
+    if conda_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
+
+    try:
+        df = annotate(plasmid_sequence, linear=False)
+    except Exception as e:
+        return {"error": f"pLannotate annotation failed: {e}"}
+
+    if _CUSTOM_ANNOTATIONS_AVAILABLE:
+        try:
+            custom_df = query_custom_db(plasmid_sequence)
+            if custom_df is not None:
+                df = merge_annotation_results(df, custom_df)
+        except Exception:
+            pass
+
+    if df is None or df.empty:
+        return {"error": "pLannotate found no features in the plasmid sequence."}
+
+    name_lower = feature_name.lower()
+    exact = df[df["Feature"].str.lower() == name_lower]
+    match = exact if not exact.empty else df[df["Feature"].str.lower().str.contains(name_lower, na=False)]
+
+    if match.empty:
+        available = df["Feature"].tolist()
+        return {"error": f"No feature matching '{feature_name}' found. Available: {available}"}
+
+    row = match.iloc[0]
+    qstart_0 = int(row["qstart"])   # 0-based
+    qend_0   = int(row["qend"])     # 0-based inclusive
+    strand   = int(row["sframe"])
+
+    if qstart_0 > qend_0:
+        return {
+            "error": (
+                f"Feature '{feature_name}' is origin-spanning (spans position 0). "
+                "swap_feature does not support origin-spanning features. "
+                "Use extract_insert_from_plasmid with explicit coordinates instead."
+            )
+        }
+
+    # pLannotate qend is already 0-based exclusive
+    slice_start = qstart_0
+    slice_end   = qend_0
+
+    # Apply orientation: if feature is on reverse strand, RC the replacement
+    insert_seq = replacement_sequence
+    if strand == -1:
+        insert_seq = _rc(replacement_sequence)
+
+    new_plasmid = plasmid_sequence[:slice_start] + insert_seq + plasmid_sequence[slice_end:]
+
+    return {
+        "sequence":         new_plasmid,
+        "replaced_feature": str(row["Feature"]),
+        "replaced_coords":  (qstart_0, qend_0),   # 0-based, end exclusive
+        "replaced_strand":  strand,
+        "replaced_length":  slice_end - slice_start,
+        "inserted_length":  len(insert_seq),
+        "size_delta":       len(insert_seq) - (slice_end - slice_start),
+        "new_size":         len(new_plasmid),
+    }
+
+
 def _extract_insert_coordinates(df, insert_name):
     """Return (qstart, qend, strand) for the best match of insert_name in df.
 
-    Always returns raw pLannotate coordinates (qstart < qend not guaranteed for
-    origin-spanning features). Raises ValueError if no match found.
+    pLannotate qend is already 0-based exclusive (Python slice convention).
+    Raises ValueError if no match found.
     """
     exact = df[df["Feature"].str.lower() == insert_name]
     match = exact if not exact.empty else df[df["Feature"].str.lower().str.contains(insert_name, na=False)]
@@ -989,7 +1184,7 @@ def _extract_insert_coordinates(df, insert_name):
 
     row = match.iloc[0]
     qstart = int(row["qstart"])
-    qend = int(row["qend"])
+    qend = int(row["qend"])  # already 0-based exclusive
     strand = int(row["sframe"])
     return qstart, qend, strand
 
@@ -1030,10 +1225,6 @@ def extract_inserts_from_plasmid(plasmid_sequence: str, insert_names: list) -> l
     conda_bin = str(Path(sys.executable).parent)
     if conda_bin not in os.environ.get("PATH", ""):
         os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
-
-    def _rc(seq: str) -> str:
-        comp = str.maketrans("ACGTN", "TGCAN")
-        return seq.translate(comp)[::-1]
 
     try:
         df = annotate(plasmid_sequence, linear=False)
@@ -1135,6 +1326,8 @@ def extract_insert_from_plasmid(
         )
 
     # ── Explicit coordinates: slice directly ──────────────────────────────
+    # Coordinates are 0-based, end is exclusive (Python slice convention).
+    # Origin-spanning: start >= end means the feature wraps around position 0.
     if start is not None and end is not None:
         seq = _extract_circular_region(plasmid_sequence, start, end)
         if not seq:
@@ -1196,9 +1389,8 @@ def extract_insert_from_plasmid(
     # Use the highest-scoring (first) match
     row = match.iloc[0]
 
-    # Re-extract from the plasmid using qstart/qend so we handle origin-spanning
-    # features correctly (qstart > qend means the feature wraps around position 0).
-    # qseq from BLAST already handles this, but we rebuild explicitly for clarity.
+    # Re-extract from the plasmid using qstart/qend.
+    # pLannotate qend is already 0-based exclusive; use directly as slice end.
     seq = _extract_circular_region(plasmid_sequence, int(row["qstart"]), int(row["qend"]))
 
     # sframe < 0 means the feature is on the reverse strand — RC to coding orientation.
@@ -1219,6 +1411,6 @@ def extract_insert_from_plasmid(
         "size_bp": len(seq),
         "source": "extracted_from_plasmid",
         "start": int(row["qstart"]),
-        "end": int(row["qend"]),
+        "end": int(row["qend"]),  # already 0-based exclusive
         "strand": int(row["sframe"]),
     }

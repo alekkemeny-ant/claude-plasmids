@@ -59,6 +59,7 @@ class AddgenePlasmid:
     species: Optional[str] = None
     gene_insert: Optional[str] = None
     pubmed_id: Optional[str] = None
+    article_doi: Optional[str] = None
     sequence: Optional[str] = None
     sequence_source: Optional[str] = None
     url: Optional[str] = None
@@ -83,6 +84,8 @@ class AddgenePlasmid:
             "mcs_position": self.mcs_position,
             "features": self.parsed_features or [],
             "addgene_id": self.addgene_id,
+            "article_doi": self.article_doi,
+            "article_pubmed_id": self.pubmed_id,
             "sequence": self.sequence,
             "sequence_source": self.sequence_source,
         }
@@ -247,7 +250,23 @@ class AddgeneClient:
         snap_match = re.search(r'href="([^"]+\.dna[^"]*)"', html)
         if snap_match:
             plasmid.snapgene_file_url = urljoin(self.BASE_URL, snap_match.group(1))
-        
+
+        # DOI from the publication section
+        doi_match = re.search(
+            r'href="https?://(?:doi\.org|dx\.doi\.org)/([^"]+)"',
+            html,
+        )
+        if doi_match:
+            plasmid.article_doi = doi_match.group(1)
+
+        # PubMed ID from the publication section
+        pubmed_match = re.search(
+            r'href="https?://pubmed\.ncbi\.nlm\.nih\.gov/(\d+)',
+            html,
+        )
+        if pubmed_match:
+            plasmid.pubmed_id = pubmed_match.group(1)
+
         return plasmid
     
     def _parse_api_response(self, data: Dict) -> AddgenePlasmid:
@@ -268,8 +287,9 @@ class AddgeneClient:
             species=data.get("growth_strain"),
             gene_insert=data.get("inserts")[0].get("name") if data.get("inserts") else None,
             pubmed_id=data.get("article", {}).get("pubmed_id"),
+            article_doi=data.get("article", {}).get("doi"),
             sequence=data.get("sequences", {}).get("public_addgene_full_sequences", [{}])[0].get("sequence"),
-            url=data.get("article", {}).get("url"),
+            url=f"{self.BASE_URL}/{data.get('id', '')}/" ,
         )
     
     def search(self, query: str, limit: int = 10) -> List[Dict]:

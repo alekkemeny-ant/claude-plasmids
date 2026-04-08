@@ -829,6 +829,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             
             if plasmid.url:
                 output += f"\n**Addgene URL:** {plasmid.url}\n"
+            if plasmid.article_doi:
+                output += f"**Article DOI:** https://doi.org/{plasmid.article_doi}\n"
+            if plasmid.pubmed_id:
+                output += f"**PubMed:** https://pubmed.ncbi.nlm.nih.gov/{plasmid.pubmed_id}/\n"
             
             if arguments.get("fetch_sequence", True) and plasmid.sequence:
                 output += f"\n**Sequence:** {len(plasmid.sequence)} bp available\n"

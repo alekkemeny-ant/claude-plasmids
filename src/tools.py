@@ -922,6 +922,12 @@ async def fetch_addgene_sequence_with_metadata(args):
     out = f"Addgene #{args['addgene_id']}: {plasmid.name}\n"
     out += f"Size: {plasmid.size_bp} bp\n"
     out += f"Resistance: {plasmid.bacterial_resistance}\n"
+    if plasmid.url:
+        out += f"Addgene page: {plasmid.url}\n"
+    if plasmid.article_doi:
+        out += f"Article DOI: https://doi.org/{plasmid.article_doi}\n"
+    if plasmid.pubmed_id:
+        out += f"PubMed: https://pubmed.ncbi.nlm.nih.gov/{plasmid.pubmed_id}/\n"
     if plasmid.sequence:
         _cache_sequence(cache_key, plasmid.sequence)
         out += (

@@ -342,6 +342,54 @@ async def get_insert(args):
 
 
 @tool(
+    "find_sequence",
+    "Search for a short sequence (linker, junction, restriction site, etc.) within a plasmid or construct. "
+    "Returns every position where the query occurs, on either strand. "
+    "Use this to verify a linker or junction is present after a swap, instead of using assemble_construct.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {
+                "type": "string",
+                "description": "Full DNA sequence to search within, OR a sequence_cache_key.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Short DNA sequence to search for (e.g. a linker, restriction site, or junction).",
+            },
+        },
+        "required": ["plasmid_sequence", "query"],
+    },
+)
+async def find_sequence_tool(args):
+    import re as _re
+    plasmid_seq = args["plasmid_sequence"]
+    if plasmid_seq in _sequence_cache:
+        plasmid_seq = _sequence_cache[plasmid_seq]
+    plasmid_seq = _re.sub(r'\s', '', plasmid_seq.upper())
+    query = _re.sub(r'\s', '', args["query"].upper())
+
+    if len(query) < 4:
+        return _text("Query too short (minimum 4 bp).")
+
+    fwd_hits = [m.start() for m in _re.finditer(f'(?={query})', plasmid_seq)]
+    comp = str.maketrans("ACGTN", "TGCAN")
+    query_rc = query.translate(comp)[::-1]
+    rev_hits = [m.start() for m in _re.finditer(f'(?={query_rc})', plasmid_seq)]
+
+    if not fwd_hits and not rev_hits:
+        return _text(f"'{query}' ({len(query)} bp) not found in the sequence ({len(plasmid_seq)} bp).")
+
+    lines = [f"'{query}' ({len(query)} bp) in {len(plasmid_seq)} bp sequence:"]
+    for pos in fwd_hits:
+        lines.append(f"  [+] position {pos} (forward strand)")
+    if query_rc != query:
+        for pos in rev_hits:
+            lines.append(f"  [-] position {pos} (reverse strand)")
+    return _text("\n".join(lines))
+
+
+@tool(
     "annotate_plasmid",
     "Annotate a plasmid sequence with pLannotate and return all detected features. "
     "Use this to understand the architecture of an unknown plasmid before attempting extractions or swaps — "
@@ -1653,6 +1701,7 @@ ALL_TOOLS = [
     fetch_gene_tool,
     get_cell_line_info_tool,
     fuse_inserts_tool,
+    find_sequence_tool,
     annotate_plasmid_tool,
     swap_feature_tool,
     extract_insert_from_plasmid_tool,

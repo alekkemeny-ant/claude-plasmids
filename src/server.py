@@ -457,6 +457,22 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="find_sequence",
+            description=(
+                "Search for a short sequence (linker, junction, restriction site, etc.) within a plasmid. "
+                "Returns every position where the query occurs on either strand. "
+                "Use this to verify a linker or junction is present after a swap."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "plasmid_sequence": {"type": "string", "description": "Full DNA sequence to search within."},
+                    "query": {"type": "string", "description": "Short DNA sequence to search for."},
+                },
+                "required": ["plasmid_sequence", "query"],
+            },
+        ),
+        Tool(
             name="annotate_plasmid",
             description=(
                 "Annotate a plasmid sequence with pLannotate and return all detected features. "
@@ -1136,6 +1152,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=output)]
         except ValueError as e:
             return [TextContent(type="text", text=f"Fusion error: {str(e)}")]
+
+    elif name == "find_sequence":
+        import re as _re
+        plasmid_seq = _re.sub(r'\s', '', arguments["plasmid_sequence"].upper())
+        query = _re.sub(r'\s', '', arguments["query"].upper())
+        if len(query) < 4:
+            return [TextContent(type="text", text="Query too short (minimum 4 bp).")]
+        fwd_hits = [m.start() for m in _re.finditer(f'(?={query})', plasmid_seq)]
+        comp = str.maketrans("ACGTN", "TGCAN")
+        query_rc = query.translate(comp)[::-1]
+        rev_hits = [m.start() for m in _re.finditer(f'(?={query_rc})', plasmid_seq)]
+        if not fwd_hits and not rev_hits:
+            return [TextContent(type="text", text=f"'{query}' ({len(query)} bp) not found in the sequence ({len(plasmid_seq)} bp).")]
+        lines = [f"'{query}' ({len(query)} bp) in {len(plasmid_seq)} bp sequence:"]
+        for pos in fwd_hits:
+            lines.append(f"  [+] position {pos} (forward strand)")
+        if query_rc != query:
+            for pos in rev_hits:
+                lines.append(f"  [-] position {pos} (reverse strand)")
+        return [TextContent(type="text", text="\n".join(lines))]
 
     elif name == "annotate_plasmid":
         features = _annotate_plasmid(plasmid_sequence=arguments["plasmid_sequence"])

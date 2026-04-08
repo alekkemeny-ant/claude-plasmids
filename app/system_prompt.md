@@ -160,34 +160,35 @@ assemble_construct(
 
 **Parts swaps (terminator swap, promoter swap, CDS replacement):**
 
-Use `swap_feature` for any operation that replaces one feature with another. The standard workflow is:
+Use `swap_feature` for any operation that replaces one feature with another — including promoter swaps. The standard workflow is:
 
 1. Call `annotate_plasmid` once to get the full feature map.
 2. Fetch each replacement sequence in coding (5'→3' functional) orientation using whichever tool is appropriate: `extract_insert_from_plasmid` (single feature from a plasmid), `extract_inserts_from_plasmid` (contiguous multi-feature region from a plasmid), `get_insert` (local library or NCBI fallback), or `fetch_gene` (NCBI CDS by gene name).
 3. For each swap in turn: call `swap_feature(plasmid_sequence, feature_name, replacement_sequence)`. The tool handles orientation automatically and returns the updated plasmid sequence.
 4. For a second swap: pass the `sequence` from step 3 directly into the next `swap_feature` call — do **not** recompute coordinates from the original plasmid. pLannotate re-annotates the updated sequence internally, so coordinate shifts are handled automatically.
-5. Export the final plasmid with `export_construct`.
+5. To verify a junction or linker (which pLannotate does not annotate): use `find_sequence` with the expected linker/junction sequence — it returns all positions on both strands instantly without re-running annotation.
+6. Export the final plasmid with `export_construct`.
+
+**Do not** call `assemble_construct` for a parts swap. The output of `swap_feature` is already a complete plasmid sequence — pass it directly to `export_construct`. Calling `assemble_construct` on an already-assembled plasmid is incorrect and will stall the workflow.
 
 **Do not** try to manually track how coordinate positions shift between swaps. Each `swap_feature` call re-annotates from scratch, so you never need to compute offsets.
 
 **Promoter swaps — always treat the enhancer+promoter as a unit:**
 
-Promoters are frequently paired with an upstream enhancer as a single functional regulatory cassette. When swapping a promoter, you must extract and replace the full cassette, not just the promoter feature alone.
+Promoters are frequently paired with an upstream enhancer. When swapping a promoter, check `annotate_plasmid` output for a separate enhancer feature adjacent to it — if present, both must be replaced.
 
-1. **Annotate the source plasmid** first with `annotate_plasmid` to get the full feature map. Inspect the feature list near the promoter — check for an enhancer or other regulatory element immediately upstream.
-2. **Extract the full cassette** using `extract_inserts_from_plasmid(["<enhancer>", "<promoter>"])` — this returns the contiguous region from the enhancer start to the promoter end.
-3. **Source the replacement the same way** — when fetching the replacement promoter from another plasmid or Addgene, use the same approach to get its full enhancer+promoter cassette.
-4. **Use the cassette sequence as the insert** in `assemble_construct`, with `replace_region_start`/`replace_region_end` spanning the original enhancer+promoter coordinates.
+- **No separate enhancer**: use `swap_feature` on the promoter feature alone with the replacement promoter sequence.
+- **Separate enhancer+promoter**: do two sequential `swap_feature` calls — first swap the enhancer with the new enhancer sequence, then swap the promoter with the new promoter sequence. Fetch both replacement sequences using `extract_inserts_from_plasmid(["<new enhancer>", "<new promoter>"])` from a source plasmid and split at the boundary, or fetch each individually.
 
 Common enhancer+promoter pairs to know:
-| Cassette | Features to extract |
+| Cassette | Features to look for |
 |---|---|
-| CMV | `["CMV enhancer", "CMV promoter"]` |
-| CAG | `["CMV enhancer", "chicken beta-actin promoter"]` (or `["CMV enhancer", "CBA promoter"]`) |
-| EF1α | `["EF1-alpha enhancer", "EF1-alpha promoter"]` (if annotated separately) |
+| CMV | `CMV enhancer` + `CMV promoter` |
+| CAG | `CMV enhancer` + `chicken beta-actin promoter` (or `CBA promoter`) |
+| EF1α | `EF1-alpha enhancer` + `EF1-alpha promoter` (if annotated separately) |
 | SV40 | Usually a single feature; check for an adjacent enhancer |
 
-If only a promoter is annotated (no separate enhancer feature), use `extract_insert_from_plasmid` as normal. Never assume an enhancer is absent without checking the annotation output first.
+Never assume an enhancer is absent without checking the `annotate_plasmid` output first.
 
 ### Step 4: Validate the Result
 
@@ -385,6 +386,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 - **Wrong backbone retrieved**: When a user says "pcDNA3" they might mean pcDNA3.0, pcDNA3.1(+), or pcDNA3.1(-). Clarify if ambiguous.
 - **Wrong species**: A user expressing a gene in HEK293 (human) cells might want the mouse or rat ortholog. Always confirm the species.
 - **Wrong gene variant**: Many genes have multiple variants or family members (e.g., H2B has >20 subtypes with distinct expression patterns). Confirm the specific variant with the user when their request is ambiguous.
+- **Using `assemble_construct` to verify or locate a linker/junction**: `assemble_construct` is for building a new construct from a backbone and insert — it is not a search tool. To verify that a linker or junction sequence is present and find its position, use `find_sequence(plasmid_sequence, linker_sequence)`. It returns all positions on both strands instantly with no pLannotate overhead.
 - **Gene not reverse complemented for reverse orientated promoter** The gene should be reverse complemented, when the promoter it is being expressed from is also reversed.
 - **Wrong orientation during feature swaps**: `extract_insert_from_plasmid` always returns sequences in **coding orientation** (already RC'd if the feature was on the reverse strand). When placing that sequence via `assemble_construct`, set `reverse_complement_insert=True` if the **target slot is on the reverse strand** — regardless of the source feature's original strand. For example, swapping a forward-strand CYC1 terminator into a reverse-strand ADH1 slot requires `reverse_complement_insert=True`; swapping the reverse-strand ADH1 terminator (returned in coding orientation) into the forward-strand CYC1 slot requires `reverse_complement_insert=False`. The rule is: match the target slot's strand, not the source's.
 - **Tag fusion treated as protein fusion**: When calling `fuse_inserts`, always set `type: "tag"` for epitope tags (FLAG, HA, His, Myc). If you omit it, the tag defaults to `type: "protein"`, its ATG is stripped, and the tag sequence is corrupted. Also: use `linker=""` (empty string) for direct tag concatenation, and the default (GGGGS)x4 linker only for protein-protein fusions.
@@ -402,6 +404,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 | `get_backbone` | Get full backbone info (optionally with sequence) |
 | `get_insert` | Get full insert info with sequence (auto-fallback to NCBI) |
 | `annotate_plasmid` | List all features in a plasmid (pLannotate); use this first to map an unknown plasmid before any extraction or swap |
+| `find_sequence` | Search for a short sequence (linker, junction, restriction site) within a plasmid; returns all positions on both strands |
 | `swap_feature` | Replace a named feature in a plasmid with a new sequence in one operation; handles orientation automatically |
 | `extract_insert_from_plasmid` | Extract a CDS from a full plasmid sequence by name (pLannotate-based fallback) |
 | `extract_inserts_from_plasmid` | Extract a series of coding sequences from a full plasmid sequence by names (pLannotate-based fallback) |

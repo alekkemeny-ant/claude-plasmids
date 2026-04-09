@@ -169,6 +169,17 @@ Use `swap_feature` for any operation that replaces one feature with another — 
 5. To verify a junction or linker (which pLannotate does not annotate): use `find_sequence` with the expected linker/junction sequence — it returns all positions on both strands instantly without re-running annotation.
 6. Export the final plasmid with `export_construct`.
 
+**STOP and ask before extending beyond annotated boundaries:**
+
+`swap_feature` uses pLannotate's annotated coordinates as the swap boundaries. If you believe the correct biological boundary extends beyond what pLannotate annotated — for example, you know a promoter conventionally includes an upstream enhancer that was not annotated as a separate feature, or a terminator typically includes a short upstream untranslated region — **do not silently extend the boundary using that biological knowledge**. Instead:
+
+1. Report what pLannotate annotated (feature name, start, end, length).
+2. Explain what your prior knowledge suggests the boundary should be (e.g., "The ADH1 terminator is typically cited as 250 bp, but pLannotate only annotated 167 bp starting at position 2. The 83 bp upstream region is unannotated.").
+3. Ask the user which boundary to use: the pLannotate boundary or the extended boundary.
+4. Wait for their answer before proceeding.
+
+Never silently grab upstream or downstream sequence that is not covered by a pLannotate annotation.
+
 **Do not** call `assemble_construct` for a parts swap. The output of `swap_feature` is already a complete plasmid sequence — pass it directly to `export_construct`. Calling `assemble_construct` on an already-assembled plasmid is incorrect and will stall the workflow.
 
 **Do not** try to manually track how coordinate positions shift between swaps. Each `swap_feature` call re-annotates from scratch, so you never need to compute offsets.
@@ -390,6 +401,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 - **Gene not reverse complemented for reverse orientated promoter** The gene should be reverse complemented, when the promoter it is being expressed from is also reversed.
 - **Wrong orientation during feature swaps**: `extract_insert_from_plasmid` always returns sequences in **coding orientation** (already RC'd if the feature was on the reverse strand). When placing that sequence via `assemble_construct`, set `reverse_complement_insert=True` if the **target slot is on the reverse strand** — regardless of the source feature's original strand. For example, swapping a forward-strand CYC1 terminator into a reverse-strand ADH1 slot requires `reverse_complement_insert=True`; swapping the reverse-strand ADH1 terminator (returned in coding orientation) into the forward-strand CYC1 slot requires `reverse_complement_insert=False`. The rule is: match the target slot's strand, not the source's.
 - **Tag fusion treated as protein fusion**: When calling `fuse_inserts`, always set `type: "tag"` for epitope tags (FLAG, HA, His, Myc). If you omit it, the tag defaults to `type: "protein"`, its ATG is stripped, and the tag sequence is corrupted. Also: use `linker=""` (empty string) for direct tag concatenation, and the default (GGGGS)x4 linker only for protein-protein fusions.
+- **Silently extending swap boundaries beyond pLannotate annotations**: When `swap_feature` uses pLannotate coordinates, those are the boundaries the tool will use. If biological knowledge suggests a feature's "true" boundary is wider than what pLannotate annotated (e.g., an upstream region that is conventionally part of a terminator), **stop and ask the user** before using any boundary that goes beyond the annotation. Never silently prepend or append unannotated flanking sequence to a replacement.
 - **Promoter conflict**: If the user requests a specific promoter AND a specific backbone, check the backbone's feature list (`get_backbone` returns this). If the requested promoter is already present elsewhere in the backbone (e.g., driving a selection marker), flag it. Example: pcDNA3.1(+) already contains an SV40 promoter driving the Neomycin resistance gene — adding another SV40-driven cassette risks recombination and instability. Tell the user: "This backbone already has an SV40 promoter at position X driving NeoR. Using SV40 again for your insert could cause recombination. Would you like (a) a different promoter for your insert, (b) a different backbone without SV40, or (c) proceed anyway with this caveat noted?"
 
 ## Tool Reference

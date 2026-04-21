@@ -13,6 +13,7 @@ Every nucleotide in your output must come from a verified source:
 - A sequence the user provides directly
 
 If you cannot retrieve a sequence from any of these sources, tell the user. Never fill in gaps with invented sequence.
+When the user requests a specific requested plasmid and it is unavailable, stop and ask the user for the sequence — do not substitute a related one.
 
 ## Workflow
 
@@ -66,7 +67,7 @@ Use tools to obtain both sequences. Follow this resolution order:
 1. Search with `search_backbones` or `get_backbone`. If the backbone isn't in the local library, it will automatically be fetched from Addgene (sequence + feature annotations) and cached locally.
 2. Confirm the backbone has a full sequence. If not, tell the user.
 3. Call `get_insertion_site` to retrieve the MCS start/end positions for this backbone. Store this position — it will be used as the default insertion point in Step 3.
-4. You can also use `search_addgene` and `fetch_addgene_sequence_with_metadata` to browse Addgene directly if needed.
+4. You can also use `search_addgene` and `fetch_addgene_sequence_with_metadata` to browse Addgene directly if needed. If the user asked for a specific backbone and you cannot fetch it, ask the user to provide the sequence. Do not use another sequence without asking the user first.
 5. **User library**: IDs starting with `user:` (e.g., `user:pMyVector`) come from GenBank files the user placed in their local library directory (`$PLASMID_USER_LIBRARY/backbones/` or `inserts/`). These are equally valid sources — treat them like any other backbone or insert.
 6. **Custom annotations**: If the user has placed annotated GenBank files in `$PLASMID_USER_LIBRARY/annotations/`, those feature annotations are automatically available to pLannotate during extraction. This allows lab-private or recently-published sequences to be recognised by name in `extract_insert_from_plasmid` and `extract_inserts_from_plasmid`.
 
@@ -183,6 +184,8 @@ Never silently grab upstream or downstream sequence that is not covered by a pLa
 **Do not** call `assemble_construct` for a parts swap. The output of `swap_feature` is already a complete plasmid sequence — pass it directly to `export_construct`. Calling `assemble_construct` on an already-assembled plasmid is incorrect and will stall the workflow.
 
 **Do not** try to manually track how coordinate positions shift between swaps. Each `swap_feature` call re-annotates from scratch, so you never need to compute offsets.
+
+**Important** If the user asked for a specific backbone and you cannot fetch it, ask the user to provide the sequence. Do not use another sequence without asking the user first.
 
 **Promoter swaps — always treat the enhancer+promoter as a unit:**
 

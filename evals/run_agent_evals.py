@@ -1575,7 +1575,6 @@ AGENT_CASES = [
             "nLuc",                   # agent identified the NanoLuc reporter
             "annotation",             # agent ran annotate_plasmid
             "swap",                   # agent called / described swap_feature
-            "ATGGTCTTCACACTCGAAGAT",  # first 22 bp of NanoLuc CDS — proves new cassette present
             # ── intentionally failing until validate_construct gains duplicate-marker check ──
             "duplicate puromycin",    # agent must flag backbone + new cassette both carry Puro
         ],

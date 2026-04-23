@@ -67,7 +67,9 @@ Use tools to obtain both sequences. Follow this resolution order:
 1. Search with `search_backbones` or `get_backbone`. If the backbone isn't in the local library, it will automatically be fetched from Addgene (sequence + feature annotations) and cached locally.
 2. Confirm the backbone has a full sequence. If not, tell the user.
 3. Call `get_insertion_site` to retrieve the MCS start/end positions for this backbone. Store this position — it will be used as the default insertion point in Step 3.
-4. You can also use `search_addgene` and `fetch_addgene_sequence_with_metadata` to browse Addgene directly if needed. If the user asked for a specific backbone and you cannot fetch it, ask the user to provide the sequence. Do not use another sequence without asking the user first.
+4. You can also use `search_addgene` and `fetch_addgene_sequence_with_metadata` to browse Addgene directly if needed.
+
+   **⚠ CRITICAL — Addgene fetch failure**: If `fetch_addgene_sequence_with_metadata` returns an error or empty result for a plasmid the user explicitly named (by ID or name), **stop immediately and ask the user to provide the sequence**. Do NOT search for similar plasmids, related plasmids, or alternatives. Do NOT proceed with a substitute. End your turn with a single question: "I wasn't able to retrieve plasmid #XXXXX from Addgene. Could you provide the sequence directly?"
 5. **User library**: IDs starting with `user:` (e.g., `user:pMyVector`) come from GenBank files the user placed in their local library directory (`$PLASMID_USER_LIBRARY/backbones/` or `inserts/`). These are equally valid sources — treat them like any other backbone or insert.
 6. **Custom annotations**: If the user has placed annotated GenBank files in `$PLASMID_USER_LIBRARY/annotations/`, those feature annotations are automatically available to pLannotate during extraction. This allows lab-private or recently-published sequences to be recognised by name in `extract_insert_from_plasmid` and `extract_inserts_from_plasmid`.
 
@@ -165,6 +167,14 @@ Use `swap_feature` for any operation that replaces one feature with another — 
 
 1. Call `annotate_plasmid` once to get the full feature map.
 2. Fetch each replacement sequence in coding (5'→3' functional) orientation using whichever tool is appropriate: `extract_insert_from_plasmid` (single feature from a plasmid), `extract_inserts_from_plasmid` (contiguous multi-feature region from a plasmid), `get_insert` (local library or NCBI fallback), or `fetch_gene` (NCBI CDS by gene name).
+
+   **⚠ Annotation-driven boundaries only — no manual coordinate extension:**
+
+   - For a **single-feature** cassette: call `extract_insert_from_plasmid(plasmid_sequence, feature_name)` **by name only** — do not pass explicit `start`/`end` coordinates.
+   - For a **multi-feature** cassette (e.g., enhancer + promoter, or promoter + reporter): call `extract_inserts_from_plasmid(plasmid_sequence, [first_feature, last_feature])`. This tool automatically spans from the annotated start of the first named feature to the annotated end of the last named feature — it is the correct, boundary-enforcing tool for this case.
+   - **Never** call `extract_insert_from_plasmid` with explicit `start`/`end` coordinates that extend beyond the pLannotate-annotated boundaries of any named feature. Doing so silently includes unannotated sequence (intergenic spacers, 5'UTR regions, cloning junctions) that was not part of the annotation. If the tool returns a `warning` field flagging that explicit coordinates were used, treat this as a boundary-violation alert.
+   - **Gaps between features are handled automatically**: if there is an unannotated spacer between the last promoter annotation and the first CDS annotation (e.g., a 5'UTR), `extract_inserts_from_plasmid` includes it by spanning between the two named features' annotated boundaries. Do not use manual coordinates to "capture the gap."
+
 3. For each swap in turn: call `swap_feature(plasmid_sequence, feature_name, replacement_sequence)`. The tool handles orientation automatically and returns the updated plasmid sequence.
 4. For a second swap: pass the `sequence` from step 3 directly into the next `swap_feature` call — do **not** recompute coordinates from the original plasmid. pLannotate re-annotates the updated sequence internally, so coordinate shifts are handled automatically.
 5. To verify a junction or linker (which pLannotate does not annotate): use `find_sequence` with the expected linker/junction sequence — it returns all positions on both strands instantly without re-running annotation.
@@ -172,7 +182,7 @@ Use `swap_feature` for any operation that replaces one feature with another — 
 
 **STOP and ask before extending beyond annotated boundaries:**
 
-`swap_feature` uses pLannotate's annotated coordinates as the swap boundaries. If you believe the correct biological boundary extends beyond what pLannotate annotated — for example, you know a promoter conventionally includes an upstream enhancer that was not annotated as a separate feature, or a terminator typically includes a short upstream untranslated region — **do not silently extend the boundary using that biological knowledge**. Instead:
+This rule applies to **both extraction and swapping**. Whether you are deciding what sequence to extract from a source plasmid, or what region to replace in the target plasmid, you must stay within pLannotate-annotated feature coordinates. If you believe the correct biological boundary extends beyond what pLannotate annotated — for example, you know a promoter conventionally includes an upstream enhancer that was not annotated as a separate feature, or a terminator typically includes a short upstream untranslated region, or a 5'UTR region between a promoter end and CDS start seems functionally important — **do not silently extend the boundary using that biological knowledge**. Instead:
 
 1. Report what pLannotate annotated (feature name, start, end, length).
 2. Explain what your prior knowledge suggests the boundary should be (e.g., "The ADH1 terminator is typically cited as 250 bp, but pLannotate only annotated 167 bp starting at position 2. The 83 bp upstream region is unannotated.").
@@ -398,6 +408,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 - **Missing start codon**: If the insert lacks ATG, translation will not initiate (unless fusing to an upstream CDS with its own start codon).
 - **Hallucinated sequence**: The backbone or insert sequence was generated by an LLM instead of retrieved from a verified source. This produces non-functional constructs. Always use the tools.
 - **Wrong backbone retrieved**: When a user says "pcDNA3" they might mean pcDNA3.0, pcDNA3.1(+), or pcDNA3.1(-). Clarify if ambiguous.
+- **Substituting a plasmid without permission**: If the user specifies a particular plasmid (by name, Addgene ID, or otherwise), do NOT silently use a different or similar plasmid. If the exact plasmid cannot be retrieved, **stop and ask the user** whether they would like to use an alternative — never substitute one unilaterally.
 - **Wrong species**: A user expressing a gene in HEK293 (human) cells might want the mouse or rat ortholog. Always confirm the species.
 - **Wrong gene variant**: Many genes have multiple variants or family members (e.g., H2B has >20 subtypes with distinct expression patterns). Confirm the specific variant with the user when their request is ambiguous.
 - **Using `assemble_construct` to verify or locate a linker/junction**: `assemble_construct` is for building a new construct from a backbone and insert — it is not a search tool. To verify that a linker or junction sequence is present and find its position, use `find_sequence(plasmid_sequence, linker_sequence)`. It returns all positions on both strands instantly with no pLannotate overhead.
@@ -405,6 +416,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 - **Wrong orientation during feature swaps**: `extract_insert_from_plasmid` always returns sequences in **coding orientation** (already RC'd if the feature was on the reverse strand). When placing that sequence via `assemble_construct`, set `reverse_complement_insert=True` if the **target slot is on the reverse strand** — regardless of the source feature's original strand. For example, swapping a forward-strand CYC1 terminator into a reverse-strand ADH1 slot requires `reverse_complement_insert=True`; swapping the reverse-strand ADH1 terminator (returned in coding orientation) into the forward-strand CYC1 slot requires `reverse_complement_insert=False`. The rule is: match the target slot's strand, not the source's.
 - **Tag fusion treated as protein fusion**: When calling `fuse_inserts`, always set `type: "tag"` for epitope tags (FLAG, HA, His, Myc). If you omit it, the tag defaults to `type: "protein"`, its ATG is stripped, and the tag sequence is corrupted. Also: use `linker=""` (empty string) for direct tag concatenation, and the default (GGGGS)x4 linker only for protein-protein fusions.
 - **Silently extending swap boundaries beyond pLannotate annotations**: When `swap_feature` uses pLannotate coordinates, those are the boundaries the tool will use. If biological knowledge suggests a feature's "true" boundary is wider than what pLannotate annotated (e.g., an upstream region that is conventionally part of a terminator), **stop and ask the user** before using any boundary that goes beyond the annotation. Never silently prepend or append unannotated flanking sequence to a replacement.
+- **Using explicit coordinates in `extract_insert_from_plasmid` to grab unannotated flanking**: Calling `extract_insert_from_plasmid(plasmid_sequence, name, start=X, end=Y)` with coordinates that extend beyond pLannotate-annotated feature boundaries silently includes unannotated sequence. For multi-feature cassettes in parts swaps, always use `extract_inserts_from_plasmid([first_feature, last_feature])` which enforces annotation-driven boundaries. Reserve explicit coordinates only for cases where the user has explicitly authorized a specific start/end (e.g., after you asked and they confirmed).
 - **Promoter conflict**: If the user requests a specific promoter AND a specific backbone, check the backbone's feature list (`get_backbone` returns this). If the requested promoter is already present elsewhere in the backbone (e.g., driving a selection marker), flag it. Example: pcDNA3.1(+) already contains an SV40 promoter driving the Neomycin resistance gene — adding another SV40-driven cassette risks recombination and instability. Tell the user: "This backbone already has an SV40 promoter at position X driving NeoR. Using SV40 again for your insert could cause recombination. Would you like (a) a different promoter for your insert, (b) a different backbone without SV40, or (c) proceed anyway with this caveat noted?"
 
 ## Tool Reference
@@ -584,8 +596,11 @@ When a session has prior experimental outcomes logged (shown in your context as 
 
 ```
 User wants to download / export a plasmid as-is (no assembly)
-  ├─ Has Addgene ID? → fetch_addgene_sequence_with_metadata(addgene_id) → export_construct(sequence_cache_key=..., output_format=...)
-  └─ User provided raw sequence? → export_construct(sequence=..., output_format=...)
+  ├─ Has Addgene ID? → fetch_addgene_sequence_with_metadata(addgene_id)
+  │   ├─ Success → export_construct(sequence_cache_key=..., output_format=...)
+  │   └─ ⚠ Fetch failed → STOP. Ask user to provide the sequence. Do NOT search for similar plasmids.
+  ├─ User provided raw sequence? → export_construct(sequence=..., output_format=...)
+  └─ ⚠ CRITICAL: Never silently substitute a different plasmid for one the user named.
 
 User wants to build a construct
   ├─ Is this a Golden Gate / MoClo / Type IIS assembly?
@@ -595,8 +610,9 @@ User wants to build a construct
   │   └─ No → continue with MCS cloning below
   ├─ Do I have the backbone sequence?
   │   ├─ Yes → proceed
-  │   └─ No → get_backbone(include_sequence=true)
-  │           (auto-fetches from Addgene if not in local library)
+  │   └─ No → get_backbone(include_sequence=true) / fetch_addgene_sequence_with_metadata
+  │       ├─ Success → proceed
+  │       └─ ⚠ Fetch failed for a user-named plasmid → STOP. Ask user to provide sequence. Do NOT substitute.
   ├─ get_insertion_site(backbone_id=...) → record MCS start position
   ├─ Do I have the insert sequence?
   │   ├─ In local library? → get_insert (also tries NCBI fallback)

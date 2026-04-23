@@ -1341,6 +1341,15 @@ def extract_insert_from_plasmid(
             "sequence": seq,
             "size_bp": len(seq),
             "source": "extracted_from_plasmid",
+            "warning": (
+                f"Explicit coordinates used ([{start}:{end}], {len(seq)} bp) — "
+                "pLannotate boundary verification was bypassed. "
+                "If this sequence is a replacement cassette for a parts swap, "
+                "verify that these coordinates match pLannotate-annotated feature "
+                "boundaries before proceeding. If they extend into unannotated regions "
+                "(gaps, 5'UTRs, cloning junctions), stop and ask the user to confirm "
+                "the intended boundaries."
+            ),
         }
 
     # ── pLannotate annotation: find feature by name ───────────────────────

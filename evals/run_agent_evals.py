@@ -125,6 +125,11 @@ class AgentTestCase:
     # transcript-mode cases have no defense against the agent passing keyword
     # checks while burning 40+ tool calls in a search loop.
     max_tool_calls: Optional[int] = None
+    # Known-good output sequence for transcript-mode cases. When set, the
+    # grader extracts the assembled sequence from the agent's output and
+    # compares it to this reference. Comparison is circular-rotation-aware
+    # (plasmids may be linearised at different cut points). Mismatch → Critical.
+    ground_truth_sequence: Optional[str] = None
 
 
 AGENT_CASES = [
@@ -1539,6 +1544,522 @@ AGENT_CASES = [
         max_tool_calls=25,
         tags=["addgene", "extraction", "fusion", "mammalian", "his_tag"],
     ),
+    # ── A11: Parts swap — annotation-driven, multi-turn, duplicate-marker check ──
+    AgentTestCase(
+        id="A11-001",
+        name="CMV-GFP to EF1s-Nluc-P2A-copGFP-T2A-Puro parts swap (annotation-driven)",
+        prompt=(
+            "Starting with plasmid #17448 from Addgene, swap the first cassette "
+            "containing CMV → GFP with EF1s → Nluc-P2A-copGFP-T2A-Puro from "
+            "plasmid #73032."
+        ),
+        description=(
+            "Multi-turn parts-swap eval. Agent must: (1) fetch and annotate Addgene #17448, "
+            "(2) attempt to fetch #73032 — which is unavailable — then ask the user for the "
+            "sequence, (3) receive the source sequence from the simulated user, (4) extract "
+            "the EF1s-Nluc-P2A-copGFP-T2A-Puro cassette, (5) use swap_feature to replace "
+            "the CMV-GFP cassette, staying within pLannotate-annotated boundaries only, and "
+            "(6) flag that the final construct contains two Puromycin resistance genes "
+            "(backbone #17448 already has Puro; the new cassette adds a second). "
+            "The 'duplicate puromycin' assertion is intentionally failing until "
+            "validate_construct gains a duplicate-selection-marker check."
+        ),
+        # Bookkeeping only — not used for sequence scoring (grading_mode=transcript)
+        expected_backbone_id="addgene_17448",
+        expected_insert_id="Nluc_EF1s_cassette",
+        grading_mode="transcript",
+        transcript_assertions=[
+            "17448",                  # agent fetched the correct source plasmid
+            "73032",                  # agent cited the cassette source
+            "EF1",                    # agent identified the replacement promoter
+            "nLuc",                   # agent identified the NanoLuc reporter
+            "annotation",             # agent ran annotate_plasmid
+            "swap",                   # agent called / described swap_feature
+            # ── intentionally failing until validate_construct gains duplicate-marker check ──
+            "duplicate puromycin",    # agent must flag backbone + new cassette both carry Puro
+        ],
+        tools_should_not_use=["assemble_construct"],
+        user_persona=(
+            "You are a molecular biologist. You want an annotation-driven swap only — "
+            "do not extend beyond pLannotate-annotated boundaries under any circumstances.\n\n"
+            "If the agent cannot find Addgene plasmid #73032 or asks for the sequence of "
+            "the source plasmid containing EF1s-Nluc-P2A-copGFP-T2A-Puro, provide this "
+            "sequence:\n\n"
+            "acgcgtgtagtcttatgcaatactcttgtagtcttgcaacatggtaacgatgagttagcaacatgccttacaagg"
+            "agagaaaaagcaccgtgcatgccgattggtggaagtaaggtggtacgatcgtgccttattaggaaggcaacagac"
+            "gggtctgacatggattggacgaaccactgaattgccgcattgcagagatattgtatttaagtgcctagctcgata"
+            "caataaacgggtctctctggttagaccagatctgagcctgggagctctctggctaactagggaacccactgctta"
+            "agcctcaataaagcttgccttgagtgcttcaagtagtgtgtgcccgtctgttgtgtgactctggtaactagagat"
+            "ccctcagacccttttagtcagtgtggaaaatctctagcagtggcgcccgaacagggacctgaaagcgaaagggaa"
+            "accagagctctctcgacgcaggactcggcttgctgaagcgcgcacggcaagaggcgaggggcggcgactggtgag"
+            "tacgccaaaaattttgactagcggaggctagaaggagagagatgggtgcgagagcgtcagtattaagcgggggag"
+            "aattagatcgcgatgggaaaaaattcggttaaggccagggggaaagaaaaaatataaattaaaacatatagtatgg"
+            "gcaagcagggagctagaacgattcgcagttaatcctggcctgttagaaacatcagaaggctgtagacaaatactg"
+            "ggacagctacaaccatcccttcagacaggatcagaagaacttagatcattatataatacagtagcaaccctctatt"
+            "gtgtgcatcaaaggatagagataaaagacaccaaggaagctttagacaagatagaggaagagcaaaacaaaagtaa"
+            "gaccaccgcacagcaagcggccactgatcttcagacctggaggaggagatatgagggacaattggagaagtgaatt"
+            "atataaatataaagtagtaaaaattgaaccattaggagtagcacccaccaaggcaaagagaagagtggtgcagaga"
+            "gaaaaaagagcagtgggaataggagctttgttccttgggttcttgggagcagcaggaagcactatgggcgcagcct"
+            "caatgacgctgacggtacaggccagacaattattgtctggtatagtgcagcagcagaacaatttgctgagggctatt"
+            "gaggcgcaacagcatctgttgcaactcacagtctggggcatcaagcagctccaggcaagaatcctggctgtggaaag"
+            "atacctaaaggatcaacagctcctggggatttggggttgctctggaaaactcatttgcaccactgctgtgccttggaa"
+            "tgctagttggagtaataaatctctggaacagattggaatcacacgacctggatggagtgggacagagaaattaacaa"
+            "ttacacaagcttaatacactccttaattgaagaatcgcaaaaccagcaagaaaagaatgaacaagaattattggaatt"
+            "agataaatgggcaagtttgtggaattggtttaacataacaaattggctgtggtatataaaattattcataatgatagt"
+            "aggaggcttggtaggtttaagaatagtttttgctgtactttctatagtgaatagagttaggcagggatattcaccatt"
+            "atcgtttcagacccacctcccaaccccgaggggacccgacaggcccgaaggaatagaagaagaaggtggagagagaga"
+            "cagagacagatccattcgattagtgaacggatctcgacggttaacttttaaaagaaaaggggggattggggggtaca"
+            "gtgcaggggaaagaatagtagacataatagcaacagacatacaaactaaagaattacaaaaacaaattacaaaaattc"
+            "aaaattttatcgatcaaggatctgcgatcgctccggtgcccgtcagtgggcagagcgcacatcgcccacagtccccg"
+            "agaagttggggggaggggtcggcaattgaacgggtgcctagagaaggtggcgcggggtaaactgggaaagtgatgtc"
+            "gtgtactggctccgcctttttcccgagggtgggggagaaccgtatataagtgcagtagtcgccgtgaacgttcttttt"
+            "cgcaacgggtttgccgccagaacacagctgaagcttcgaggggctcgcatctctccttcacgcgcccgccgccctacc"
+            "tgaggccgccatccacgccggttgagtcgcgttctgccgcctcccgcctgtggtgcctcctgaactgcgtccgccgtc"
+            "taggtaagtttaaagctcaggtcgagaccgggcctttgtccggcgctcccttggagcctacctagactcagccggctct"
+            "ccacgctttgcctgaccctgcttgctcaactctacgtctttgtttcgttttctgttctgcgccgttacagatccaagct"
+            "gtgaccggcgcctacgctagacggatccaccatggtcttcacactcgaagatttcgttggggactggcgacagacagcc"
+            "ggctacaacctggaccaagtccttgaacagggaggtgtgtccagtttgtttcagaatctcggggtgtccgtaactccga"
+            "tccaaaggattgtcctgagcggtgaaaatgggctgaagatcgacatccatgtcatcatcccgtatgaaggtctgagcgg"
+            "cgaccaaatgggccagatcgaaaaaatttttaaggtggtgtaccctgtggatgatcatcactttaaggtgatcctgcact"
+            "atggcacactggtaatcgacggggttacgccgaacatgatcgactatttcggacggccgtatgaaggcatcgccgtgttc"
+            "gacggcaaaaagatcactgtaacagggaccctgtggaacggcaacaaaattatcgacgagcgcctgatcaaccccgacgg"
+            "ctccctgctgttccgagtaaccatcaacggagtgaccggctggcggctgtgcgaacgcattctggcgaagcttggaagcg"
+            "gagctactaacttcagcctgctgaagcaggctggagacgtggaggagaaccctggacctatggagagcgacgagagcggcc"
+            "tgcccgccatggagatcgagtgccgcatcaccggcaccctgaacggcgtggagttcgagctggtgggcggcggagagggca"
+            "cccccaagcagggccgcatgaccaacaagatgaagagcaccaaaggcgccctgaccttcagcccctacctgctgagccacgt"
+            "gatgggctacggcttctaccacttcggcacctaccccagcggctacgagaaccccttcctgcacgccatcaacaacggcggc"
+            "tacaccaacacccgcatcgagaagtacgaggacggcggcgtgctgcacgtgagcttcagctaccgctacgaggccggccgcgt"
+            "gatcggcgacttcaaggtggtgggcaccggcttccccgaggacagcgtgatcttcaccgacaagatcatccgcagcaacgcca"
+            "ccgtggagcacctgcaccccatgggcgataacgtgctggtgggcagcttcgcccgcaccttcagcctgcgcgacggcggctac"
+            "tacagcttcgtggtggacagccacatgcacttcaagagcgccatccaccccagcatcctgcagaacgggggccccatgttcgcc"
+            "ttccgccgcgtggaggagctgcacagcaacaccgagctgggcatcgtggagtaccagcacgccttcaagacccccattgccttc"
+            "gccagatcccgcgctcagtcgtccaattctgccgtggacggcaccgccggacccggctccaccggatctcgcgtcgacggcagt"
+            "ggagagggcagaggaagtctgctaacatgcggtgacgtcgaggagaatcctggcccaatgaccgagtacaagcccacggtgcgc"
+            "ctcgccacccgcgacgacgtccccagggccgtacgcaccctcgccgccgcgttcgccgactaccccgccacgcgccacaccgtcg"
+            "atccggaccgccacatcgagcgggtcaccgagctgcaagaactcttcctcacgcgcgtcgggctcgacatcggcaaggtgtgggt"
+            "cgcggacgacggcgccgcggtggcggtctggaccacgccggagagcgtcgaagcgggggcggtgttcgccgagatcggcccgcgc"
+            "atggccgagttgagcggttcccggctggccgcgcagcaacagatggaaggcctcctggcgccgcaccggcccaaggagcccgcgtg"
+            "gttcctggccaccgtcggcgtctcgcccgaccaccagggcaagggtctgggcagcgccgtcgtgctccccggagtggaggcggccg"
+            "agcgcgccggggtgcccgccttcctggagacctccgcgccccgcaacctccccttctacgagcggctcggcttcaccgtcaccgcc"
+            "gacgtcgaggtgcccgaaggaccgcgcacctggtgcatgacccgcaagcccggtgcctgagaattcgtcgacaatcaacctctgga"
+            "ttacaaaatttgtgaaagattgactggtattcttaactatgttgctccttttacgctatgtggatacgctgctttaatgcctttgta"
+            "tcatgctattgcttcccgtatggctttcattttctcctccttgtataaatcctggttgctgtctctttatgaggagttgtggcccgt"
+            "tgtcaggcaacgtggcgtggtgtgcactgtgtttgctgacgcaacccccactggttggggcattgccaccacctgtcagctcctttcc"
+            "gggactttcgctttccccctccctattgccacggcggaactcatcgccgcctgccttgcccgctgctggacaggggctcggctgttgg"
+            "gcactgacaattccgtggtgttgtcggggaaatcatcgtcctttccttggctgctcgcctgtgttgccacctggattctgcgcgggacg"
+            "tccttctgctacgtcccttcggccctcaatccagcggaccttccttcccgcggcctgctgccggctctgcggcctcttccgcgtcttcg"
+            "ccttcgccctcagacgagtcggatctccctttgggccgcctccccgcctggtacctttaagaccaatgacttacaaggcagctgtagat"
+            "cttagccactttttaaaagaaaaggggggactggaagggctaattcactcccaacgaaaataagatctgctttttgcttgtactgggtct"
+            "ctctggttagaccagatctgagcctgggagctctctggctaactagggaacccactgcttaagcctcaataaagcttgccttgagtgctt"
+            "caagtagtgtgtgcccgtctgttgtgtgactctggtaactagagatccctcagacccttttagtcagtgtggaaaatctctagcagtagt"
+            "agttcatgtcatcttattattcagtatttataacttgcaaagaaatgaatatcagagagtgagaggaacttgtttattgcagcttataat"
+            "ggttacaaataaagcaatagcatcacaaatttcacaaataaagcatttttttcactgcattctagttgtggtttgtccaaactcatcaatg"
+            "tatcttatcatgtctggctctagctatcccgcccctaactccgcccagttccgcccattctccgccccatggctgactaattttttttatt"
+            "tatgcagaggccgaggccgcctcggcctctgagctattccagaagtagtgaggaggcttttttggaggcctagacttttgcagagacggcc"
+            "caaattcgtaatcatggtcatagctgtttcctgtgtgaaattgttatccgctcacaattccacacaacatacgagccggaagcataaagtgt"
+            "aaagcctggggtgcctaatgagtgagctaactcacattaattgcgttgcgctcactgcccgctttccagtcgggaaacctgtcgtgccagct"
+            "gcattaatgaatcggccaacgcgcggggagaggcggtttgcgtattgggcgctcttccgcttcctcgctcactgactcgctgcgctcggtcgt"
+            "tcggctgcggcgagcggtatcagctcactcaaaggcggtaatacggttatccacagaatcaggggataacgcaggaaagaacatgtgagcaaaa"
+            "ggccagcaaaaggccaggaaccgtaaaaaggccgcgttgctggcgtttttccataggctccgcccccctgacgagcatcacaaaaatcgacgctc"
+            "aagtcagaggtggcgaaacccgacaggactataaagataccaggcgtttccccctggaagctccctcgtgcgctctcctgttccgaccctgccgct"
+            "taccggatacctgtccgcctttctcccttcgggaagcgtggcgctttctcatagctcacgctgtaggtatctcagttcggtgtaggtcgttcgctc"
+            "caagctgggctgtgtgcacgaaccccccgttcagcccgaccgctgcgccttatccggtaactatcgtcttgagtccaacccggtaagacacgactta"
+            "tcgccactggcagcagccactggtaacaggattagcagagcgaggtatgtaggcggtgctacagagttcttgaagtggtggcctaactacggctacac"
+            "tagaaggacagtatttggtatctgcgctctgctgaagccagttaccttcggaaaaagagttggtagctcttgatccggcaaacaaaccaccgctggtag"
+            "cggtggtttttttgtttgcaagcagcagattacgcgcagaaaaaaaggatctcaagaagatcctttgatcttttctacggggtctgacgctcagtggaa"
+            "cgaaaactcacgttaagggattttggtcatgagattatcaaaaaggatcttcacctagatccttttaaattaaaaatgaagttttaaatcaatctaaagt"
+            "atatatgagtaaacttggtctgacagttaccaatgcttaatcagtgaggcacctatctcagcgatctgtctatttcgttcatccatagttgcctgactccc"
+            "cgtcgtgtagataactacgatacgggagggcttaccatctggccccagtgctgcaatgataccgcgagacccacgctcaccggctccagatttatcagcaat"
+            "aaaccagccagccggaagggccgagcgcagaagtggtcctgcaactttatccgcctccatccagtctattaattgttgccgggaagctagagtaagtagttc"
+            "gccagttaatagtttgcgcaacgttgttgccattgctacaggcatcgtggtgtcacgctcgtcgtttggtatggcttcattcagctccggttcccaacgatc"
+            "aaggcgagttacatgatcccccatgttgtgcaaaaaagcggttagctccttcggtcctccgatcgttgtcagaagtaagttggccgcagtgttatcactcatg"
+            "gttatggcagcactgcataattctcttactgtcatgccatccgtaagatgcttttctgtgactggtgagtactcaaccaagtcattctgagaatagtgtatgc"
+            "ggcgaccgagttgctcttgcccggcgtcaatacgggataataccgcgccacatagcagaactttaaaagtgctcatcattggaaaacgttcttcggggcgaaaa"
+            "ctctcaaggatcttaccgctgttgagatccagttcgatgtaacccactcgtgcacccaactgatcttcagcatcttttactttcaccagcgtttctgggtgagca"
+            "aaaacaggaaggcaaaatgccgcaaaaaagggaataagggcgacacggaaatgttgaatactcatactcttcctttttcaatattattgaagcatttatcagggtt"
+            "attgtctcatgagcggatacatatttgaatgtatttagaaaaataaacaaataggggttccgcgcacatttccccgaaaagtgccacctgacgtctaagaaaccat"
+            "tattatcatgacattaacctataaaaataggcgtatcacgaggccctttcgtctcgcgcgtttcggtgatgacggtgaaaacctctgacacatgcagctcccggag"
+            "acggtcacagcttgtctgtaagcggatgccgggagcagacaagcccgtcagggcgcgtcagcgggtgttggcgggtgtcggggctggcttaactatgcggcatcag"
+            "agcagattgtactgagagtgcaccatatgcggtgtgaaataccgcacagatgcgtaaggagaaaataccgcatcaggcgccattcgccattcaggctgcgcaactgt"
+            "tgggaagggcgatcggtgcgggcctcttcgctattacgccagctggcgaaagggggatgtgctgcaaggcgattaagttgggtaacgccagggttttcccagtcacg"
+            "acgttgtaaaacgacggccagtgccaagctg\n\n"
+            "If the agent asks whether to include unannotated upstream or downstream regions "
+            "beyond what pLannotate annotated, say: 'Please stick to annotation-driven boundaries "
+            "only. Do not include any unannotated upstream or downstream regions.'"
+        ),
+        max_tool_calls=40,
+        ground_truth_sequence=(
+            "aggtggcacttttcggggaaatgtgcgcggaacccctatttgtttatttttctaaatacattcaaatatgtatccgctcatgagac"
+            "aataaccctgataaatgcttcaataatattgaaaaaggaagagtatgagtattcaacatttccgtgtcgcccttattccctttttt"
+            "gcggcattttgccttcctgtttttgctcacccagaaacgctggtgaaagtaaaagatgctgaagatcagttgggtgcacgagtggg"
+            "ttacatcgaactggatctcaacagcggtaagatccttgagagttttcgccccgaagaacgttttccaatgatgagcacttttaaag"
+            "ttctgctatgtggcgcggtattatcccgtattgacgccgggcaagagcaactcggtcgccgcatacactattctcagaatgacttg"
+            "gttgagtactcaccagtcacagaaaagcatcttacggatggcatgacagtaagagaattatgcagtgctgccataaccatgagtga"
+            "taacactgcggccaacttacttctgacaacgatcggaggaccgaaggagctaaccgcttttttgcacaacatgggggatcatgtaac"
+            "tcgccttgatcgttgggaaccggagctgaatgaagccataccaaacgacgagcgtgacaccacgatgcctgtagcaatggcaacaac"
+            "gttgcgcaaactattaactggcgaactacttactctagcttcccggcaacaattaatagactggatggaggcggataaagttgcagg"
+            "accacttctgcgctcggcccttccggctggctggtttattgctgataaatctggagccggtgagcgtgggtctcgcggtatcattgc"
+            "agcactggggccagatggtaagccctcccgtatcgtagttatctacacgacggggagtcaggcaactatggatgaacgaaatagaca"
+            "gatcgctgagataggtgcctcactgattaagcattggtaactgtcagaccaagtttactcatatatactttagattgatttaaaactt"
+            "catttttaatttaaaaggatctaggtgaagatcctttttgataatctcatgaccaaaatcccttaacgtgagttttcgttccactgag"
+            "cgtcagaccccgtagaaaagatcaaaggatcttcttgagatcctttttttctgcgcgtaatctgctgcttgcaaacaaaaaaaccacc"
+            "gctaccagcggtggtttgtttgccggatcaagagctaccaactctttttccgaaggtaactggcttcagcagagcgcagataccaaat"
+            "actgttcttctagtgtagccgtagttaggccaccacttcaagaactctgtagcaccgcctacatacctcgctctgctaatcctgttac"
+            "cagtggctgctgccagtggcgataagtcgtgtcttaccgggttggactcaagacgatagttaccggataaggcgcagcggtcgggctg"
+            "aacggggggttcgtgcacacagcccagcttggagcgaacgacctacaccgaactgagatacctacagcgtgagctatgagaaagcgcca"
+            "cgcttcccgaagggagaaaggcggacaggtatccggtaagcggcagggtcggaacaggagagcgcacgagggagcttccagggggaaac"
+            "gcctggtatctttatagtcctgtcgggtttcgccacctctgacttgagcgtcgatttttgtgatgctcgtcaggggggcggagcctatg"
+            "gaaaaacgccagcaacgcggcctttttacggttcctggccttttgctggccttttgctcacatgttctttcctgcgttatcccctgattc"
+            "tgtggataaccgtattaccgcctttgagtgagctgataccgctcgccgcagccgaacgaccgagcgcagcgagtcagtgagcgaggaagc"
+            "ggaagagcgcccaatacgcaaaccgcctctccccgcgcgttggccgattcattaatgcagctggcacgacaggtttcccgactggaaagcg"
+            "ggcagtgagcgcaacgcaattaatgtgagttagctcactcattaggcaccccaggctttacactttatgcttccggctcgtatgttgtgtg"
+            "gaattgtgagcggataacaatttcacacaggaaacagctatgaccatgattacgccaagcgcgcaattaaccctcactaaagggaacaaaag"
+            "ctggagctgcaagcttaatgtagtcttatgcaatactcttgtagtcttgcaacatggtaacgatgagttagcaacatgccttacaaggagag"
+            "aaaaagcaccgtgcatgccgattggtggaagtaaggtggtacgatcgtgccttattaggaaggcaacagacgggtctgacatggattggacg"
+            "aaccactgaattgccgcattgcagagatattgtatttaagtgcctagctcgatacataaacgggtctctctggttagaccagatctgagcctg"
+            "ggagctctctggctaactagggaacccactgcttaagcctcaataaagcttgccttgagtgcttcaagtagtgtgtgcccgtctgttgtgtga"
+            "ctctggtaactagagatccctcagacccttttagtcagtgtggaaaatctctagcagtggcgcccgaacagggacttgaaagcgaaagggaaac"
+            "cagaggagctctctcgacgcaggactcggcttgctgaagcgcgcacggcaagaggcgaggggcggcgactggtgagtacgccaaaaattttgac"
+            "tagcggaggctagaaggagagagatgggtgcgagagcgtcagtattaagcgggggagaattagatcgcgatgggaaaaaattcggttaaggccag"
+            "ggggaaagaaaaaatataaattaaaacatatagtatgggcaagcagggagctagaacgattcgcagttaatcctggcctgttagaaacatcagaagg"
+            "ctgtagacaaatactgggacagctacaaccatcccttcagacaggatcagaagaacttagatcattatataatacagtagcaaccctctattgtgtg"
+            "catcaaaggatagagataaaagacaccaaggaagctttagacaagatagaggaagagcaaaacaaaagtaagaccaccgcacagcaagcggccgctg"
+            "atcttcagacctggaggaggagatatgagggacaattggagaagtgaattatataaatataaagtagtaaaaattgaaccattaggagtagcacccac"
+            "caaggcaaagagaagagtggtgcagagagaaaaaagagcagtgggaataggagctttgttccttgggttcttgggagcagcaggaagcactatgggcg"
+            "cagcgtcaatgacgctgacggtacaggccagacaattattgtctggtatagtgcagcagcagaacaatttgctgagggctattgaggcgcaacagcat"
+            "ctgttgcaactcacagtctggggcatcaagcagctccaggcaagaatcctggctgtggaaagatacctaaaggatcaacagctcctggggatttgggg"
+            "ttgctctggaaaactcatttgcaccactgctgtgccttggaatgctagttggagtaataaatctctggaacagatttggaatcacacgacctggatgga"
+            "gtgggacagagaaattaacaattacacaagcttaatacactccttaattgaagaatcgcaaaaccagcaagaaaagaatgaacaagaattattggaattagat"
+            "aaatgggcaagtttgtggaattggtttaacataacaaattggctgtggtatataaaattattcataatgatagtaggaggcttggtaggtttaagaatagttttt"
+            "gctgtactttctatagtgaatagagttaggcagggatattcaccattatcgtttcagacccacctcccaaccccgaggggacccgacaggcccgaaggaatag"
+            "aagaagaaggtggagagagagacagagacagatccattcgattagtgaacggatctcgacggtatcggttaacttttaaaagaaaaggggggattggggggtac"
+            "agtgcaggggaaagaatagtagacataatagcaacagacatacaaactaaagaattacaaaaacaaattacaaaattcaaaattttatcgataagcttgggagtt"
+            "ccggggcagagcgcacatcgcccacagtccccgagaagttggggggaggggtcggcaattgaacgggtgcctagagaaggtggcgcggggtaaactgggaaagt"
+            "gatgtcgtgtactggctccgcctttttcccgagggtgggggagaaccgtatataagtgcagtagtcgccgtgaacgttctttttcgcaacgggtttgccgccag"
+            "aacacagctgaagcttcgaggggctcgcatctctccttcacgcgcccgccgccctacctgaggccgccatccacgccggttgagtcgcgttctgccgcctcccg"
+            "cctgtggtgcctcctgaactgcgtccgccgtctaggtaagtttaaagctcaggtcgagaccgggcctttgtccggcgctcccttggagcctacctagactcagcc"
+            "ggctctccacgctttgcctgaccctgcttgctcaactctacgtctttgtttcgttttctgttctgcgccgttacagatccaagctgtgaccggcgcctacgctag"
+            "acggatccaccatggtcttcacactcgaagatttcgttggggactggcgacagacagccggctacaacctggaccaagtccttgaacagggaggtgtgtccagttt"
+            "gtttcagaatctcggggtgtccgtaactccgatccaaaggattgtcctgagcggtgaaaatgggctgaagatcgacatccatgtcatcatcccgtatgaaggtctg"
+            "agcggcgaccaaatgggccagatcgaaaaaatttttaaggtggtgtaccctgtggatgatcatcactttaaggtgatcctgcactatggcacactggtaatcgacg"
+            "gggttacgccgaacatgatcgactatttcggacggccgtatgaaggcatcgccgtgttcgacggcaaaaagatcactgtaacagggaccctgtggaacggcaacaaa"
+            "attatcgacgagcgcctgatcaaccccgacggctccctgctgttccgagtaaccatcaacggagtgaccggctggcggctgtgcgaacgcattctggcgaagcttgg"
+            "aagcggagctactaacttcagcctgctgaagcaggctggagacgtggaggagaaccctggacctatggagagcgacgagagcggcctgcccgccatggagatcgagtg"
+            "ccgcatcaccggcaccctgaacggcgtggagttcgagctggtgggcggcggagagggcacccccaagcagggccgcatgaccaacaagatgaagagcaccaaaggcgcc"
+            "ctgaccttcagcccctacctgctgagccacgtgatgggctacggcttctaccacttcggcacctaccccagcggctacgagaaccccttcctgcacgccatcaacaacgg"
+            "cggctacaccaacacccgcatcgagaagtacgaggacggcggcgtgctgcacgtgagcttcagctaccgctacgaggccggccgcgtgatcggcgacttcaaggtggtgg"
+            "gcaccggcttccccgaggacagcgtgatcttcaccgacaagatcatccgcagcaacgccaccgtggagcacctgcaccccatgggcgataacgtgctggtgggcagcttcg"
+            "cccgcaccttcagcctgcgcgacggcggctactacagcttcgtggtggacagccacatgcacttcaagagcgccatccaccccagcatcctgcagaacgggggccccatg"
+            "ttcgccttccgccgcgtggaggagctgcacagcaacaccgagctgggcatcgtggagtaccagcacgccttcaagacccccattgccttcgccagatcccgcgctcagtcg"
+            "tccaattctgccgtggacggcaccgccggacccggctccaccggatctcgcgtcgacggcagtggagagggcagaggaagtctgctaacatgcggtgacgtcgaggagaat"
+            "cctggcccaatgaccgagtacaagcccacggtgcgcctcgccacccgcgacgacgtccccagggccgtacgcaccctcgccgccgcgttcgccgactaccccgccacgcgc"
+            "cacaccgtcgatccggaccgccacatcgagcgggtcaccgagctgcaagaactcttcctcacgcgcgtcgggctcgacatcggcaaggtgtgggtcgcggacgacggcgccg"
+            "cggtggcggtctggaccacgccggagagcgtcgaagcgggggcggtgttcgccgagatcggcccgcgcatggccgagttgagcggttcccggctggccgcgcagcaacagat"
+            "ggaaggcctcctggcgccgcaccggcccaaggagcccgcgtggttcctggccaccgtcggcgtctcgcccgaccaccagggcaagggtctgggcagcgccgtcgtgctcccc"
+            "ggagtggaggcggccgagcgcgccggggtgcccgccttcctggagacctccgcgccccgcaacctccccttctacgagcggctcggcttcaccgtcaccgccgacgtcgaggt"
+            "gcccgaaggaccgcgcacctggtgcatgacccgcaagcccggtgcctgaagcggccgcgtcgacaatcaacctctggattacaaaatttgtgaaagattgactggtattctta"
+            "actatgttgctccttttacgctatgtggatacgctgctttaatgcctttgtatcatgctattgcttcccgtatggctttcattttctcctccttgtataaatcctggttgctgt"
+            "ctctttatgaggagttgtggcccgttgtcaggcaacgtggcgtggtgtgcactgtgtttgctgacgcaacccccactggttggggcattgccaccacctgtcagctcctttcc"
+            "gggactttcgctttccccctccctattgccacggcggaactcatcgccgcctgccttgcccgctgctggacaggggctcggctgttgggcactgacaattccgtggtgttgtcg"
+            "gggaagctgacgtcctttccatggctgctcgcctgtgttgccacctggattctgcgcgggacgtccttctgctacgtcccttcggccctcaatccagcggaccttccttcccgc"
+            "ggcctgctgccggctctgcggcctcttccgcgtcttcgccttcgccctcagacgagtcggatctccctttgggccgcctccccgcctggaattctaccgggtaggggaggcgctt"
+            "ttcccaaggcagtctggagcatgcgctttagcagccccgctgggcacttggcgctacacaagtggcctctggcctcgcacacattccacatccaccggtaggcgccaaccggctcc"
+            "gttctttggtggccccttcgcgccaccttctactcctcccctagtcaggaagttcccccccgccccgcagctcgcgtcgtgcaggacgtgacaaatggaagtagcacgtctcacta"
+            "gtctcgtgcagatggacagcaccgctgagcaatggaagcgggtaggcctttggggcagcggccaatagcagctttgctccttcgctttctgggctcagaggctgggaaggggtggg"
+            "tccgggggcgggctcaggggcgggctcaggggcggggcgggcgcccgaaggtcctccggaggcccggcattctgcacgcttcaaaagcgcacgtctgccgcgctgttctcctcttc"
+            "ctcatctccgggcctttcgacctgcagcccaagcttaccatgaccgagtacaagcccacggtgcgcctcgccacccgcgacgacgtccccagggccgtacgcaccctcgccgccgcg"
+            "ttcgccgactaccccgccacgcgccacaccgtcgatccggaccgccacatcgagcgggtcaccgagctgcaagaactcttcctcacgcgcgtcgggctcgacatcggcaaggtgtggg"
+            "tcgcggacgacggcgccgcggtggcggtctggaccacgccggagagcgtcgaagcgggggcggtgttcgccgagatcggcccgcgcatggccgagttgagcggttcccggctggccgc"
+            "gcagcaacagatggaaggcctcctggcgccgcaccggcccaaggagcccgcgtggttcctggccaccgtcggcgtctcgcccgaccaccagggcaagggtctgggcagcgccgtcgtg"
+            "ctccccggagtggaggcggccgagcgcgccggggtgcccgccttcctggagacctccgcgccccgcaacctccccttctacgagcggctcggcttcaccgtcaccgccgacgtcgaggtg"
+            "cccgaaggaccgcgcacctggtgcatgacccgcaagcccggtgcctgacgcccgccccacgacccgcagcgcccgaccgaaaggagcgcacgaccccatgcatctcgagggcccggtacc"
+            "tttaagaccaatgacttacaaggcagctgtagatcttagccactttttaaaagaaaaggggggactggaagggctagctcactcccaacgaagacaagatctgctttttgcttgtactggg"
+            "tctctctggttagaccagatctgagcctgggagctctctggctaactagggaacccactgcttaagcctcaataaagcttgccttgagtgcttcaagtagtgtgtgcccgtctgttgtgtg"
+            "actctggtaactagagatccctcagacccttttagtcagtgtggaaaatctctagcagtagtagttcatgtcatcttattattcagtatttataacttgcaaagaaatgaatatcagagagt"
+            "gagaggaacttgtttattgcagcttataatggttacaaataaagcaatagcatcacaaatttcacaaataaagcatttttttcactgcattctagttgtggtttgtccaaactcatcaatgta"
+            "tcttatcatgtctggctctagctatcccgcccctaactccgcccatcccgcccctaactccgcccagttccgcccattctccgccccatggctgactaattttttttatttatgcagaggccg"
+            "aggccgcctcggcctctgagctattccagaagtagtgaggaggcttttttggaggcctagggacgtacccaattcgccctatagtgagtcgtattacgcgcgctcactggccgtcgttttaca"
+            "acgtcgtgactgggaaaaccctggcgttacccaacttaatcgccttgcagcacatccccctttcgccagctggcgtaatagcgaagaggcccgcaccgatcgcccttcccaacagttgcgcagc"
+            "ctgaatggcgaatgggacgcgccctgtagcggcgcattaagcgcggcgggtgtggtggttacgcgcagcgtgaccgctacacttgccagcgccctagcgcccgctcctttcgctttcttcccttc"
+            "ctttctcgccacgttcgccggctttccccgtcaagctctaaatcgggggctccctttagggttccgatttagtgctttacggcacctcgaccccaaaaaacttgattagggtgatggttcacgtag"
+            "tgggccatcgccctgatagacggtttttcgccctttgacgttggagtccacgttctttaatagtggactcttgttccaaactggaacaacactcaaccctatctcggtctattcttttgatttata"
+            "agggattttgccgatttcggcctattggttaaaaaatgagctgatttaacaaaaatttaacgcgaattttaacaaaatattaacgcttacaattt"
+        ),
+        tags=["addgene", "parts_swap", "annotation_driven", "multi_turn", "simulated_user"],
+    ),
+    # ── A11-002: Linker swap — (GGGGS)5 → GSAGSAAGSGEF in pSH-Csy4-T2A-SpRFN ──
+    AgentTestCase(
+        id="A11-002",
+        name="Replace (GGGGS)5 linker with GSAGSAAGSGEF in pSH-Csy4-T2A-SpRFN",
+        prompt=(
+            "Starting with the base plasmid pSH-Csy4-T2A-SpRFN, replace its 25 amino "
+            "acid linker (GGGGS)5 with GSAGSAAGSGEF which is a flexible non-repetitive "
+            "linker."
+        ),
+        description=(
+            "Linker swap eval. Agent must: (1) retrieve pSH-Csy4-T2A-SpRFN from the "
+            "user library or ask the user for the sequence, (2) use find_sequence to "
+            "locate the (GGGGS)5 linker DNA (75 bp) and obtain its exact coordinates, "
+            "(3) obtain the DNA encoding for GSAGSAAGSGEF from the user (12 aa, 36 bp), "
+            "(4) use assemble_construct with replace_region_end to splice out the old "
+            "linker and splice in the new one, (5) export the result. "
+            "NOTE: swap_feature is NOT appropriate here — the linker is not a "
+            "pLannotate-annotatable feature. The correct approach is find_sequence to "
+            "get coordinates, then assemble_construct(backbone_sequence=plasmid, "
+            "insert_sequence=new_linker_dna, insertion_position=start, "
+            "replace_region_end=end)."
+        ),
+        # Bookkeeping only — not used for sequence scoring
+        expected_backbone_id="pSH-Csy4-T2A-SpRFN",
+        expected_insert_id="GSAGSAAGSGEF_linker",
+        grading_mode="transcript",
+        transcript_assertions=[
+            "Csy4",           # identified the correct plasmid
+            "GGGGS",          # identified the old linker sequence
+            "GSAGSAAGSGEF",   # identified the replacement linker
+            "annotate",       # agent annotated the plasmid to map features before locating the linker
+            "position",       # agent reported the linker coordinates
+            "replace",        # agent described the replacement operation
+        ],
+        tools_should_not_use=["swap_feature"],  # linker is not a pLannotate feature
+        user_persona=(
+            "You are a molecular biologist.\n\n"
+            "The plasmid pSH-Csy4-T2A-SpRFN is in your user library. "
+            "If the agent cannot find it or asks for the sequence, say you will look it "
+            "up and provide the sequence.\n\n"
+            "If the agent asks for the DNA encoding of the replacement linker "
+            "GSAGSAAGSGEF (12 amino acids), tell the agent to generate the sequence using the standard genetic code.\n\n"
+            "If the agent asks whether it should annotate the plasmid first, say yes — "
+            "annotate it to understand the context, then use find_sequence to locate the "
+            "exact coordinates of the (GGGGS)5 linker before performing the replacement."
+        ),
+        max_tool_calls=30,
+        tags=["linker_swap", "parts_swap", "user_library", "crispr"],
+    ),
+    # ── A11-003: Linker swap — fokIR↔Cas9 VQR junction → GSAGSAAGSGEF ──
+    AgentTestCase(
+        id="A11-003",
+        name="Replace fokIR–Cas9 VQR linker with GSAGSAAGSGEF in pSH-Csy4-T2A-SpRFN",
+        prompt=(
+            "Starting with the base plasmid pSH-Csy4-T2A-SpRFN, replace the linker "
+            "between fokIR and Cas9 VQR with GSAGSAAGSGEF which is a flexible "
+            "non-repetitive linker."
+        ),
+        description=(
+            "Targeted inter-domain linker swap eval. Agent must: "
+            "(1) retrieve pSH-Csy4-T2A-SpRFN, (2) call annotate_plasmid to identify "
+            "the coordinates of the fokIR and Cas9 VQR features, (3) determine the "
+            "sequence between the end of fokIR and the start of Cas9 VQR — that is the "
+            "linker to replace, (4) use find_sequence to confirm the linker sequence "
+            "and get its exact coordinates, (5) generate the DNA for GSAGSAAGSGEF using "
+            "using standard codon maps, (6) use assemble_construct with replace_region_end to perform "
+            "the splice. The agent must correctly identify the INTER-DOMAIN linker "
+            "(between fokIR and Cas9 VQR), NOT the (GGGGS)5 linker targeted in A11-002. "
+            "NOTE: swap_feature is NOT appropriate — use find_sequence + assemble_construct."
+        ),
+        expected_backbone_id="pSH-Csy4-T2A-SpRFN",
+        expected_insert_id="GSAGSAAGSGEF_linker",
+        grading_mode="transcript",
+        transcript_assertions=[
+            "fokI",           # agent identified the fokIR feature
+            "Cas9",           # agent identified the Cas9 VQR feature
+            "VQR",            # agent specifically cited the VQR variant
+            "GSAGSAAGSGEF",   # agent identified the replacement linker
+            "annotate",       # agent annotated the plasmid to find feature coordinates
+            "find",           # agent located the inter-domain linker sequence
+            "replace",        # agent described the replacement operation
+        ],
+        tools_should_not_use=["swap_feature"],  # linker is not a pLannotate feature
+        user_persona=(
+            "You are a molecular biologist.\n\n"
+            "The plasmid pSH-Csy4-T2A-SpRFN is in your user library. "
+            "If the agent cannot find it or asks for the sequence, provide it.\n\n"
+            "If the agent asks for the DNA encoding of the replacement linker "
+            "GSAGSAAGSGEF (12 amino acids), tell the agent to generate the sequence using the standard genetic code.\n\n"
+            "The linker to replace is the peptide sequence connecting the fokIR domain "
+            "to the Cas9 VQR domain — NOT any other linker in the construct. "
+            "If the agent asks which linker to target, confirm it should use the one "
+            "between fokIR (the FokI nuclease) and Cas9 VQR."
+        ),
+        max_tool_calls=35,
+        tags=["linker_swap", "parts_swap", "user_library", "crispr", "domain_junction"],
+    ),
+    # ── A11-004: Terminator swap across opposite strand orientations ───────────
+    AgentTestCase(
+        id="A11-004",
+        name="CYC1 ↔ ADH1 terminator swap in pCEV-G1-Km (opposite strand orientations)",
+        prompt=(
+            "Starting from the Plasmid pCEV-G1-Km, there are two expression cassettes. "
+            "From those cassettes can you swap the CYC1 and ADH1 terminators?"
+        ),
+        description=(
+            "Parts swap eval specifically testing orientation handling. pCEV-G1-Km "
+            "carries two expression cassettes whose terminators sit on opposite strands "
+            "(one forward, one reverse). Agent must: (1) fetch and annotate pCEV-G1-Km, "
+            "(2) identify CYC1 and ADH1 terminators and their respective strands, "
+            "(3) extract each terminator in coding orientation using "
+            "extract_insert_from_plasmid, (4) call swap_feature sequentially — the tool "
+            "handles reverse-complementing automatically when placing into a slot of "
+            "opposite orientation. Agent must NOT manually RC the sequences before "
+            "passing them to swap_feature. "
+            "Ground truth final construct: gcttcgagcgtcccaaaacctt... (see expected output "
+            "for full sequence)."
+        ),
+        expected_backbone_id="pCEV-G1-Km",
+        expected_insert_id="CYC1_ADH1_terminators_swapped",
+        grading_mode="transcript",
+        transcript_assertions=[
+            "CYC1",         # agent identified the CYC1 terminator
+            "ADH1",         # agent identified the ADH1 terminator
+            "annotate",     # agent called annotate_plasmid first
+            "swap",         # agent called swap_feature
+            "strand",       # agent noted the strand/orientation difference between the two terminators
+            "reverse",      # agent described reverse orientation (expected: one terminator is RC)
+        ],
+        tools_should_not_use=["assemble_construct"],
+        user_persona=(
+            "You are a molecular biologist working with yeast expression vectors. "
+            "If the agent cannot find the pCEV-G1-Km plasmid or asks for its sequence, "
+            "provide this sequence:\n\n"
+            "GGAGCGACCTCATGCTATACCTGAGAAAGCAACCTGACCTACAGGAAAGAGTTACTCAAGAATAAGAATTTTCGTTTTAAAA"
+            "CCTAAGAGTCACTTTAAAATTTGTATACACTTATTTTTTTTATAACTTATTTAATAATAAAAATCATAAATCATAAGAAATTC"
+            "GCTTATTTAGAAGTGTCAACAACGTATCTACCAACGATTTGACCCTTTTCCATCTTTTCGTAAATTTCTGGCAAGGTAGACAA"
+            "GCCGACAACCTTGATTGGAGACTTGACCAAACCTCTGGCGAAGAATTGTTAATTAAGAGCTCAGATCTTATCGTCGTCATCCT"
+            "TGTAATCCATCGATACTAGTGCGGCCGCTTGTAATTAAAACTTAGATTAGATTGCTATGCTTTCTTTCTAATGAGCAAGAAGTA"
+            "AAAAAAGTTGTAATAGAACAAGAAAAATGAAACTGAAACTTGAGAAATTGAAGACCGTTTATTAACTTAAATATCAATGGGAGGT"
+            "CATCGAAAGAGAAAAAAATCAAAAAAAAAAATTTTCAAGAAAAAGAAACGTGATAAAAATTTTTATTGCCTTTTTCGACGAAGAAA"
+            "AAGAAACGAGGCGGTCTCTTTTTTCTTTTCCAAACCTTTAGTACGGGTAATTAACGACACCCTAGAGGAAGAAAGAGGGGAAATTT"
+            "AGTATGCTGTGCTTGGGTGTTTTGAAGTGGTACGGCGATGCGCGGAGTCCGAGAAAATCTGGAAGAGTAAAAAAGGAGTAGAAACA"
+            "TTTTGAAGCTATGGTGTGTGCGGCCGGCCTGGAAGTACCTTCAAAGAATGGGGTCTTATCTTGTTTTGCAAGTACCACTGAGCAGGA"
+            "TAATAATAGAAATGATAATATACTATAGTAGAGATAACGTCGATGACTTCCCATACTGTAATTGCTTTTAGTTGTGTATTTTTAGTGT"
+            "GCAAGTTTCTGTAAATCGATTAATTTTTTTTTCTTTCCTCTTTTTATTAACCTTAATTTTTATTTTAGATTCCTGACTTCAACTCAAG"
+            "ACGCACAGATATTATAACATCTGCATAATAGGCATTTGCAAGAATTACTCGTGAGTAAGGAAAGAGTGAGGAACTATCGCATACCTGCA"
+            "TTTAAAGATGCCGATTTGGGCGCGAATCCTTTATTTTGGCTTCACCCTCATACTATTATCAGGGCCAGAAAAAGGAAGTGTTTCCCTCC"
+            "TTCTTGAATTGATGTTACCCTCATAAAGCACGTGGCCTCTTATCGAGAAAGAAATTACCGTCGCTCGTGATTTGTTTGCAAAAAGAACAAA"
+            "ACTGAAAAAACCCAGACACGCTCGACTTCCTGTCTTCCTATTGATTGCAGCTTCCAATTTCGTCACACAACAAGGTCCTAGCGACGGCTCAC"
+            "AGGTTTTGTAACAAGCAATCGAAGGTTCTGGAATGGCGGGAAAGGGTTTAGTACCACATGCTATGATGCCCACTGTGATCTCCAGAGCAAAGT"
+            "TCGTTCGATCGTACTGTTACTCTCTCTCTTTCAAACAGAATTGTCCGAATCGTGTGACAACAACAGCCTGTTCTCACACACTCTTTTCTTCTAA"
+            "CCAAGGGGGTGGTTTAGTTTAGTAGAACCTCGTGAAACTTACATTTACATATATATAAACTTGCATAAATTGGTCAATGCAAGAAATACATATTTG"
+            "GTCTTTTCTAATTCGTAGTTTTTCAAGTTCTTAGATGCTTTCTTTTTCTCTTTTTTACAGATCATCAAGGAAGTAATTATCTACTTTTTACAACAA"
+            "ATATAAAACAAGGATCCGTAATACGACTCACTATAGGGCCCGGGCGTCGACATGGAACAGAAGTTGATTTCCGAAGAAGACCTCGAGTAAGCTTGGT"
+            "ACCGCGGCTAGCTAAGATCCGCTCTAACCGAAAAGGAAGGAGTTAGACAACCTGAAGTCTAGGTCCCTATTTATTTTTTTATAGTTATGTTAGTATT"
+            "AAGAACGTTATTTATATTTCAAATTTTTCTTTTTTTTCTGTACAGACGCGTGTACGCATGTAACATTATACTGAAAACCTTGCTTGAGAAGGTTTTGG"
+            "GACGCTCGAAGATCCAGCTGCATTAATGAATCGGCCAACGCGCGGGGAGAGGCGGTTTGCGTATTGGGCGCTCTTCCGCTTCCTCGCTCACTGACTCG"
+            "CTGCGCTCGGTCGTTCGGCTGCGGCGAGCGGTATCAGCTCACTCAAAGGCGGTAATACGGTTATCCACAGAATCAGGGGATAACGCAGGAAAGAACAT"
+            "GTGAGCAAAAGGCCAGCAAAAGGCCAGGAACCGTAAAAAGGCCGCGTTGCTGGCGTTTTTCCATAGGCTCCGCCCCCCTGACGAGCATCACAAAAATCG"
+            "ACGCTCAAGTCAGAGGTGGCGAAACCCGACAGGACTATAAAGATACCAGGCGTTTCCCCCTGGAAGCTCCCTCGTGCGCTCTCCTGTTCCGACCCTGCC"
+            "GCTTACCGGATACCTGTCCGCCTTTCTCCCTTCGGGAAGCGTGGCGCTTTCTCATAGCTCACGCTGTAGGTATCTCAGTTCGGTGTAGGTCGTTCGCTC"
+            "CAAGCTGGGCTGTGTGCACGAACCCCCCGTTCAGCCCGACCGCTGCGCCTTATCCGGTAACTATCGTCTTGAGTCCAACCCGGTAAGACACGACTTATCG"
+            "CCACTGGCAGCAGCCACTGGTAACAGGATTAGCAGAGCGAGGTATGTAGGCGGTGCTACAGAGTTCTTGAAGTGGTGGCCTAACTACGGCTACACTAGAAG"
+            "GACAGTATTTGGTATCTGCGCTCTGCTGAAGCCAGTTACCTTCGGAAAAAGAGTTGGTAGCTCTTGATCCGGCAAACAAACCACCGCTGGTAGCGGTGGTT"
+            "TTTTTGTTTGCAAGCAGCAGATTACGCGCAGAAAAAAAGGATCTCAAGAAGATCCTTTGATCTTTTCTACGGGGTCTGACGCTCAGTGGAACGAAAACTCA"
+            "CGTTAAGGGATTTTGGTCATGAGATTATCAAAAAGGATCTTCACCTAGATCCTTTTAAATTAAAAATGAAGTTTTAAATCAATCTAAAGTATATATGAGTAA"
+            "ACTTGGTCTGACAGTTACCAATGCTTAATCAGTGAGGCACCTATCTCAGCGATCTGTCTATTTCGTTCATCCATAGTTGCCTGACTCCCCGTCGTGTAGATAA"
+            "CTACGATACGGGAGGGCTTACCATCTGGCCCCAGTGCTGCAATGATACCGCGAGACCCACGCTCACCGGCTCCAGATTTATCAGCAATAAACCAGCCAGCCGG"
+            "AAGGGCCGAGCGCAGAAGTGGTCCTGCAACTTTATCCGCCTCCATCCAGTCTATTAATTGTTGCCGGGAAGCTAGAGTAAGTAGTTCGCCAGTTAATAGTTTG"
+            "CGCAACGTTGTTGCCATTGCTACAGGCATCGTGGTGTCACGCTCGTCGTTTGGTATGGCTTCATTCAGCTCCGGTTCCCAACGATCAAGGCGAGTTACATGAT"
+            "CCCCCATGTTGTGCAAAAAAGCGGTTAGCTCCTTCGGTCCTCCGATCGTTGTCAGAAGTAAGTTGGCCGCAGTGTTATCACTCATGGTTATGGCAGCACTGCAT"
+            "AATTCTCTTACTGTCATGCCATCCGTAAGATGCTTTTCTGTGACTGGTGAGTACTCAACCAAGTCATTCTGAGAATAGTGTATGCGGCGACCGAGTTGCTCTTG"
+            "CCCGGCGTCAATACGGGATAATACCGCGCCACATAGCAGAACTTTAAAAGTGCTCATCATTGGAAAACGTTCTTCGGGGCGAAAACTCTCAAGGATCTTACCGCT"
+            "GTTGAGATCCAGTTCGATGTAACCCACTCGTGCACCCAACTGATCTTCAGCATCTTTTACTTTCACCAGCGTTTCTGGGTGAGCAAAAACAGGAAGGCAAAATGC"
+            "CGCAAAAAAGGGAATAAGGGCGACACGGAAATGTTGAATACTCATACTCTTCCTTTTTCAATATTATTGAAGCATTTATCAGGGTTATTGTCTCATGAGCGGATA"
+            "CATATTTGAATGTATTTAGAAAAATAAACAAATAGGGGTTCCGCGCACATTTCCCCGAAAAGTGCCACCTGAACGAAGCATCTGTGCTTCATTTTGTAGAACAAAA"
+            "ATGCAACGCGAGAGCGCTAATTTTTCAAACAAAGAATCTGAGCTGCATTTTTACAGAACAGAAATGCAACGCGAAAGCGCTATTTTACCAACGAAGAATCTGTGCT"
+            "TCATTTTTGTAAAACAAAAATGCAACGCGAGAGCGCTAATTTTTCAAACAAAGAATCTGAGCTGCATTTTTACAGAACAGAAATGCAACGCGAGAGCGCTATTTTAC"
+            "CAACAAAGAATCTATACTTCTTTTTTGTTCTACAAAAATGCATCCCGAGAGCGCTATTTTTCTAACAAAGCATCTTAGATTACTTTTTTTCTCCTTTGTGCGCTCTAT"
+            "AATGCAGTCTCTTGATAACTTTTTGCACTGTAGGTCCGTTAAGGTTAGAAGAAGGCTACTTTGGTGTCTATTTTCTCTTCCATAAAAAAAGCCTGACTCCACTTCCC"
+            "GCGTTTACTGATTACTAGCGAAGCTGCGGGTGCATTTTTTCAAGATAAAGGCATCCCCGATTATATTCTATACCGATGTGGATTGCGCATACTTTGTGAACAGAAAGT"
+            "GATAGCGTTGATGATTCTTCATTGGTCAGAAAATTATGAACGGTTTCTTCTATTTTGTCTCTATATACTACGTATAGGAAATGTTTACATTTTCGTATTGTTTTCGAT"
+            "TCACTCTATGAATAGTTCTTACTACAATTTTTTTGTCTAAAGAGTAATACTAGAGATAAACATAAAAAATGTAGAGGTCGAGTTTAGATGCAAGTTCAAGGAGCGAAAG"
+            "GTGGATGGGTAGGTTATATAGGGATATAGCACAGAGATATATAGCAAAGAGATACTTTTGAGCAATGTTTGTGGAAGCGGTATTCGCAATATTTTAGTAGCTCGTTACA"
+            "GTCCGGTGCGTTTTTGGTTTTTTGAAAGTGCGTCTTCAGAGCGCTTTTGGTTTTCAAAAGCGCTCTGAAGTTCCTATACTTTCTAGAGAATAGGAACTTCGGAATAGG"
+            "AACTTCAAAGCGTTTCCGAAAACGAGCGCTTCCGAAAATGCAACGCGAGCTGCGCACATACAGCTCACTGTTCACGTCGCACCTATATCTGCGTGTTGCCTGTATATA"
+            "TATATACATGAGAAGAACGGCATAGTGCGTGTTTATGCTTAAATGCGTACTTATATGCGTCTATTTATGTAGGATGAAAGGTAGTCTAGTACCTCCTGTGATATTATCC"
+            "CATTCCATGCGGGGTATCGTATGCTTCCTTCAGCACTACCCTTTAGCTGTTCTATATGCTGCCACTCCTCAATTGGATTAGTCTCATCCTTCAATGCTATCATTTCCTTT"
+            "GATATTGGATCATGGTAGACAACCCTTAATATAACTTCGTATAATGTATGCTATACGAAGTTATTAGGTCTAGAGATCTGTTTAGCTTGCCTCGTCCCCGCCGGGTCACC"
+            "CGGCCAGCGACATGGAGGCCCAGAATACCCTCCTTGACAGTCTTGACGTGCGCAGCTCAGGGGCATGATGTGACTGTCGCCCGTACATTTAGCCCATACATCCCCATGTAT"
+            "AATCATTTGCATCCATACATTTTGATGGCCGCACGGCGCGAAGCAAAAATTACGGCTCCTCGCTGCAGACCTGCGAGCAGGGAAACGCTCCCCTCACAGACGCGTTGAATTG"
+            "TCCCCACGCCGCGCCCCTGTAGAGAAATATAAAAGGTTAGGATTTGCCACTGAGGTTCTTCTTTCATATACTTCCTTTTAAAATCTTGCTAGGATACAGTTCTCACATCACAT"
+            "CCGAACATAAACAACCATGGGTAAGGAAAAGACTCACGTTTCGAGGCCGCGATTAAATTCCAACATGGATGCTGATTTATATGGGTATAAATGGGCTCGCGATAATGTCGGG"
+            "CAATCAGGTGCGACAATCTATCGATTGTATGGGAAGCCCGATGCGCCAGAGTTGTTTCTGAAACATGGCAAAGGTAGCGTTGCCAATGATGTTACAGATGAGATGGTCAGAC"
+            "TAAACTGGCTGACGGAATTTATGCCTCTTCCGACCATCAAGCATTTTATCCGTACTCCTGATGATGCATGGTTACTCACCACTGCGATCCCCGGCAAAACAGCATTCCAGGTA"
+            "TTAGAAGAATATCCTGATTCAGGTGAAAATATTGTTGATGCGCTGGCAGTGTTCCTGCGCCGGTTGCATTCGATTCCTGTTTGTAATTGTCCTTTTAACAGCGATCGCGTATT"
+            "TCGTCTCGCTCAGGCGCAATCACGAATGAATAACGGTTTGGTTGATGCGAGTGATTTTGATGACGAGCGTAATGGCTGGCCTGTTGAACAAGTCTGGAAAGAAATGCATAAGC"
+            "TTTTGCCATTCTCACCGGATTCAGTCGTCACTCATGGTGATTTCTCACTTGATAACCTTATTTTTGACGAGGGGAAATTAATAGGTTGTATTGATGTTGGACGAGTCGGAATCG"
+            "CAGACCGATACCAGGATCTTGCCATCCTATGGAACTGCCTCGGTGAGTTTTCTCCTTCATTACAGAAACGGCTTTTTCAAAAATATGGTATTGATAATCCTGATATGAATAAATT"
+            "GCAGTTTCATTTGATGCTCGATGAGTTTTTCTAATCAGTACTGACAATAAAAAGATTCTTGTTTTCAAGAACTTGTCATTTGTATAGTTTTTTTATATTGTAGTTGTTCTATTTTAT"  # noqa: E501 (long sequence string)
+            "ATCAAATGTTAGCGTGATTTATATTTTTTTTCGCCTCGACATCATCTGCCCAGATGCGAAGTTAAGTGCGCAGAAAGTAATATCATGCGTCAATCGTATGTGAATGCTGGTCGCTAT"
+            "ACTGCTGTCGATTCGATACTAACGCCGCCATCCAGTGTCGAAAACGAGCTCTCGAGAACCCTTAATATAACTTCGTATAATGTATGCTATACGAAGTTATTAGGTGATATCAGATCC"
+            "ACTA\n\n"
+            "When the swap is complete, export the final plasmid as a raw sequence."
+        ),
+        max_tool_calls=25,
+        ground_truth_sequence=(
+            "gcttcgagcgtcccaaaaccttctcaagcaaggttttcagtataatgttacatgcgtacacgcgtctgtacagaaaaaaaa"
+            "gaaaaatttgaaatataaataacgttcttaatactaacataactataaaaaaataaatagggacctagacttcaggttgtct"
+            "aactccttccttttcggttagagcggatttatttagaagtgtcaacaacgtatctaccaacgatttgacccttttccatctt"
+            "ttcgtaaatttctggcaaggtagacaagccgacaaccttgattggagacttgaccaaacctctggcgaagaattgttaattaa"
+            "gagctcagatcttatcgtcgtcatccttgtaatccatcgatactagtgcggccgcttgtaattaaaacttagattagattgct"
+            "atgctttctttctaatgagcaagaagtaaaaaaagttgtaatagaacaagaaaaatgaaactgaaacttgagaaattgaagacc"
+            "gtttattaacttaaatatcaatgggaggtcatcgaaagagaaaaaaatcaaaaaaaaaaattttcaagaaaaagaaacgtgataa"
+            "aaatttttattgcctttttcgacgaagaaaaagaaacgaggcggtctcttttttcttttccaaacctttagtacgggtaattaac"
+            "gacaccctagaggaagaaagaggggaaatttagtatgctgtgcttgggtgttttgaagtggtacggcgatgcgcggagtccgagaa"
+            "aatctggaagagtaaaaaaggagtagaaacattttgaagctatggtgtgtgcggccggcctggaagtaccttcaaagaatggggtct"
+            "tatcttgttttgcaagtaccactgagcaggataataatagaaatgataatatactatagtagagataacgtcgatgacttcccatact"
+            "gtaattgcttttagttgtgtatttttagtgtgcaagtttctgtaaatcgattaatttttttttctttcctctttttattaaccttaatt"
+            "tttattttagattcctgacttcaactcaagacgcacagatattataacatctgcataataggcatttgcaagaattactcgtgagtaagg"
+            "aaagagtgaggaactatcgcatacctgcatttaaagatgccgatttgggcgcgaatcctttattttggcttcaccctcatactattatcag"
+            "ggccagaaaaaggaagtgtttccctccttcttgaattgatgttaccctcataaagcacgtggcctcttatcgagaaagaaattaccgtcgctc"
+            "gtgatttgtttgcaaaaagaacaaaactgaaaaaacccagacacgctcgacttcctgtcttcctattgattgcagcttccaatttcgtcacaca"
+            "acaaggtcctagcgacggctcacaggttttgtaacaagcaatcgaaggttctggaatggcgggaaagggtttagtaccacatgctatgatgccc"
+            "actgtgatctccagagcaaagttcgttcgatcgtactgttactctctctctttcaaacagaattgtccgaatcgtgtgacaacaacagcctgttc"
+            "tcacacactcttttcttctaaccaagggggtggtttagtttagtagaacctcgtgaaacttacatttacatatatataaacttgcataaattggtca"
+            "atgcaagaaatacatatttggtcttttctaattcgtagtttttcaagttcttagatgctttctttttctcttttttacagatcatcaaggaagtaat"
+            "tatctactttttacaacaaatataaaacaaggatccgtaatacgactcactatagggcccgggcgtcgacatggaacagaagttgatttccgaagaag"
+            "acctcgagtaagcttggtaccgcggctagctaaggcgaatttcttatgatttatgatttttattattaaataagttataaaaaaaataagtgtataca"
+            "aattttaaagtgactcttaggttttaaaacgaaaattcttattcttgagtaactctttcctgtaggtcaggttgctttctcaggtatagcatgaggtcg"
+            "ctcatccagctgcattaatgaatcggccaacgcgcggggagaggcggtttgcgtattgggcgctcttccgcttcctcgctcactgactcgctgcgctcg"
+            "gtcgttcggctgcggcgagcggtatcagctcactcaaaggcggtaatacggttatccacagaatcaggggataacgcaggaaagaacatgtgagcaaaag"
+            "gccagcaaaaggccaggaaccgtaaaaaggccgcgttgctggcgtttttccataggctccgcccccctgacgagcatcacaaaaatcgacgctcaagtcag"
+            "aggtggcgaaacccgacaggactataaagataccaggcgtttccccctggaagctccctcgtgcgctctcctgttccgaccctgccgcttaccggatacctg"
+            "tccgcctttctcccttcgggaagcgtggcgctttctcatagctcacgctgtaggtatctcagttcggtgtaggtcgttcgctccaagctgggctgtgtgcac"
+            "gaaccccccgttcagcccgaccgctgcgccttatccggtaactatcgtcttgagtccaacccggtaagacacgacttatcgccactggcagcagccactggtaa"
+            "caggattagcagagcgaggtatgtaggcggtgctacagagttcttgaagtggtggcctaactacggctacactagaaggacagtatttggtatctgcgctctgctg"
+            "aagccagttaccttcggaaaaagagttggtagctcttgatccggcaaacaaaccaccgctggtagcggtggtttttttgtttgcaagcagcagattacgcgcagaaaa"
+            "aaaggatctcaagaagatcctttgatcttttctacggggtctgacgctcagtggaacgaaaactcacgttaagggattttggtcatgagattatcaaaaaggatcttc"
+            "acctagatccttttaaattaaaaatgaagttttaaatcaatctaaagtatatatgagtaaacttggtctgacagttaccaatgcttaatcagtgaggcacctatctcag"
+            "cgatctgtctatttcgttcatccatagttgcctgactccccgtcgtgtagataactacgatacgggagggcttaccatctggccccagtgctgcaatgataccgcgagac"
+            "ccacgctcaccggctccagatttatcagcaataaaccagccagccggaagggccgagcgcagaagtggtcctgcaactttatccgcctccatccagtctattaattgttgc"
+            "cgggaagctagagtaagtagttcgccagttaatagtttgcgcaacgttgttgccattgctacaggcatcgtggtgtcacgctcgtcgtttggtatggcttcattcagctcc"
+            "ggttcccaacgatcaaggcgagttacatgatcccccatgttgtgcaaaaaagcggttagctccttcggtcctccgatcgttgtcagaagtaagttggccgcagtgttatcact"
+            "catggttatggcagcactgcataattctcttactgtcatgccatccgtaagatgcttttctgtgactggtgagtactcaaccaagtcattctgagaatagtgtatgcggcgacc"
+            "gagttgctcttgcccggcgtcaatacgggataataccgcgccacatagcagaactttaaaagtgctcatcattggaaaacgttcttcggggcgaaaactctcaaggatcttacc"
+            "gctgttgagatccagttcgatgtaacccactcgtgcacccaactgatcttcagcatcttttactttcaccagcgtttctgggtgagcaaaaacaggaaggcaaaatgccgcaaaaaa"
+            "gggaataagggcgacacggaaatgttgaatactcatactcttcctttttcaatattattgaagcatttatcagggttattgtctcatgagcggatacatatttgaatgtatttagaaaa"
+            "ataaacaaataggggttccgcgcacatttccccgaaaagtgccacctgaacgaagcatctgtgcttcattttgtagaacaaaaatgcaacgcgagagcgctaatttttcaaacaaagaatctg"
+            "agctgcatttttacagaacagaaatgcaacgcgaaagcgctattttaccaacgaagaatctgtgcttcatttttgtaaaacaaaaatgcaacgcgagagcgctaatttttcaaacaaagaatctg"
+            "agctgcatttttacagaacagaaatgcaacgcgagagcgctattttaccaacaaagaatctatacttcttttttgttctacaaaaatgcatcccgagagcgctatttttctaacaaagcatcttaga"
+            "ttactttttttctcctttgtgcgctctataatgcagtctcttgataactttttgcactgtaggtccgttaaggttagaagaaggctactttggtgtctattttctcttccataaaaaaagcctgactc"
+            "cacttcccgcgtttactgattactagcgaagctgcgggtgcattttttcaagataaaggcatccccgattatattctataccgatgtggattgcgcatactttgtgaacagaaagtgatagcgttgatg"
+            "attcttcattggtcagaaaattatgaacggtttcttctattttgtctctatatactacgtataggaaatgtttacattttcgtattgttttcgattcactctatgaatagttcttactacaatttttttg"
+            "tctaaagagtaatactagagataaacataaaaaatgtagaggtcgagtttagatgcaagttcaaggagcgaaaggtggatgggtaggttatatagggatatagcacagagatatatagcaaagagatacttttg"
+            "agcaatgtttgtggaagcggtattcgcaatattttagtagctcgttacagtccggtgcgtttttggttttttgaaagtgcgtcttcagagcgcttttggttttcaaaagcgctctgaagttcctatactttcta"
+            "gagaataggaacttcggaataggaacttcaaagcgtttccgaaaacgagcgcttccgaaaatgcaacgcgagctgcgcacatacagctcactgttcacgtcgcacctatatctgcgtgttgcctgtatatatatat"
+            "acatgagaagaacggcatagtgcgtgtttatgcttaaatgcgtacttatatgcgtctatttatgtaggatgaaaggtagtctagtacctcctgtgatattatcccattccatgcggggtatcgtatgcttccttcag"
+            "cactaccctttagctgttctatatgctgccactcctcaattggattagtctcatccttcaatgctatcatttcctttgatattggatcatggtagacaacccttaatataacttcgtataatgtatgctatacgaagttat"
+            "taggtctagagatctgtttagcttgcctcgtccccgccgggtcacccggccagcgacatggaggcccagaataccctccttgacagtcttgacgtgcgcagctcaggggcatgatgtgactgtcgcccgtacatttagcccata"
+            "catccccatgtataatcatttgcatccatacattttgatggccgcacggcgcgaagcaaaaattacggctcctcgctgcagacctgcgagcagggaaacgctcccctcacagacgcgttgaattgtccccacgccgcgcccctgtagag"
+            "aaatataaaaggttaggatttgccactgaggttcttctttcatatacttccttttaaaatcttgctaggatacagttctcacatcacatccgaacataaacaaccatgggtaaggaaaagactcacgtttcgaggccgcgattaaattcc"
+            "aacatggatgctgatttatatgggtataaatgggctcgcgataatgtcgggcaatcaggtgcgacaatctatcgattgtatgggaagcccgatgcgccagagttgtttctgaaacatggcaaaggtagcgttgccaatgatgttacagat"
+            "gagatggtcagactaaactggctgacggaatttatgcctcttccgaccatcaagcattttatccgtactcctgatgatgcatggttactcaccactgcgatccccggcaaaacagcattccaggtattagaagaatatcctgattcaggtgaaaat"
+            "attgttgatgcgctggcagtgttcctgcgccggttgcattcgattcctgtttgtaattgtccttttaacagcgatcgcgtatttcgtctcgctcaggcgcaatcacgaatgaataacggtttggttgatgcgagtgattttgatgacgagcgtaatgg"
+            "ctggcctgttgaacaagtctggaaagaaatgcataagcttttgccattctcaccggattcagtcgtcactcatggtgatttctcacttgataaccttatttttgacgaggggaaattaataggttgtattgatgttggacgagtcggaatcgcagaccga"
+            "taccaggatcttgccatcctatggaactgcctcggtgagttttctccttcattacagaaacggctttttcaaaaatatggtattgataatcctgatatgaataaattgcagtttcatttgatgctcgatgagtttttctaatcagtactgacaataaaaag"
+            "attcttgttttcaagaacttgtcatttgtatagtttttttatattgtagttgttctattttaatcaaatgttagcgtgatttatattttttttcgcctcgacatcatctgcccagatgcgaagttaagtgcgcagaaagtaatatcatgcgtcaatcgtatgt"
+            "gaatgctggtcgctatactgctgtcgattcgatactaacgccgccatccagtgtcgaaaacgagctctcgagaacccttaatataacttcgtataatgtatgctatacgaagttattaggtgatatcagatccacta"
+        ),
+        tags=["parts_swap", "terminator_swap", "orientation", "yeast", "reverse_strand"],
+    ),
 ]
 
 
@@ -1991,6 +2512,40 @@ async def run_agent_eval_case(
         rubric_result = _build_transcript_rubric(
             transcript_results, tool_violation_results, max_tool_check
         )
+
+        # ── Ground truth sequence check ────────────────────────────────
+        # If a known-good output sequence is provided, compare it to the
+        # sequence the agent produced. Comparison is circular-rotation-aware
+        # so that plasmids linearised at different cut points still pass.
+        if tc.ground_truth_sequence:
+            ref = tc.ground_truth_sequence.strip().lower()
+            assembled = (trace.assembled_sequence or "").strip().lower()
+            if not assembled:
+                seq_passed = False
+                seq_detail = "no assembled sequence found in agent output"
+            elif assembled == ref:
+                seq_passed = True
+                seq_detail = f"exact match ({len(assembled)} bp)"
+            elif len(assembled) == len(ref) and assembled in (ref + ref):
+                seq_passed = True
+                seq_detail = f"circular-rotation match ({len(assembled)} bp)"
+            else:
+                seq_passed = False
+                seq_detail = (
+                    f"sequence mismatch: expected {len(ref)} bp, "
+                    f"got {len(assembled)} bp"
+                )
+            rubric_result.checks.append(Check(
+                section="Ground Truth",
+                name="Output sequence matches known-good reference",
+                severity="Critical",
+                passed=seq_passed,
+                detail=seq_detail,
+            ))
+            if verbose:
+                status = "PASS" if seq_passed else "FAIL"
+                print(f"  [ground_truth] {status}: {seq_detail}")
+
         if verbose:
             print(f"  [grading_mode=transcript] Result: {rubric_result.summary()}")
             print(rubric_result.report())

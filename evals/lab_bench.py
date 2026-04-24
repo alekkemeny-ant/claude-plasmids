@@ -56,6 +56,38 @@ def build_prompt(question: str, options: list[str], labels: list[str]) -> str:
     )
 
 
+def build_open_prompt(question: str) -> str:
+    return (
+        f"{question}\n\n"
+        f"You may use any tools to verify sequences, simulate cloning steps, "
+        f"or check your reasoning. End your response with a line of the form:\n"
+        f"ANSWER: <your final answer>"
+    )
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", "", s).upper()
+
+
+def score_open(text: str, ideal: str, distractors: list[str]) -> tuple[bool, str]:
+    m = re.search(r"ANSWER:\s*(.+?)(?:\n|$)", text, re.IGNORECASE)
+    given = m.group(1).strip() if m else ""
+    n_ideal = _norm(ideal)
+    n_given = _norm(given)
+    n_text = _norm(text)
+    # Correct if the normalized ideal is the given answer or appears in it,
+    # and no distractor is a closer match to the given answer.
+    if not n_ideal:
+        return False, given
+    correct = n_ideal == n_given or n_ideal in n_given or n_ideal in n_text
+    if correct:
+        for d in distractors:
+            if _norm(d) and _norm(d) == n_given:
+                correct = False
+                break
+    return correct, given
+
+
 def extract_choice(text: str, labels: list[str]) -> str | None:
     m = re.search(r"ANSWER:\s*([A-Za-z])", text)
     if m:
@@ -69,14 +101,20 @@ def extract_choice(text: str, labels: list[str]) -> str | None:
     return None
 
 
-async def run_one(row: dict, model: str, max_turns: int, seed: int) -> dict:
-    rng = random.Random(seed)
-    options = [row["ideal"], *row["distractors"]]
-    rng.shuffle(options)
-    labels = [chr(ord("A") + i) for i in range(len(options))]
-    correct_label = labels[options.index(row["ideal"])]
-
-    prompt = build_prompt(row["question"], options, labels)
+async def run_one(
+    row: dict, model: str, max_turns: int, seed: int, open_answer: bool = False
+) -> dict:
+    if open_answer:
+        prompt = build_open_prompt(row["question"])
+        labels: list[str] = []
+        correct_label = row["ideal"]
+    else:
+        rng = random.Random(seed)
+        options = [row["ideal"], *row["distractors"]]
+        rng.shuffle(options)
+        labels = [chr(ord("A") + i) for i in range(len(options))]
+        correct_label = labels[options.index(row["ideal"])]
+        prompt = build_prompt(row["question"], options, labels)
     opts = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT,
         mcp_servers=build_mcp_servers(),
@@ -102,8 +140,11 @@ async def run_one(row: dict, model: str, max_turns: int, seed: int) -> dict:
                 cost = getattr(msg, "total_cost_usd", None) or 0.0
                 break
 
-    choice = extract_choice(text_out, labels)
-    correct = choice == correct_label
+    if open_answer:
+        correct, choice = score_open(text_out, row["ideal"], row["distractors"])
+    else:
+        choice = extract_choice(text_out, labels)
+        correct = choice == correct_label
     return {
         "id": row["id"],
         "subtask": row.get("subtask", ""),
@@ -128,28 +169,51 @@ async def main():
                    help="Shuffle seed for option order")
     p.add_argument("--output", type=str, default=None,
                    help="Write per-example results as JSONL")
+    p.add_argument("--parallel", type=int, default=1,
+                   help="Number of examples to run concurrently")
+    p.add_argument("--open-answer", action="store_true",
+                   help="No options shown; score by normalized match to ideal")
     args = p.parse_args()
 
     ds = load_dataset("futurehouse/lab-bench", args.subset, split="train")
     if args.limit:
         ds = ds.select(range(min(args.limit, len(ds))))
+    rows = [dict(r) for r in ds]
+    n = len(rows)
 
-    print(f"LAB-Bench {args.subset}: {len(ds)} examples, model={args.model}")
-    results = []
+    mode = "open-answer" if args.open_answer else "MCQ"
+    print(
+        f"LAB-Bench {args.subset} ({mode}): {n} examples, model={args.model}, "
+        f"parallel={args.parallel}", flush=True,
+    )
     out_f = open(args.output, "w") if args.output else None
-    try:
-        for i, row in enumerate(ds):
-            r = await run_one(dict(row), args.model, args.max_turns, args.seed + i)
-            results.append(r)
-            mark = "✓" if r["correct"] else "✗"
-            print(
-                f"  [{i+1}/{len(ds)}] {mark} {r['subtask'] or args.subset:<24} "
-                f"choice={r['choice']} (correct={r['correct_label']}) "
-                f"{r['elapsed_s']}s ${r['cost_usd']}"
+    sem = asyncio.Semaphore(args.parallel)
+    done = 0
+
+    async def worker(i: int, row: dict):
+        nonlocal done
+        async with sem:
+            r = await run_one(
+                row, args.model, args.max_turns, args.seed + i, args.open_answer
             )
-            if out_f:
-                out_f.write(json.dumps(r) + "\n")
-                out_f.flush()
+        done += 1
+        mark = "✓" if r["correct"] else "✗"
+        choice_disp = (r["choice"] or "")[:30]
+        label_disp = str(r["correct_label"])[:30]
+        print(
+            f"  [{done}/{n}] {mark} {r['subtask'] or args.subset:<24} "
+            f"choice={choice_disp} (correct={label_disp}) "
+            f"{r['elapsed_s']}s", flush=True,
+        )
+        if out_f:
+            out_f.write(json.dumps(r) + "\n")
+            out_f.flush()
+        return r
+
+    try:
+        results = await asyncio.gather(
+            *(worker(i, row) for i, row in enumerate(rows))
+        )
     finally:
         if out_f:
             out_f.close()

@@ -2234,7 +2234,7 @@ def _get_assistant_text(message) -> str:
 
 async def run_agent(
     prompt: str,
-    model: str = "claude-opus-4-6",
+    model: str = "claude-opus-4-7",
     max_turns: int = 15,
     verbose: bool = False,
     simulated_user: Optional[SimulatedUser] = None,
@@ -2428,7 +2428,7 @@ def _load_fixtures_for_case(tc: AgentTestCase) -> bool:
 
 async def run_agent_eval_case(
     tc: AgentTestCase,
-    model: str = "claude-opus-4-6",
+    model: str = "claude-opus-4-7",
     verbose: bool = False,
     use_judge: bool = False,
     judge_model: str = "claude-sonnet-4-6",
@@ -2801,7 +2801,7 @@ def _build_result_dict(
 
 async def run_agent_eval_suite(
     cases: list[AgentTestCase],
-    model: str = "claude-opus-4-6",
+    model: str = "claude-opus-4-7",
     verbose: bool = False,
     use_judge: bool = False,
     judge_model: str = "claude-sonnet-4-6",

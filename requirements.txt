@@ -7,3 +7,4 @@ biopython>=1.83
 # pLannotate is NOT available on PyPI. Install via conda using environment.yml:
 #   conda env create -f environment.yml
 #   conda activate claude-plasmids
+datasets>=4.0

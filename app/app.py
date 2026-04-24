@@ -580,9 +580,18 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             elif isinstance(message, ResultMessage):
                 if message.usage:
                     u = message.usage if isinstance(message.usage, dict) else {}
+                    # Top-level counts are cumulative across the agent's internal
+                    # iterations; for "context used" we want the last iteration's
+                    # input size (the actual conversation length).
+                    its = u.get("iterations") or []
+                    last = its[-1] if its else u
                     safe_write({
                         "type": "token_usage",
-                        "input_tokens": u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0),
+                        "input_tokens": (
+                            last.get("input_tokens", 0)
+                            + last.get("cache_read_input_tokens", 0)
+                            + last.get("cache_creation_input_tokens", 0)
+                        ),
                         "context_window": CONTEXT_WINDOW.get(model, 1_000_000),
                     })
                 break
@@ -1813,7 +1822,12 @@ function bufferTextDelta(text) {
 function drainText() {
   drainHandle = null;
   if (textBuffer.length === 0) return;
-  const n = Math.max(2, Math.min(12, Math.ceil(textBuffer.length / 8)));
+  // Drain proportionally so the buffer survives the ~400ms gaps between
+  // SDK bursts: at len/24 per frame (60fps), a 40-char burst drains over
+  // ~330ms instead of ~130ms, leaving little visible pause before the
+  // next burst arrives. Ceiling ramps up when the buffer grows so we
+  // never fall more than ~2s behind.
+  const n = Math.max(1, Math.min(Math.ceil(textBuffer.length / 24), 8));
   appendTextDelta(textBuffer.slice(0, n));
   textBuffer = textBuffer.slice(n);
   if (textBuffer.length > 0) drainHandle = requestAnimationFrame(drainText);

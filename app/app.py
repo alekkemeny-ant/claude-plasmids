@@ -42,7 +42,19 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import anthropic
 
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    AssistantMessage,
+    UserMessage,
+    ResultMessage,
+    StreamEvent,
+    ToolUseBlock,
+    ToolResultBlock,
+    PermissionResultAllow,
+)
 from src.tools import (
+    build_mcp_servers,
     get_anthropic_tool_schemas,
     get_tool_dispatch,
     set_tracker,
@@ -62,14 +74,71 @@ SYSTEM_PROMPT_PATH = Path(__file__).parent / "system_prompt.md"  # lives in app/
 SYSTEM_PROMPT = SYSTEM_PROMPT_PATH.read_text() if SYSTEM_PROMPT_PATH.exists() else ""
 
 # ── Tool schemas + dispatch ─────────────────────────────────────────────
-# Tool definitions live in src/tools.py:ALL_TOOLS — the same list the
-# Agent SDK MCP server (app/agent.py, evals) is built from. We project
-# them into Anthropic API format and dispatch in-process so the web UI
-# gets ~1s direct-API TTFT instead of the SDK subprocess's ~5s, while
-# tool implementations stay single-sourced.
+# Tool definitions live in src/tools.py:ALL_TOOLS. Both the SDK path (new)
+# and the batch/fallback path use these.
 
 TOOLS = get_anthropic_tool_schemas()
 _TOOL_HANDLERS = get_tool_dispatch()
+
+# ── SDK client pool ────────────────────────────────────────────────────
+# One background asyncio loop hosts per-session ClaudeSDKClient instances.
+# First query per session pays ~6s subprocess startup; subsequent queries
+# hit the warm client at sub-second TTFT.
+
+_sdk_loop = asyncio.new_event_loop()
+threading.Thread(target=_sdk_loop.run_forever, daemon=True, name="sdk-loop").start()
+_sdk_clients: dict[str, ClaudeSDKClient] = {}
+_sdk_create_lock = asyncio.Lock()
+
+
+async def _auto_approve(tool_name, tool_input, context):
+    return PermissionResultAllow()
+
+
+async def _get_or_create_sdk_client(session_id: str, model: str) -> ClaudeSDKClient:
+    """Return a warm SDK client for this session, creating one if needed.
+
+    The frontend calls ``/api/warmup`` on textarea focus, which invokes this
+    ahead of the first user message — so by the time the user finishes typing,
+    the ~6-9s subprocess startup is already paid.
+    """
+    if session_id in _sdk_clients:
+        return _sdk_clients[session_id]
+    async with _sdk_create_lock:
+        if session_id in _sdk_clients:
+            return _sdk_clients[session_id]
+        options = ClaudeAgentOptions(
+            system_prompt=_build_system_prompt(get_session(session_id) or {}),
+            mcp_servers=build_mcp_servers(),
+            model=model,
+            max_turns=15,
+            cwd=str(PROJECT_ROOT),
+            permission_mode="acceptEdits",
+            can_use_tool=_auto_approve,
+            disallowed_tools=["Bash", "Write", "Edit", "NotebookEdit"],
+            include_partial_messages=True,
+        )
+        client = ClaudeSDKClient(options=options)
+        await client.__aenter__()
+        _sdk_clients[session_id] = client
+        return client
+
+
+def warmup_session(session_id: str, model: str) -> None:
+    """Kick off SDK client creation in the background (fire-and-forget)."""
+    asyncio.run_coroutine_threadsafe(
+        _get_or_create_sdk_client(session_id, model), _sdk_loop
+    )
+
+
+async def _close_sdk_client(session_id: str):
+    """Shut down and remove the SDK client for a session."""
+    client = _sdk_clients.pop(session_id, None)
+    if client:
+        try:
+            await client.__aexit__(None, None, None)
+        except Exception:
+            pass
 
 
 def _tool_result_text(content) -> str:
@@ -295,6 +364,7 @@ def get_session(session_id: str) -> dict | None:
 def delete_session_by_id(session_id: str) -> bool:
     deleted = _sessions.pop(session_id, None) is not None
     if deleted:
+        asyncio.run_coroutine_threadsafe(_close_sdk_client(session_id), _sdk_loop)
         _save_sessions()
     return deleted
 
@@ -388,7 +458,12 @@ def _emit_tool_result(
 
 
 def run_agent_turn_streaming(user_message: str, session_id: str, write_event, model: str = MODEL):
-    """Run one agent turn with streaming, scoped to a session."""
+    """Run one agent turn via Claude Agent SDK.
+
+    Uses a per-session persistent ClaudeSDKClient for warm TTFT after the
+    first turn. The SDK handles the full agent loop (tool dispatch, retries,
+    multi-turn) internally; we translate its events to SSE.
+    """
     _cancelled_sessions.discard(session_id)
 
     session = get_session(session_id)
@@ -400,16 +475,21 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
     set_tracker(tracker)
     clear_last_plot_json()
     export_called = False
-    # Build the system prompt once per turn (not per retry) so that
-    # prompt caching works. The prompt is dynamic because it includes
-    # per-session troubleshooting context (experimental_outcomes).
-    turn_system_prompt = _build_system_prompt(session)
-    history = session["history"]
-    history.append({"role": "user", "content": user_message})
-    session["display_messages"].append({"role": "user", "content": user_message})
 
+    session["display_messages"].append({"role": "user", "content": user_message})
     if session["first_message"] is None:
         session["first_message"] = user_message[:80]
+
+    outcomes = session.get("experimental_outcomes") or []
+    if outcomes:
+        ctx = "[Troubleshooting context — prior experimental outcomes]\n"
+        for i, o in enumerate(outcomes, 1):
+            cname = o.get("construct_name") or "unnamed construct"
+            ctx += (
+                f"Attempt {i} ({cname}): "
+                f"{o.get('status', '?')} — {o.get('observation', '?')}\n"
+            )
+        user_message = f"{ctx}\n{user_message}"
 
     disconnected = False
     is_cancelled = lambda: session_id in _cancelled_sessions
@@ -423,182 +503,107 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         except (BrokenPipeError, ConnectionResetError):
             disconnected = True
 
-    max_iterations = 15
-    max_retries = 3
     assistant_text = ""
     assistant_blocks: list[dict] = []
-    current_thinking_text = ""
-    current_text_content = ""
+    pending_tools: list[tuple[str, dict]] = []
 
-    try:
-        for _ in range(max_iterations):
+    async def _run_sdk_turn():
+        nonlocal assistant_text, export_called
+        client = await _get_or_create_sdk_client(session_id, model)
+        await client.query(user_message)
+
+        current_block_type = None
+        current_text = ""
+        async for message in client.receive_response():
             if is_cancelled() or disconnected:
                 break
 
-            stop_reason = None
-            final_message = None
-            tool_results: list = []
+            if isinstance(message, StreamEvent):
+                ev = message.event
+                etype = ev.get("type")
+                if etype == "content_block_start":
+                    block = ev.get("content_block", {})
+                    btype = block.get("type")
+                    if btype == "thinking":
+                        current_block_type = "thinking"
+                        current_text = ""
+                        safe_write({"type": "thinking_start"})
+                    elif btype == "text":
+                        current_block_type = "text"
+                        current_text = ""
+                        safe_write({"type": "text_start"})
+                elif etype == "content_block_delta":
+                    delta = ev.get("delta", {})
+                    if delta.get("type") == "thinking_delta":
+                        current_text += delta.get("thinking", "")
+                        safe_write({"type": "thinking_delta", "content": delta.get("thinking", "")})
+                    elif delta.get("type") == "text_delta":
+                        chunk = delta.get("text", "")
+                        current_text += chunk
+                        assistant_text += chunk
+                        safe_write({"type": "text_delta", "content": chunk})
+                elif etype == "content_block_stop":
+                    if current_block_type == "thinking":
+                        safe_write({"type": "thinking_end"})
+                        assistant_blocks.append({"type": "thinking", "content": current_text})
+                    elif current_block_type == "text":
+                        safe_write({"type": "text_end"})
+                        assistant_blocks.append({"type": "text", "content": current_text})
+                    current_block_type = None
 
-            for retry_attempt in range(max_retries + 1):
-                # Reset per-API-call state on each retry. If a stream partially
-                # succeeded before rate-limiting, any tool_results accumulated
-                # reference tool_use_ids from the aborted stream — replaying
-                # them alongside the retry's fresh tool_use_ids causes a 400.
-                current_block_type = None
-                current_tool_name = None
-                current_tool_id = None
-                current_tool_input_json = ""
-                tool_results = []
-                try:
-                    with _client().messages.stream(
-                        model=model,
-                        max_tokens=16000,
-                        system=turn_system_prompt,
-                        tools=TOOLS,
-                        messages=history,
-                        thinking={"type": "enabled", "budget_tokens": 5000},
-                    ) as stream:
-                        for event in stream:
-                            if is_cancelled() or disconnected:
-                                stream.close()
-                                break
+            elif isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock):
+                        display_name = block.name
+                        if display_name.startswith("mcp__plasmid-library__"):
+                            display_name = display_name.removeprefix("mcp__plasmid-library__")
+                        elif display_name.startswith("mcp__"):
+                            display_name = display_name.removeprefix("mcp__").replace("__", ":", 1)
+                        safe_write({"type": "tool_use_start", "tool": display_name})
+                        pending_tools.append((display_name, block.input or {}))
+                        if "export_construct" in block.name:
+                            export_called = True
 
-                            if event.type == "content_block_start":
-                                block = event.content_block
-                                if block.type == "thinking":
-                                    current_block_type = "thinking"
-                                    current_thinking_text = ""
-                                    safe_write({"type": "thinking_start"})
-                                elif block.type == "text":
-                                    current_block_type = "text"
-                                    current_text_content = ""
-                                    safe_write({"type": "text_start"})
-                                elif block.type == "tool_use":
-                                    current_block_type = "tool_use"
-                                    current_tool_name = block.name
-                                    current_tool_id = block.id
-                                    current_tool_input_json = ""
-                                    safe_write({"type": "tool_use_start", "tool": block.name})
+            elif isinstance(message, UserMessage):
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
+                        result_text = _tool_result_text(block.content) if block.content else ""
+                        tool_name, tool_input = (
+                            pending_tools.pop(0) if pending_tools else ("tool", {})
+                        )
+                        _emit_tool_result(
+                            tool_name, tool_input, result_text,
+                            safe_write=safe_write, session=session,
+                            assistant_blocks=assistant_blocks,
+                        )
 
-                            elif event.type == "content_block_delta":
-                                delta = event.delta
-                                if delta.type == "thinking_delta":
-                                    current_thinking_text += delta.thinking
-                                    safe_write({"type": "thinking_delta", "content": delta.thinking})
-                                elif delta.type == "text_delta":
-                                    assistant_text += delta.text
-                                    current_text_content += delta.text
-                                    safe_write({"type": "text_delta", "content": delta.text})
-                                elif delta.type == "input_json_delta":
-                                    current_tool_input_json += delta.partial_json
-
-                            elif event.type == "content_block_stop":
-                                if current_block_type == "thinking":
-                                    assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
-                                    safe_write({"type": "thinking_end"})
-                                elif current_block_type == "text":
-                                    assistant_blocks.append({"type": "text", "content": current_text_content})
-                                    safe_write({"type": "text_end"})
-                                elif current_block_type == "tool_use":
-                                    if is_cancelled() or disconnected:
-                                        break
-                                    tool_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
-                                    result_str = _dispatch_tool(current_tool_name, tool_input)
-                                    if current_tool_name == "export_construct":
-                                        export_called = True
-                                    _emit_tool_result(
-                                        current_tool_name, tool_input, result_str,
-                                        safe_write=safe_write, session=session,
-                                        assistant_blocks=assistant_blocks,
-                                    )
-                                    tool_results.append({
-                                        "type": "tool_result",
-                                        "tool_use_id": current_tool_id,
-                                        "content": result_str,
-                                    })
-                                current_block_type = None
-
-                            elif event.type == "message_delta":
-                                stop_reason = event.delta.stop_reason
-
-                        if is_cancelled() or disconnected:
-                            break
-
-                        final_message = stream.get_final_message()
-                        if final_message and hasattr(final_message, "usage"):
-                            safe_write({
-                                "type": "token_usage",
-                                "input_tokens": final_message.usage.input_tokens,
-                                "context_window": CONTEXT_WINDOW.get(model, 1_000_000),
-                            })
-                    break  # stream succeeded, leave retry loop
-
-                except (anthropic.RateLimitError, anthropic.InternalServerError) as e:
-                    if retry_attempt < max_retries:
-                        wait_time = 2 ** retry_attempt
-                        kind = "Rate limited" if isinstance(e, anthropic.RateLimitError) else "Server error"
-                        safe_write({"type": "text_delta", "content": f"\n[{kind}, retrying in {wait_time}s...]\n"})
-                        time.sleep(wait_time)
-                        continue
-                    safe_write({"type": "error", "content": f"{type(e).__name__} after retries. Please try again."})
-                    break
-                except Exception:
-                    if is_cancelled() or disconnected:
-                        break
-                    raise
-
-            if is_cancelled() or disconnected or final_message is None:
+            elif isinstance(message, ResultMessage):
+                if message.usage:
+                    u = message.usage if isinstance(message.usage, dict) else {}
+                    safe_write({
+                        "type": "token_usage",
+                        "input_tokens": u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0),
+                        "context_window": CONTEXT_WINDOW.get(model, 1_000_000),
+                    })
                 break
 
-            # Convert content blocks to plain dicts to strip extra SDK fields
-            # (e.g. parsed_output) that cause 400 errors on replay. Unknown
-            # block types are dropped — passing them through can fail when
-            # the SDK emits a new type we don't handle.
-            filtered_content = []
-            for b in final_message.content:
-                btype = getattr(b, "type", None)
-                if btype == "thinking":
-                    continue
-                if btype == "text":
-                    filtered_content.append({"type": "text", "text": b.text})
-                elif btype == "tool_use":
-                    filtered_content.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
-                else:
-                    logger.warning("Dropping unknown content block type from history: %s", btype or type(b).__name__)
-            history.append({"role": "assistant", "content": filtered_content})
-
-            if tool_results:
-                history.append({"role": "user", "content": tool_results})
-            else:
-                break
-
-            if stop_reason == "end_turn":
-                break
+    try:
+        future = asyncio.run_coroutine_threadsafe(_run_sdk_turn(), _sdk_loop)
+        future.result(timeout=300)
+    except Exception:
+        if not (is_cancelled() or disconnected):
+            logger.exception("SDK agent turn failed")
+            safe_write({"type": "error", "content": "Agent error — see server logs."})
     finally:
         set_tracker(None)
 
-    # Flush any in-progress block that was interrupted mid-stream
-    if current_text_content and not any(
-        b.get("type") == "text" and b.get("content") == current_text_content
-        for b in assistant_blocks
-    ):
-        assistant_blocks.append({"type": "text", "content": current_text_content})
-    if current_thinking_text and not any(
-        b.get("type") == "thinking" and b.get("content") == current_thinking_text
-        for b in assistant_blocks
-    ):
-        assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
-
-    # Append formatted references only when a sequence file was exported this turn
-    if export_called and not (is_cancelled() or disconnected):
-        refs_text = tracker.format_references()
-        if refs_text:
-            ref_block = f"\n\n{refs_text}"
-            assistant_text += ref_block
-            assistant_blocks.append({"type": "text", "content": ref_block})
-            safe_write({"type": "text_start"})
-            safe_write({"type": "text_delta", "content": ref_block})
-            safe_write({"type": "text_end"})
+    refs = tracker.format_references()
+    if refs:
+        safe_write({"type": "text_start"})
+        safe_write({"type": "text_delta", "content": f"\n\n{refs}"})
+        safe_write({"type": "text_end"})
+        assistant_text += f"\n\n{refs}"
+        assistant_blocks.append({"type": "text", "content": f"\n\n{refs}"})
 
     if assistant_text or assistant_blocks:
         session["display_messages"].append({
@@ -606,14 +611,12 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             "content": assistant_text,
             "blocks": assistant_blocks,
         })
-    elif is_cancelled() or disconnected:
-        # Remove dangling user message if no response was generated
-        if history and history[-1]["role"] == "user" and isinstance(history[-1].get("content"), str):
-            history.pop()
-            if session["display_messages"] and session["display_messages"][-1]["role"] == "user":
-                session["display_messages"].pop()
-
     _save_sessions()
+
+    plot = get_last_plot_json()
+    if export_called and plot:
+        safe_write({"type": "plot_data", "plot_json": json.loads(plot)})
+        clear_last_plot_json()
 
     if not disconnected:
         try:
@@ -1303,6 +1306,25 @@ function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// ── SDK client warmup ──
+let warmedUp = false;
+function warmup() {
+  if (warmedUp) return;
+  warmedUp = true;
+  fetch('/api/warmup', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: currentSessionId, model: modelSelect.value})
+  }).then(r => r.json()).then(function(data) {
+    if (!currentSessionId && data.session_id) {
+      saveSessionId(data.session_id);
+    }
+  }).catch(function() {});
+}
+inputEl.addEventListener('focus', warmup);
+modelSelect.addEventListener('change', function() { warmedUp = false; warmup(); });
+warmup();
+
 // ── Health check ──
 async function checkHealth() {
   try {
@@ -1345,6 +1367,7 @@ function renderSessions() {
 }
 
 async function selectSession(sessionId) {
+  warmedUp = false;
   // If streaming, stop the current generation before switching
   if (isStreaming) {
     stopGeneration();
@@ -1470,6 +1493,8 @@ function newChat() {
     inputEl.disabled = false;
   }
   saveSessionId(null);
+  warmedUp = false;
+  warmup();
   renderSessions();
   showWelcome();
   inputEl.focus();
@@ -1672,6 +1697,7 @@ let currentTextRaw = '';
 let currentThinkingId = null;
 let currentThinkingBody = null;
 let currentToolId = null;
+let pendingToolIds = [];
 // Pinned reference to the .messages-inner container for the active stream.
 // Ensures streaming writes go to the correct session even if the user
 // clicks a different session in the sidebar mid-stream.
@@ -1833,6 +1859,7 @@ function endTextBlock() {
 
 function startToolBlock(toolName) {
   currentToolId = 'tool-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
+  pendingToolIds.push(currentToolId);
   const div = document.createElement('div');
   div.className = 'tool-block';
   div.innerHTML = '<div class="block-card">' +
@@ -1890,10 +1917,11 @@ function addDownloadButton(container, content, filename) {
 }
 
 function finishToolBlock(toolName, toolInput, toolResult, downloadContent, downloadFilename) {
-  if (currentToolId) {
-    const pulse = document.getElementById(currentToolId + '-pulse');
+  var resolveId = pendingToolIds.length > 0 ? pendingToolIds.shift() : currentToolId;
+  if (resolveId) {
+    const pulse = document.getElementById(resolveId + '-pulse');
     if (pulse) pulse.remove();
-    const body = document.getElementById(currentToolId + '-body');
+    const body = document.getElementById(resolveId + '-body');
     if (body) {
       const inputStr = JSON.stringify(toolInput, null, 2);
       let html = '<div class="section"><div class="label">Input</div>' + escapeHtml(inputStr) + '</div>' +
@@ -1905,7 +1933,7 @@ function finishToolBlock(toolName, toolInput, toolResult, downloadContent, downl
   if (downloadContent && downloadFilename) {
     addDownloadButton(getInner(), downloadContent, downloadFilename);
   }
-  currentToolId = null;
+  currentToolId = pendingToolIds.length > 0 ? pendingToolIds[pendingToolIds.length - 1] : null;
   scrollToBottom();
 }
 
@@ -2838,6 +2866,17 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 daemon=True,
             ).start()
             self._send_json({"status": "ok"})
+
+        elif path == "/api/warmup":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            request_model = body.get("model", MODEL)
+            if request_model not in CONTEXT_WINDOW:
+                self._send_json({"error": "Invalid model"}, 400)
+                return
+            session_id = body.get("session_id") or create_session()
+            warmup_session(session_id, request_model)
+            self._send_json({"session_id": session_id})
 
         elif path == "/api/batch":
             content_length = int(self.headers.get("Content-Length", 0))

@@ -33,6 +33,8 @@ from .library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    annotate_plasmid as _annotate_plasmid,
+    swap_feature as _swap_feature,
     extract_insert_from_plasmid as _extract_insert_from_plasmid,
     extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
     infer_species_from_cell_line,
@@ -340,6 +342,140 @@ async def get_insert(args):
 
 
 @tool(
+    "find_sequence",
+    "Search for a short sequence (linker, junction, restriction site, etc.) within a plasmid or construct. "
+    "Returns every position where the query occurs, on either strand. "
+    "Use this to verify a linker or junction is present after a swap, instead of using assemble_construct.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {
+                "type": "string",
+                "description": "Full DNA sequence to search within, OR a sequence_cache_key.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Short DNA sequence to search for (e.g. a linker, restriction site, or junction).",
+            },
+        },
+        "required": ["plasmid_sequence", "query"],
+    },
+)
+async def find_sequence_tool(args):
+    import re as _re
+    plasmid_seq = args["plasmid_sequence"]
+    if plasmid_seq in _sequence_cache:
+        plasmid_seq = _sequence_cache[plasmid_seq]
+    plasmid_seq = _re.sub(r'\s', '', plasmid_seq.upper())
+    query = _re.sub(r'\s', '', args["query"].upper())
+
+    if len(query) < 4:
+        return _text("Query too short (minimum 4 bp).")
+
+    fwd_hits = [m.start() for m in _re.finditer(f'(?={query})', plasmid_seq)]
+    comp = str.maketrans("ACGTN", "TGCAN")
+    query_rc = query.translate(comp)[::-1]
+    rev_hits = [m.start() for m in _re.finditer(f'(?={query_rc})', plasmid_seq)]
+
+    if not fwd_hits and not rev_hits:
+        return _text(f"'{query}' ({len(query)} bp) not found in the sequence ({len(plasmid_seq)} bp).")
+
+    lines = [f"'{query}' ({len(query)} bp) in {len(plasmid_seq)} bp sequence:"]
+    for pos in fwd_hits:
+        lines.append(f"  [+] position {pos} (forward strand)")
+    if query_rc != query:
+        for pos in rev_hits:
+            lines.append(f"  [-] position {pos} (reverse strand)")
+    return _text("\n".join(lines))
+
+
+@tool(
+    "annotate_plasmid",
+    "Annotate a plasmid sequence with pLannotate and return all detected features. "
+    "Use this to understand the architecture of an unknown plasmid before attempting extractions or swaps — "
+    "it is far more efficient than calling extract_insert_from_plasmid repeatedly just to map the plasmid. "
+    "Returns each feature's name, type, coordinates (0-based, end exclusive), strand, length, and % identity.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {
+                "type": "string",
+                "description": "Full plasmid DNA sequence, OR a sequence_cache_key from fetch_addgene_sequence_with_metadata.",
+            },
+        },
+        "required": ["plasmid_sequence"],
+    },
+)
+async def annotate_plasmid_tool(args):
+    plasmid_seq = args["plasmid_sequence"]
+    if plasmid_seq in _sequence_cache:
+        plasmid_seq = _sequence_cache[plasmid_seq]
+    features = _annotate_plasmid(plasmid_seq)
+    if not features:
+        return _text("pLannotate found no features in the provided plasmid sequence.")
+    lines = [f"Plasmid features ({len(features)} total, coordinates 0-based, end exclusive):\n"]
+    for f in features:
+        strand_sym = "+" if f["strand"] >= 0 else "-"
+        span = f"{f['start']}..{f['end']}"
+        if f["origin_spanning"]:
+            span += " (origin-spanning)"
+        lines.append(
+            f"  [{strand_sym}] {f['name']}  |  {f['type']}  |  {span}  |  {f['length']} bp  |  {f['pct_identity']}% id"
+        )
+        if f["description"]:
+            lines.append(f"       {f['description']}")
+    return _text("\n".join(lines))
+
+
+@tool(
+    "swap_feature",
+    "Replace a named feature in a plasmid with a new sequence in a single operation. "
+    "Use this for promoter swaps, terminator swaps, or any CDS replacement. "
+    "Provide the replacement sequence in coding (5'→3' functional) orientation — orientation relative to the plasmid is handled automatically. "
+    "Returns the updated plasmid sequence. For multiple sequential swaps, pass the returned sequence directly into the next call — do not recompute coordinates manually.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {
+                "type": "string",
+                "description": "Full plasmid DNA sequence to modify, OR a sequence_cache_key.",
+            },
+            "feature_name": {
+                "type": "string",
+                "description": "Name of the feature to replace (case-insensitive, matched via pLannotate).",
+            },
+            "replacement_sequence": {
+                "type": "string",
+                "description": "New DNA sequence in coding/functional orientation (5'→3'). If the target feature is on the reverse strand, the tool will reverse-complement this sequence before insertion.",
+            },
+        },
+        "required": ["plasmid_sequence", "feature_name", "replacement_sequence"],
+    },
+)
+async def swap_feature_tool(args):
+    plasmid_seq = args["plasmid_sequence"]
+    if plasmid_seq in _sequence_cache:
+        plasmid_seq = _sequence_cache[plasmid_seq]
+    result = _swap_feature(
+        plasmid_sequence=plasmid_seq,
+        feature_name=args["feature_name"],
+        replacement_sequence=args["replacement_sequence"],
+    )
+    if "error" in result:
+        return _text(f"swap_feature failed: {result['error']}")
+    start, end = result["replaced_coords"]
+    strand_sym = "+" if result["replaced_strand"] >= 0 else "-"
+    cache_key = f"swap_{args['feature_name'].replace(' ', '_')}"
+    _sequence_cache[cache_key] = result["sequence"]
+    return _text(
+        f"Swapped '{result['replaced_feature']}' ({result['replaced_length']} bp, strand {strand_sym}) "
+        f"at {start}..{end} with {result['inserted_length']} bp replacement.\n"
+        f"Size delta: {result['size_delta']:+d} bp. New plasmid: {result['new_size']} bp.\n\n"
+        f"Updated plasmid sequence (cache key: {cache_key}):\n{result['sequence']}"
+    )
+
+
+@tool(
     "extract_insert_from_plasmid",
     "Extract a single CDS insert from a full plasmid sequence by name. Uses pLannotate to annotate the plasmid and locate the feature. Use this when an insert cannot be found in the local library or NCBI — for example, when the user provides a plasmid sequence or an Addgene plasmid has been fetched and contains the gene of interest.",
     {
@@ -368,21 +504,25 @@ async def extract_insert_from_plasmid_tool(args):
     if not result:
         return _text(f"Could not extract '{args['insert_name']}' from the provided plasmid sequence.")
     seq = result["sequence"]
+    coord_info = ""
+    if result.get("start") is not None and result.get("end") is not None:
+        coord_info = f"Coordinates: {result['start']}..{result['end']} (strand: {result.get('strand', 1)})\n"
     return _text(
         f"Extracted insert: {result['name']} ({result['size_bp']} bp)\n"
-        f"Source: {result['source']}\n\n"
-        f"DNA Sequence:\n{seq}"
+        f"Source: {result['source']}\n"
+        f"{coord_info}"
+        f"\nDNA Sequence:\n{seq}"
     )
 
 
 @tool(
     "extract_inserts_from_plasmid",
-    "Extract multiple named CDS inserts from a full plasmid sequence in a single pLannotate annotation pass. Use when you need to pull several genes out of the same plasmid.",
+    "Extract a contiguous region spanning multiple named features from a full plasmid sequence in a single pLannotate annotation pass. Returns the entire sequence from the start of the first feature to the end of the last. Use this when you need: (1) multiple CDS inserts from the same plasmid, (2) a regulatory region that spans an enhancer + promoter pair (e.g. ['CMV enhancer', 'CMV promoter'] to get the full CMV regulatory cassette), or (3) any named multi-feature region. The feature list should be ordered 5' to 3'.",
     {
         "type": "object",
         "properties": {
             "plasmid_sequence": {"type": "string", "description": "Full plasmid DNA sequence to search within, OR a sequence_cache_key returned by fetch_addgene_sequence_with_metadata."},
-            "insert_names": {"type": "array", "items": {"type": "string"}, "description": "List of gene/feature names to extract (case-insensitive)."},
+            "insert_names": {"type": "array", "items": {"type": "string"}, "description": "List of feature names ordered 5' to 3' (case-insensitive). For a promoter swap, include the enhancer first if present: e.g. ['CMV enhancer', 'CMV promoter']."},
         },
         "required": ["plasmid_sequence", "insert_names"],
     },
@@ -782,6 +922,12 @@ async def fetch_addgene_sequence_with_metadata(args):
     out = f"Addgene #{args['addgene_id']}: {plasmid.name}\n"
     out += f"Size: {plasmid.size_bp} bp\n"
     out += f"Resistance: {plasmid.bacterial_resistance}\n"
+    if plasmid.url:
+        out += f"Addgene page: {plasmid.url}\n"
+    if plasmid.article_doi:
+        out += f"Article DOI: https://doi.org/{plasmid.article_doi}\n"
+    if plasmid.pubmed_id:
+        out += f"PubMed: https://pubmed.ncbi.nlm.nih.gov/{plasmid.pubmed_id}/\n"
     if plasmid.sequence:
         _cache_sequence(cache_key, plasmid.sequence)
         out += (
@@ -1561,6 +1707,9 @@ ALL_TOOLS = [
     fetch_gene_tool,
     get_cell_line_info_tool,
     fuse_inserts_tool,
+    find_sequence_tool,
+    annotate_plasmid_tool,
+    swap_feature_tool,
     extract_insert_from_plasmid_tool,
     extract_inserts_from_plasmid_tool,
     # Phase-2 advanced design tools

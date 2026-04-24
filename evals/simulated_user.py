@@ -33,7 +33,7 @@ class SimulatedUser:
     def __init__(
         self,
         persona: str,
-        model: str = "claude-haiku-4-5-20251001",
+        model: str = "claude-opus-4-6",
     ):
         self.persona = persona
         self.model = model
@@ -78,7 +78,7 @@ class SimulatedUser:
 
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=256,
+            max_tokens=8000,
             system=self.system_prompt,
             messages=messages,
         )

@@ -112,10 +112,11 @@ _sessions_lock = threading.Lock()
 _batch_jobs: dict[str, dict] = {}
 SESSIONS_FILE = Path(__file__).parent / ".sessions.json"
 
-MODEL = "claude-opus-4-6"
+MODEL = "claude-opus-4-7"
 
 # Context window sizes by model (tokens)
 CONTEXT_WINDOW = {
+    "claude-opus-4-7":          1_000_000,
     "claude-opus-4-6":          1_000_000,
     "claude-sonnet-4-6":        1_000_000,
     "claude-haiku-4-5-20251001":  200_000,
@@ -140,9 +141,13 @@ def _serialize_content(content):
                 d = b
             else:
                 continue
-            # Skip thinking blocks — they cause Error 400 on replay
+            # Preserve thinking blocks that carry a signature (Opus 4.7
+            # adaptive thinking) — they must be replayed in multi-turn history.
+            # Strip unsigned thinking blocks (Opus 4.6 and older) which cause
+            # 400 errors on replay.
             if isinstance(d, dict) and d.get("type") == "thinking":
-                continue
+                if not d.get("signature"):
+                    continue
             serialized.append(d)
         return serialized
     return content
@@ -448,15 +453,21 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                 current_tool_name = None
                 current_tool_id = None
                 current_tool_input_json = ""
+                thinking_block_emitted = False
                 tool_results = []
                 try:
+                    thinking_config = (
+                        {"type": "adaptive"}
+                        if model.startswith("claude-opus-4-7")
+                        else {"type": "enabled", "budget_tokens": 5000}
+                    )
                     with _client().messages.stream(
                         model=model,
                         max_tokens=16000,
                         system=turn_system_prompt,
                         tools=TOOLS,
                         messages=history,
-                        thinking={"type": "enabled", "budget_tokens": 5000},
+                        thinking=thinking_config,
                     ) as stream:
                         for event in stream:
                             if is_cancelled() or disconnected:
@@ -468,7 +479,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                                 if block.type == "thinking":
                                     current_block_type = "thinking"
                                     current_thinking_text = ""
-                                    safe_write({"type": "thinking_start"})
+                                    thinking_block_emitted = False
                                 elif block.type == "text":
                                     current_block_type = "text"
                                     current_text_content = ""
@@ -484,6 +495,9 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                                 delta = event.delta
                                 if delta.type == "thinking_delta":
                                     current_thinking_text += delta.thinking
+                                    if not thinking_block_emitted:
+                                        safe_write({"type": "thinking_start"})
+                                        thinking_block_emitted = True
                                     safe_write({"type": "thinking_delta", "content": delta.thinking})
                                 elif delta.type == "text_delta":
                                     assistant_text += delta.text
@@ -495,7 +509,8 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                             elif event.type == "content_block_stop":
                                 if current_block_type == "thinking":
                                     assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
-                                    safe_write({"type": "thinking_end"})
+                                    if thinking_block_emitted:
+                                        safe_write({"type": "thinking_end"})
                                 elif current_block_type == "text":
                                     assistant_blocks.append({"type": "text", "content": current_text_content})
                                     safe_write({"type": "text_end"})
@@ -558,6 +573,16 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             for b in final_message.content:
                 btype = getattr(b, "type", None)
                 if btype == "thinking":
+                    # Opus 4.7 adaptive thinking requires thinking blocks with
+                    # signatures to be preserved in multi-turn history.
+                    # Stripping them causes the model to lose reasoning context
+                    # and produce inconsistent tool_use/tool_result sequences.
+                    if model.startswith("claude-opus-4-7"):
+                        filtered_content.append({
+                            "type": "thinking",
+                            "thinking": b.thinking,
+                            "signature": b.signature,
+                        })
                     continue
                 if btype == "text":
                     filtered_content.append({"type": "text", "text": b.text})
@@ -1212,6 +1237,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           oninput="autoResize(this)"></textarea>
         <div class="input-meta">
           <select id="model-select" class="model-select">
+            <option value="claude-opus-4-7">Opus 4.7</option>
             <option value="claude-opus-4-6">Opus 4.6</option>
             <option value="claude-sonnet-4-6">Sonnet 4.6</option>
             <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>

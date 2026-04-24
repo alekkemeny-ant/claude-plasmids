@@ -58,7 +58,7 @@ Every nucleotide in the output comes from a verified source (library JSON, Addge
 
 ## Model
 
-`claude-opus-4-6` — used in both the web UI agent loop and agent evals.
+`claude-opus-4-7` — used in both the web UI agent loop and agent evals.
 
 ## Dependencies
 

@@ -42,17 +42,24 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import anthropic
 
-from claude_agent_sdk import (
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    AssistantMessage,
-    UserMessage,
-    ResultMessage,
-    StreamEvent,
-    ToolUseBlock,
-    ToolResultBlock,
-    PermissionResultAllow,
-)
+_SDK_MIN = "0.1.63"
+try:
+    from claude_agent_sdk import (
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        AssistantMessage,
+        UserMessage,
+        ResultMessage,
+        StreamEvent,
+        ToolUseBlock,
+        ToolResultBlock,
+        PermissionResultAllow,
+    )
+except ImportError as e:
+    raise SystemExit(
+        f"claude-agent-sdk>={_SDK_MIN} required (got: {e}).\n"
+        f"Run: pip install -r requirements.txt"
+    ) from e
 from src.tools import (
     build_mcp_servers,
     get_anthropic_tool_schemas,

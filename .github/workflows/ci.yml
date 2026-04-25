@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, modular_parts_swap]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          environment-file: environment.yml
+          activate-environment: claude-plasmids
+          auto-activate-base: false
+
+      - name: Import smoke test
+        run: |
+          python -c "from claude_agent_sdk import StreamEvent, ClaudeSDKClient"
+          python -c "import src.tools; import src.assembler; import src.library"
+          python -c "import evals.run_agent_evals"
+
+      - name: Unit tests
+        run: pytest tests/ -v -m "not slow" --ignore=tests/test_annotation.py
+        env:
+          PLASMID_ENABLE_PUBMED: "0"
+
+  agent-evals:
+    if: contains(github.event.pull_request.labels.*.name, 'run-evals')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          environment-file: environment.yml
+          activate-environment: claude-plasmids
+          auto-activate-base: false
+      - name: Run agent evals
+        run: python -m evals.run_agent_evals --json
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PLASMID_ENABLE_PUBMED: "0"

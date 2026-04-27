@@ -1,5 +1,78 @@
-# Plasmid Designer
+# Plasmid Designer -- Nautilex 
 
+## Hackathon Brief
+
+**Plasmid Designer** is a Claude-native agentic tool for designing expression plasmids, built as a collaboration between Anthropic and the Allen Institute. You'll be hacking on the `nautilex` branch of the `claude-plasmids` repo.
+
+---
+
+### What It Does
+
+Tell it what you want in plain English — the agent figures out the rest:
+
+```
+"Put EGFP into pcDNA3.1(+)"
+"Design a plasmid to express human TP53 in HEK293 cells"
+"Add an N-terminal FLAG tag to EGFP in pcDNA3.1(+)"
+```
+
+Claude handles orchestration: understanding intent, selecting tools, retrieving sequences, and validating results. All sequence operations are **deterministic** — no LLM ever generates DNA. Every nucleotide in the output comes from a verified source (curated library, Addgene, or NCBI GenBank).
+
+---
+
+### Requirements
+- [conda](https://docs.conda.io/en/latest/miniconda.html)
+- Anthropic API key
+  - Contact Mialy DeFelice for a Nautilex Anthropic API key. This key will be available during the hackathon and disabled afterward.
+- Laptop
+- You can develop from Terminal, VSCode or your preferred IDE.
+  
+See below for full setup instructions.
+---
+
+### How a Request Flows
+
+1. **User input** — natural language description of the desired construct
+2. **Sequence retrieval** — checks local library first, then auto-fetches from Addgene or NCBI if needed
+3. **Assembly** — deterministic string splicing into the backbone's MCS
+4. **Validation** — rubric-based checks (insert intact, correct orientation, reading frame, start/stop codons, promoter/polyA placement)
+5. **Export** — raw sequence, FASTA, or annotated GenBank; downloadable from the browser
+
+---
+
+### Key Capabilities
+
+| Feature | Description |
+|---|---|
+| **Library** | 21 curated backbones (pcDNA3.1, pUC19, pEGFP-N1, pAAV-CMV, and more) + fluorescent proteins, reporters, epitope tags |
+| **User Library**  | Ability to upload your own user library and metadata, that loads at runtime and is not saved to the main library|
+| **Addgene integration** | Auto-fetches and caches any plasmid not in the local library |
+| **NCBI gene retrieval** | Fetches CDS sequences by gene name, with species and family disambiguation |
+| **Protein fusions** | N- and C-terminal tag and fusions (e.g. FLAG-EGFP, mCherry-HA) with automatic start/stop codon management, default linkers.|
+| **Plasmid Assembly**  | Agents can assembly vectors to users specifications. The agents can determine the backbone direction and update the insert orientation as needed.  |
+| **Multiple Cloning Site Detection**  | If the location of the MCS is not specified in the data, the program can locate the MCS and the MCS orientation  |
+| **Golden Gate Aseembly**  | Can assemble backbones and parts for golden gate assembly, taking care to extract inserts from the vectors they are contained in, maintain overhangs, and extract dropouts from the intended backbone vectors  |
+| **Natural language backbone selection** | Agent infers backbone from context (organism, promoter type, selection marker) |
+| **MCP server** | 18 tools exposed for Claude to call, usable standalone or via the agent loop |
+| **
+
+---
+
+### Where to Start Hacking
+
+We are looking to determine how users _want_ to interact with a Plasmid Designer tool. 
+Start asking the designer questions and looking at the output. Note any issues with plasmids designs. 
+
+
+If you are computationally inclined, you can also start hacking into the code to fix the outputs.
+
+
+**Good Luck, and Have Fun!!**
+
+
+
+-------------------
+# About
 A Claude-native agentic tool for designing expression plasmids. Built as a collaboration between Anthropic and the Allen Institute.
 
 The tool takes a backbone vector, insert gene, and optional parameters as input, and outputs a complete, validated plasmid construct sequence. Claude handles orchestration (understanding user intent, selecting tools, validating results) while all sequence operations are deterministic — no LLM ever generates DNA.

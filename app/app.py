@@ -1893,18 +1893,17 @@ function addPlasmidPlot(plotJson) {
 }
 
 function addDownloadButton(container, content, filename) {
-  const dlId = 'dl-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
   const div = document.createElement('div');
   div.className = 'msg assistant';
   div.innerHTML = '<div class="msg-bubble-assistant" style="margin-top:8px">' +
-    '<button class="download-btn" id="' + dlId + '">' +
+    '<button class="download-btn">' +
       '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">' +
         '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>' +
       '</svg>' +
       ' Download ' + escapeHtml(filename) +
     '</button></div>';
   container.appendChild(div);
-  document.getElementById(dlId).addEventListener('click', function() {
+  div.querySelector('.download-btn').addEventListener('click', function() {
     const blob = new Blob([content], {type: 'application/octet-stream'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

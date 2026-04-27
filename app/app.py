@@ -47,6 +47,7 @@ from src.tools import (
     get_tool_dispatch,
     set_tracker,
     get_last_plot_json,
+    get_plot_skipped_reason,
     clear_last_plot_json,
 )
 from src.references import ReferenceTracker
@@ -373,9 +374,12 @@ def _emit_tool_result(
         ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
         event_data["download_filename"] = cname + ext
     safe_write(event_data)
-    plot = get_last_plot_json()
-    if tool_name == "export_construct" and plot:
-        safe_write({"type": "plot_data", "plot_json": json.loads(plot)})
+    if tool_name == "export_construct":
+        plot = get_last_plot_json()
+        if plot:
+            safe_write({"type": "plot_data", "plot_json": json.loads(plot)})
+        elif reason := get_plot_skipped_reason():
+            safe_write({"type": "plot_skipped", "reason": reason})
         clear_last_plot_json()
     assistant_blocks.append({
         "type": "tool_use",
@@ -1850,6 +1854,17 @@ function startToolBlock(toolName) {
   scrollToBottom();
 }
 
+function addPlotSkipped(reason) {
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.innerHTML = '<div class="msg-bubble-assistant" style="margin-top:8px;padding:12px;background:#fff8f0;border-left:3px solid #e8a23c;">' +
+    '<div style="font-size:11px;font-weight:600;color:#a86a1d;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Plasmid map skipped</div>' +
+    '<div style="font-size:13px;color:#6b4a1a;">' + escapeHtml(reason) + '</div>' +
+  '</div>';
+  getInner().appendChild(div);
+  scrollToBottom();
+}
+
 function addPlasmidPlot(plotJson) {
   var bokehItem = plotJson.plot !== undefined ? plotJson.plot : plotJson;
   var isLinear = plotJson.linear === true;
@@ -1982,6 +1997,7 @@ async function sendMessage() {
           case 'tool_use_start': clearPendingCursor(); startToolBlock(event.tool); break;
           case 'tool_result': finishToolBlock(event.tool, event.input || {}, event.content, event.download_content, event.download_filename); break;
           case 'plot_data': addPlasmidPlot(event.plot_json); break;
+          case 'plot_skipped': addPlotSkipped(event.reason); break;
           case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
           case 'error':
             clearPendingCursor();

@@ -1268,7 +1268,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
 <script>
 // ── State ──
-let currentSessionId = sessionStorage.getItem('plasmid_session_id') || null;
+let currentSessionId = localStorage.getItem('plasmid_session_id') || null;
 let sessions = [];
 let isStreaming = false;
 let abortController = null;
@@ -1293,9 +1293,9 @@ function updateTokenIndicator(inputTokens, contextWindow) {
 function saveSessionId(id) {
   currentSessionId = id;
   if (id) {
-    sessionStorage.setItem('plasmid_session_id', id);
+    localStorage.setItem('plasmid_session_id', id);
   } else {
-    sessionStorage.removeItem('plasmid_session_id');
+    localStorage.removeItem('plasmid_session_id');
   }
 }
 

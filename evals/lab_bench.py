@@ -24,15 +24,20 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from claude_agent_sdk import (  # noqa: E402
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    PermissionResultAllow,
-    ResultMessage,
-    TextBlock,
-)
-from datasets import load_dataset  # noqa: E402
+try:
+    from claude_agent_sdk import (  # noqa: E402
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        PermissionResultAllow,
+        ResultMessage,
+        TextBlock,
+    )
+    from datasets import load_dataset  # noqa: E402
+except ImportError as e:
+    raise SystemExit(
+        f"Missing dependency ({e}).\nRun: pip install -r requirements.txt"
+    ) from e
 
 from src.tools import build_mcp_servers  # noqa: E402
 

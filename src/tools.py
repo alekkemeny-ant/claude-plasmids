@@ -190,15 +190,26 @@ def _get_cached_sequence(key: str) -> Optional[str]:
 # a plot_data SSE event after the export tool result. Same pattern as
 # set_tracker/get_tracker — caller clears before run, reads after.
 _last_plot_json: Optional[str] = None
+_plot_skipped_reason: Optional[str] = None
 
 
 def get_last_plot_json() -> Optional[str]:
     return _last_plot_json
 
 
+def get_plot_skipped_reason() -> Optional[str]:
+    return _plot_skipped_reason
+
+
+def set_plot_skipped_reason(reason: Optional[str]) -> None:
+    global _plot_skipped_reason
+    _plot_skipped_reason = reason
+
+
 def clear_last_plot_json() -> None:
-    global _last_plot_json
+    global _last_plot_json, _plot_skipped_reason
     _last_plot_json = None
+    _plot_skipped_reason = None
 
 
 def _error(s: str) -> dict:
@@ -762,8 +773,14 @@ async def export_construct(args):
                     )
                     _last_plot_json = plot_json
                     return _text(gbk)
-                except Exception:
-                    pass  # fall through to non-plot path
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    set_plot_skipped_reason(f"{type(e).__name__}: {e}")
+            else:
+                set_plot_skipped_reason(
+                    "pLannotate not available — install via conda and run `plannotate setupdb`"
+                )
             result = await asyncio.to_thread(
                 format_as_genbank,
                 sequence=seq, name=cname, backbone_name=bname,

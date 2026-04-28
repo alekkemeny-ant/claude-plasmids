@@ -1556,13 +1556,14 @@ AGENT_CASES = [
         description=(
             "Multi-turn parts-swap eval. Agent must: (1) fetch and annotate Addgene #17448, "
             "(2) attempt to fetch #73032 — which is unavailable — then ask the user for the "
-            "sequence, (3) receive the source sequence from the simulated user, (4) extract "
-            "the EF1s-Nluc-P2A-copGFP-T2A-Puro cassette, (5) use swap_feature to replace "
-            "the CMV-GFP cassette, staying within pLannotate-annotated boundaries only, and "
-            "(6) flag that the final construct contains two Puromycin resistance genes "
-            "(backbone #17448 already has Puro; the new cassette adds a second). "
-            "The 'duplicate puromycin' assertion is intentionally failing until "
-            "validate_construct gains a duplicate-selection-marker check."
+            "sequence, (3) receive the source sequence from the simulated user, (4) before "
+            "assembling, detect that backbone #17448 already contains Puro and the new cassette "
+            "also adds Puro — then ask the user to confirm whether to proceed, (5) receive "
+            "confirmation from the user to proceed anyway, (6) extract the EF1s-Nluc-P2A-copGFP-"
+            "T2A-Puro cassette, (7) use swap_feature to replace the CMV-GFP cassette, staying "
+            "within pLannotate-annotated boundaries only, and (8) flag the duplicate Puromycin "
+            "in the final construct via check_duplicate_features or equivalent post-assembly "
+            "validation."
         ),
         # Bookkeeping only — not used for sequence scoring (grading_mode=transcript)
         expected_backbone_id="addgene_17448",
@@ -1575,13 +1576,17 @@ AGENT_CASES = [
             "nLuc",                   # agent identified the NanoLuc reporter
             "annotation",             # agent ran annotate_plasmid
             "swap",                   # agent called / described swap_feature
-            # ── intentionally failing until validate_construct gains duplicate-marker check ──
-            "duplicate puromycin",    # agent must flag backbone + new cassette both carry Puro
+            "puromycin",              # agent flagged duplicate Puro pre-assembly (pre-check)
+            "duplicate",              # agent reported duplicate element post-assembly
         ],
         tools_should_not_use=["assemble_construct"],
         user_persona=(
             "You are a molecular biologist. You want an annotation-driven swap only — "
             "do not extend beyond pLannotate-annotated boundaries under any circumstances.\n\n"
+            "If the agent warns you that the backbone (#17448) already contains a Puromycin "
+            "resistance gene and that adding the new cassette will result in two Puro markers, "
+            "confirm that you want to proceed anyway. Say something like: 'Yes, I understand "
+            "there will be two Puromycin resistance genes — please proceed with the swap anyway.'\n\n"
             "If the agent cannot find Addgene plasmid #73032 or asks for the sequence of "
             "the source plasmid containing EF1s-Nluc-P2A-copGFP-T2A-Puro, provide this "
             "sequence:\n\n"

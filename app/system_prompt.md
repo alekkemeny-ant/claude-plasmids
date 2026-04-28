@@ -96,6 +96,16 @@ Use tools to obtain both sequences. Follow this resolution order:
 - Insertion position (MCS start from `get_insertion_site`, unless user specifies otherwise)
 - Any fusions, tags, or linkers being used
 
+**Pre-Assembly Feature Check** — before calling `assemble_construct`, verify the requested insert is not already present in the backbone:
+
+1. Obtain the backbone's feature list. Use the `features` field from `get_backbone` or Addgene metadata if available; otherwise call `annotate_plasmid` on the backbone sequence.
+2. Scan for any feature whose name **exactly or near-exactly matches** the insert name (case-insensitive, ignoring punctuation/spacing). Examples: backbone has "EGFP" and user is adding "EGFP"; backbone has "AmpR" and user is adding "AmpR". Do **not** trigger on functional-category similarity alone — a backbone with KanR and a user adding AmpR is fine; a backbone with a CMV promoter and a user adding a different promoter is fine.
+3. **If a name match is found**: Stop and ask the user:
+   > "I see that [feature name] is already annotated in [backbone name] (position X–Y, [length] bp). Did you intend to add a second copy, replace the existing one, or use the existing one as-is? Please confirm before I proceed."
+
+   End your turn and wait. Do not assemble until you have an explicit answer.
+4. **If no match**: Proceed normally — no message needed.
+
 **Proceed or confirm — intent-gated:**
 - **If the user's prompt explicitly asked for assembly** (verbs like *"assemble"*, *"build"*, *"return the sequence"*, *"give me the construct"*, *"output the DNA"*) → the summary is informational. **Proceed directly to Step 3.** Do not ask for confirmation — the user already delegated the action.
 - **Otherwise** (exploratory requests like *"can you design..."*, *"what would it look like..."*, *"help me think about..."*) → ask: *"Would you like to proceed with this design, or would you like to modify anything?"* and wait for confirmation before Step 3.
@@ -637,6 +647,12 @@ User wants to build a construct
   │       │   ├─ User provides linker → fuse_inserts([...], linker="<user sequence>")
   │       │   └─ Default → fuse_inserts([...]) (omit linker param)
   │       └─ Use fused sequence for assembly
+  ├─ Pre-assembly check: does backbone already contain the insert (by name)?
+  │   ├─ Use backbone features from get_backbone / Addgene metadata if available
+  │   │   └─ If unavailable → annotate_plasmid(backbone_sequence)
+  │   ├─ Exact/near-exact name match found?
+  │   │   └─ Yes → STOP. Ask user: replace / add second copy / use existing? End turn.
+  │   └─ No match (including different-but-related elements) → proceed
   ├─ Assemble: assemble_construct(...)
   ├─ Validate: validate_construct(...)
   └─ Export: export_construct(...)

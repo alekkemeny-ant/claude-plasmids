@@ -34,6 +34,7 @@ from .library import (
     format_backbone_summary,
     format_insert_summary,
     annotate_plasmid as _annotate_plasmid,
+    find_duplicate_annotations as _find_duplicate_annotations,
     swap_feature as _swap_feature,
     extract_insert_from_plasmid as _extract_insert_from_plasmid,
     extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
@@ -424,6 +425,60 @@ async def annotate_plasmid_tool(args):
         )
         if f["description"]:
             lines.append(f"       {f['description']}")
+    return _text("\n".join(lines))
+
+
+@tool(
+    "check_duplicate_features",
+    "Check a plasmid sequence for duplicate functional elements using pLannotate. "
+    "Flags any CDS, promoter, or replication origin that appears more than once — "
+    "e.g. two copies of the same fluorescent protein, two antibiotic resistance genes, "
+    "or two promoters of the same type. Run this after assembly and before export to "
+    "catch accidental duplications. Returns PASS if no duplicates, FAIL with details otherwise.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {
+                "type": "string",
+                "description": "Full plasmid DNA sequence, OR a sequence_cache_key from fetch_addgene_sequence_with_metadata.",
+            },
+        },
+        "required": ["plasmid_sequence"],
+    },
+)
+async def check_duplicate_features_tool(args):
+    plasmid_seq = args["plasmid_sequence"]
+    if plasmid_seq in _sequence_cache:
+        plasmid_seq = _sequence_cache[plasmid_seq]
+
+    features = _annotate_plasmid(plasmid_seq)
+    if not features:
+        return _text("pLannotate found no features — cannot check for duplicates.")
+
+    duplicates = _find_duplicate_annotations(features)
+
+    if not duplicates:
+        return _text(
+            f"PASS — no duplicate features detected "
+            f"({len(features)} features annotated)."
+        )
+
+    lines = [
+        f"FAIL — {len(duplicates)} duplicate functional element(s) detected:\n"
+    ]
+    for d in duplicates:
+        lines.append(f"  {d['name']} ({d['type']}) — appears {d['count']} times:")
+        for inst in d["instances"]:
+            strand = "+" if inst["strand"] >= 0 else "-"
+            span = f"{inst['start']}..{inst['end']}"
+            if inst.get("origin_spanning"):
+                span += " (origin-spanning)"
+            lines.append(
+                f"    [{strand}] {span}  {inst['length']} bp  {inst['pct_identity']}% id"
+            )
+    lines.append(
+        "\nThis construct contains duplicate elements and must be redesigned."
+    )
     return _text("\n".join(lines))
 
 
@@ -1709,6 +1764,7 @@ ALL_TOOLS = [
     fuse_inserts_tool,
     find_sequence_tool,
     annotate_plasmid_tool,
+    check_duplicate_features_tool,
     swap_feature_tool,
     extract_insert_from_plasmid_tool,
     extract_inserts_from_plasmid_tool,

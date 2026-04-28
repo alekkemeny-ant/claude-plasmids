@@ -1050,6 +1050,53 @@ def annotate_plasmid(plasmid_sequence: str) -> list[dict]:
     return features
 
 
+def find_duplicate_annotations(
+    features: list[dict],
+    min_length: int = 100,
+    min_pct_identity: float = 90.0,
+) -> list[dict]:
+    """Return feature groups that appear more than once in a pLannotate result.
+
+    Only considers functional feature types (CDS, promoter, rep_origin, etc.)
+    that are long enough and identity-matched enough to be unambiguous — this
+    avoids false positives from short repeated regulatory sequences (e.g. LoxP).
+
+    Each returned dict has:
+      name:      canonical feature name (str)
+      type:      feature type (str)
+      count:     number of occurrences (int)
+      instances: list of individual feature dicts from annotate_plasmid()
+    """
+    from collections import defaultdict
+
+    # LTR is intentionally duplicated in retroviral/lentiviral vectors — not a design error.
+    # misc_feature is too broad to flag reliably.
+    CHECKED_TYPES = {"CDS", "promoter", "rep_origin", "terminator", "polyA_signal"}
+
+    candidates = [
+        f for f in features
+        if (f.get("length", 0) >= min_length
+            and f.get("pct_identity", 0) >= min_pct_identity
+            and f.get("type", "") in CHECKED_TYPES)
+    ]
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for f in candidates:
+        groups[f["name"].strip().lower()].append(f)
+
+    duplicates = [
+        {
+            "name": instances[0]["name"],
+            "type": instances[0]["type"],
+            "count": len(instances),
+            "instances": instances,
+        }
+        for instances in groups.values()
+        if len(instances) >= 2
+    ]
+    return sorted(duplicates, key=lambda d: d["name"].lower())
+
+
 def swap_feature(
     plasmid_sequence: str,
     feature_name: str,

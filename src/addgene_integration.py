@@ -288,7 +288,7 @@ class AddgeneClient:
             gene_insert=data.get("inserts")[0].get("name") if data.get("inserts") else None,
             pubmed_id=data.get("article", {}).get("pubmed_id"),
             article_doi=data.get("article", {}).get("doi"),
-            sequence=data.get("sequences", {}).get("public_addgene_full_sequences", [{}])[0].get("sequence"),
+            sequence=next(iter(data.get("sequences", {}).get("public_addgene_full_sequences", [])), {}).get("sequence"),
             url=f"{self.BASE_URL}/{data.get('id', '')}/" ,
         )
     

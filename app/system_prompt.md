@@ -328,6 +328,7 @@ Ask the user which enzyme they are using, or read it from the backbone metadata 
 - **Esp3I / BsmBI** (CGTCTC) — Allen Institute modular system
 - **BsaI** (GGTCTC) — Level 0/1 MoClo
 - **BbsI** (GAAGAC) — some Golden Gate kits
+- **PaqCI** (CACCTGC) — high-fidelity Golden Gate (NEB)
 
 **Step 2 — Confirm the backbone**
 Use `get_backbone` to retrieve the vector. Confirm it contains the correct enzyme recognition sites and has a dropout cassette (negative selection). The backbone's `assembly_enzyme` field should match the chosen enzyme.

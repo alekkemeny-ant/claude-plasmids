@@ -8,10 +8,6 @@ dependencies:
   - pip
   # pLannotate and its bioinformatics dependencies (conda-only)
   - plannotate
-  # pip-installable packages
+  # pip-installable packages — single source of truth is requirements.txt
   - pip:
-    - anthropic>=0.40.0
-    - python-dotenv>=1.0.0
-    - requests>=2.31.0
-    - pytest>=8.0.0
-    - biopython>=1.83
+    - -r requirements.txt

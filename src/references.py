@@ -23,6 +23,7 @@ class Reference:
     url: Optional[str] = None
     organism: Optional[str] = None
     accession: Optional[str] = None  # GenBank/RefSeq accession
+    doi: Optional[str] = None
     pubmed_id: Optional[str] = None
     article_title: Optional[str] = None
     depositor: Optional[str] = None
@@ -135,6 +136,7 @@ class ReferenceTracker:
             component_type="backbone",
             url=url,
             depositor=plasmid.get("depositor"),
+            doi=plasmid.get("article_doi") or plasmid.get("doi"),
             pubmed_id=plasmid.get("pubmed_id"),
             article_title=plasmid.get("article_title"),
         ))
@@ -214,6 +216,45 @@ class ReferenceTracker:
             parts[0] += " — User-provided sequence"
 
         return "\n".join(parts)
+
+    def format_genbank_comment(self) -> str:
+        """Return a multi-line provenance block for the GenBank COMMENT field.
+
+        Lists every component source with catalog IDs, URLs, and DOIs
+        so the exported file is self-documenting for publications.
+        """
+        if not self._references:
+            return ""
+
+        lines: list[str] = ["Construct provenance:"]
+        for ref in self._references:
+            role = ref.component_type.capitalize()
+            entry = f"  {role}: {ref.name}"
+
+            if ref.source == "addgene":
+                entry += f" (Addgene #{ref.identifier})"
+            elif ref.source == "ncbi" and ref.accession:
+                entry += f" ({ref.accession})"
+
+            if ref.organism:
+                entry += f" [{ref.organism}]"
+
+            if ref.doi:
+                entry += f"\n    DOI: https://doi.org/{ref.doi}"
+            if ref.pubmed_id:
+                entry += f"\n    PubMed: https://pubmed.ncbi.nlm.nih.gov/{ref.pubmed_id}/"
+            if ref.article_title:
+                entry += f'\n    Article: "{ref.article_title}"'
+
+            if ref.url:
+                entry += f"\n    URL: {ref.url}"
+
+            if ref.depositor:
+                entry += f"\n    Depositor: {ref.depositor}"
+
+            lines.append(entry)
+
+        return "\n".join(lines)
 
     def to_list(self) -> list[dict]:
         """Return references as a list of plain dicts."""

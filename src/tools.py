@@ -750,6 +750,9 @@ async def export_construct(args):
             global _last_plot_json
             _last_plot_json = None
             linear = bool(args.get("linear", False))
+            # Build provenance comment from the reference tracker
+            tracker = get_tracker()
+            comment = tracker.format_genbank_comment() if tracker else ""
             # export_genbank_with_plot requires pLannotate (conda-only). Fall
             # back to plain format_as_genbank (no plot) if unavailable.
             if PLOT_EXPORT_AVAILABLE:
@@ -758,7 +761,7 @@ async def export_construct(args):
                         _export_genbank_with_plot,
                         sequence=seq, name=cname, backbone_name=bname,
                         insert_name=iname, insert_position=ipos,
-                        insert_length=ilen, linear=linear,
+                        insert_length=ilen, linear=linear, comment=comment,
                     )
                     _last_plot_json = plot_json
                     return _text(gbk)
@@ -768,7 +771,7 @@ async def export_construct(args):
                 format_as_genbank,
                 sequence=seq, name=cname, backbone_name=bname,
                 insert_name=iname, insert_position=ipos, insert_length=ilen,
-                reverse_complement_insert=rc_insert,
+                reverse_complement_insert=rc_insert, comment=comment,
             )
             return _text(result)
         else:

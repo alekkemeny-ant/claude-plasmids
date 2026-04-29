@@ -335,6 +335,7 @@ class TestToList:
         d = tracker.to_list()[0]
         expected_keys = {
             "source", "identifier", "name", "component_type", "url",
-            "organism", "accession", "pubmed_id", "article_title", "depositor",
+            "organism", "accession", "doi", "pubmed_id", "article_title",
+            "depositor",
         }
         assert set(d.keys()) == expected_keys

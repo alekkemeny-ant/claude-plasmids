@@ -1108,6 +1108,7 @@ def _build_annotated_record(
     insert_length: int,
     reverse_complement_insert: bool,
     linear: bool = False,
+    comment: str = "",
 ):
     """Build a BioPython SeqRecord from a pLannotate df, adding the insert feature if needed."""
     if not _PLANNOTATE_AVAILABLE:
@@ -1115,6 +1116,8 @@ def _build_annotated_record(
     record = get_seq_record(df, sequence, is_linear=linear)
     record.annotations["molecule_type"] = "DNA"
     record.annotations["topology"] = "linear" if linear else "circular"
+    if comment:
+        record.annotations["comment"] = comment
 
     locus_name = re.sub(r'[^A-Za-z0-9_\-]', '_', name)[:16]
     record.name = locus_name
@@ -1152,6 +1155,7 @@ def format_as_genbank(
     reverse_complement_insert: bool = False,
     features: Optional[list[dict]] = None,
     linear: bool = False,
+    comment: str = "",
 ) -> str:
     """Format an assembled construct as a GenBank flat file.
 
@@ -1164,8 +1168,9 @@ def format_as_genbank(
             sequence=sequence, name=name, backbone_name=backbone_name,
             insert_name=insert_name, insert_position=insert_position,
             insert_length=insert_length, features=features, linear=linear,
+            comment=comment,
         )
-    
+
     df = annotate(sequence, linear=linear)
     if _CUSTOM_ANNOTATIONS_AVAILABLE:
         custom_df = query_custom_db(sequence)
@@ -1174,6 +1179,7 @@ def format_as_genbank(
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,
         insert_position, insert_length, reverse_complement_insert, linear=linear,
+        comment=comment,
     )
     handle = io.StringIO()
     SeqIO.write(record, handle, "genbank")
@@ -1189,6 +1195,7 @@ def _format_as_genbank_fallback(
     insert_length: int = 0,
     features: Optional[list[dict]] = None,
     linear: bool = False,
+    comment: str = "",
 ) -> str:
     """Minimal GenBank writer for environments without pLannotate.
 
@@ -1208,6 +1215,10 @@ def _format_as_genbank_fallback(
 
     # DEFINITION
     lines.append(f"DEFINITION  Expression construct: {insert_name} in {backbone_name}.")
+
+    # COMMENT (provenance)
+    if comment:
+        lines.append("COMMENT     " + comment.replace("\n", "\n            "))
 
     # FEATURES
     lines.append("FEATURES             Location/Qualifiers")
@@ -1282,6 +1293,7 @@ def export_genbank_with_plot(
     insert_length: int = 0,
     reverse_complement_insert: bool = False,
     linear: bool = False,
+    comment: str = "",
 ) -> tuple[str, str]:
     """Annotate a sequence, returning both a GenBank string and a Bokeh plot JSON.
 
@@ -1300,6 +1312,7 @@ def export_genbank_with_plot(
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,
         insert_position, insert_length, reverse_complement_insert, linear=linear,
+        comment=comment,
     )
     handle = io.StringIO()
     SeqIO.write(record, handle, "genbank")

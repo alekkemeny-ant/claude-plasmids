@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from socketserver import ThreadingMixIn
+import datetime
 from urllib.parse import parse_qs, urlparse
 import threading
 import uuid
@@ -318,6 +319,58 @@ def _load_sessions():
 
 # Load persisted sessions at import time
 _load_sessions()
+
+
+def format_conversation_markdown(title: str, messages: list[dict]) -> str:
+    """Render display_messages as a Markdown transcript."""
+    lines: list[str] = [
+        "# Plasmid Designer — Conversation Export",
+        "",
+        f"**{title}**",
+        "",
+        f"_Exported {datetime.datetime.now().isoformat(timespec='seconds')}_",
+        "",
+        "---",
+        "",
+    ]
+    for m in messages:
+        role = m.get("role", "?")
+        lines.append(f"## {role.capitalize()}")
+        lines.append("")
+        blocks = m.get("blocks") or []
+        if blocks:
+            for b in blocks:
+                btype = b.get("type")
+                if btype == "text":
+                    lines.append(b.get("content", ""))
+                    lines.append("")
+                elif btype == "thinking":
+                    lines.append("<details><summary>Thought process</summary>\n")
+                    lines.append(b.get("content", ""))
+                    lines.append("\n</details>\n")
+                elif btype == "tool_use":
+                    name = b.get("name", "tool")
+                    inp = json.dumps(b.get("input") or {}, indent=2)
+                    res = b.get("result", "")
+                    if len(res) > 4000:
+                        res = res[:4000] + "\n... [truncated]"
+                    lines.append(f"**Tool: `{name}`**")
+                    lines.append("")
+                    lines.append("```json")
+                    lines.append(inp)
+                    lines.append("```")
+                    if res:
+                        lines.append("")
+                        lines.append("```")
+                        lines.append(res)
+                        lines.append("```")
+                    lines.append("")
+        else:
+            lines.append(m.get("content", ""))
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def create_session() -> str:
@@ -1148,6 +1201,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
   <div>
+    <span id="export-menu" style="display:none;margin-right:12px;font-size:13px;">
+      Export:
+      <a id="export-md" href="#" style="margin:0 4px;">Markdown</a> ·
+      <a id="export-json" href="#" style="margin:0 4px;">JSON</a>
+    </span>
     <span class="health-badge offline" id="health-badge">
       <span class="health-dot"></span>
       <span id="health-text">Agent Offline</span>
@@ -1290,6 +1348,7 @@ function saveSessionId(id) {
   } else {
     sessionStorage.removeItem('plasmid_session_id');
   }
+  updateExportLinks();
 }
 
 // ── DOM refs ──
@@ -1495,6 +1554,16 @@ async function deleteSessionById(sessionId) {
     }
     loadSessions();
   } catch {}
+}
+
+function updateExportLinks() {
+  var menu = document.getElementById('export-menu');
+  if (!currentSessionId) { menu.style.display = 'none'; return; }
+  menu.style.display = 'inline';
+  document.getElementById('export-md').href =
+    '/api/sessions/' + currentSessionId + '/export?format=md';
+  document.getElementById('export-json').href =
+    '/api/sessions/' + currentSessionId + '/export?format=json';
 }
 
 function newChat() {
@@ -2645,6 +2714,43 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self._send_json(session["display_messages"])
             else:
                 self._send_json([], 404)
+
+        elif path.startswith("/api/sessions/") and "/export" in path:
+            session_id = path.split("/")[3]
+            session = get_session(session_id)
+            if not session:
+                self._send_json({"error": "Session not found"}, 404)
+                return
+            qs = parse_qs(parsed.query)
+            fmt = (qs.get("format", ["md"])[0]).lower()
+            title = session.get("first_message") or session_id
+            messages = session["display_messages"]
+            if fmt == "json":
+                payload = json.dumps(
+                    {"session_id": session_id, "title": title, "messages": messages},
+                    indent=2,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="conversation-{session_id[:8]}.json"',
+                )
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            else:
+                md = format_conversation_markdown(title, messages)
+                payload = md.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="conversation-{session_id[:8]}.md"',
+                )
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
 
         elif path == "/api/user-library":
             bb = [b for b in load_backbones()["backbones"] if b.get("source") == "user_library"]

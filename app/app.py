@@ -915,6 +915,31 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   @keyframes blink { 50% { opacity: 0; } }
 
+  /* ── Working indicator ── */
+  .working-indicator {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 0; color: var(--sand-500); font-size: 13px;
+  }
+  .working-dots { display: flex; align-items: center; gap: 3px; }
+  .working-dots span {
+    display: inline-block; width: 5px; height: 5px;
+    background: var(--brand-fig); border-radius: 50%;
+    animation: working-bounce 1.1s ease-in-out infinite;
+    opacity: 0.35;
+  }
+  .working-dots span:nth-child(2) { animation-delay: 0.18s; }
+  .working-dots span:nth-child(3) { animation-delay: 0.36s; }
+  @keyframes working-bounce {
+    0%, 100% { transform: translateY(0); opacity: 0.35; }
+    40% { transform: translateY(-4px); opacity: 1; }
+  }
+  .slow-note {
+    font-size: 12px; color: var(--sand-400);
+    margin-top: 4px; font-style: italic;
+    animation: fadein 0.6s ease;
+  }
+  @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+
   /* ── Collapsible blocks (thinking + tool) ── */
   .thinking-block, .tool-block { margin: 6px 0; }
   .block-card {
@@ -1827,23 +1852,68 @@ function flushTextBuffer() {
 // Show a blinking cursor immediately on send so the user sees activity
 // during TTFT, before any text/thinking/tool event arrives.
 let pendingCursorEl = null;
+let pendingCursorTimer = null;
+const SLOW_THRESHOLD_MS = 7000;
+const SLOW_NOTE = 'Complex designs can take a minute or two — hang tight.';
 
-function showPendingCursor() {
+const WORKING_LABELS = [
+  'Pipetting…',
+  'Running a gel…',
+  'Miniprepping…',
+  'Consulting the literature…',
+  'Transforming bacteria…',
+  'Checking the freezer…',
+  'Growing colonies…',
+  'Spinning down…',
+  'Running BLAST…',
+  'Optimizing codons…',
+  'Thawing reagents…',
+  'Loading the NanoDrop…',
+  'Asking a grad student…',
+  'Reading the manual…',
+  'Designing primers…',
+  'Autoclaving…',
+  'Checking for off-targets…',
+  'Counting clones…',
+  'Labeling tubes…',
+  'Calibrating the pipette…',
+  'Checking restriction sites…',
+  'Annotating features…',
+  'Sequencing…',
+  'Making competent cells…',
+  'Staring at the gel…',
+  'Refilling tip boxes…',
+  'Googling the protocol…',
+];
+
+function randomWorkingLabel() {
+  return WORKING_LABELS[Math.floor(Math.random() * WORKING_LABELS.length)];
+}
+
+function showPendingCursor(label) {
   clearPendingCursor();
   const div = document.createElement('div');
   div.className = 'msg assistant';
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble-assistant';
-  const cursor = document.createElement('span');
-  cursor.className = 'streaming-cursor';
-  bubble.appendChild(cursor);
-  div.appendChild(bubble);
+  div.innerHTML =
+    '<div class="msg-bubble-assistant">' +
+      '<div class="working-indicator">' +
+        '<span class="working-dots"><span></span><span></span><span></span></span>' +
+        '<span class="working-label">' + (label || randomWorkingLabel()) + '</span>' +
+      '</div>' +
+      '<div class="slow-note" style="display:none"></div>' +
+    '</div>';
   getInner().appendChild(div);
   pendingCursorEl = div;
+  pendingCursorTimer = setTimeout(function() {
+    if (!pendingCursorEl) return;
+    const note = pendingCursorEl.querySelector('.slow-note');
+    if (note) { note.textContent = SLOW_NOTE; note.style.display = ''; }
+  }, SLOW_THRESHOLD_MS);
   scrollToBottom();
 }
 
 function clearPendingCursor() {
+  if (pendingCursorTimer) { clearTimeout(pendingCursorTimer); pendingCursorTimer = null; }
   if (pendingCursorEl) { pendingCursorEl.remove(); pendingCursorEl = null; }
 }
 
@@ -1931,6 +2001,7 @@ function finishToolBlock(toolName, toolInput, toolResult, downloadContent, downl
     addDownloadButton(getInner(), downloadContent, downloadFilename);
   }
   currentToolId = null;
+  showPendingCursor();
   scrollToBottom();
 }
 

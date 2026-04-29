@@ -61,6 +61,7 @@ except ImportError as e:
         f"Run: pip install -r requirements.txt"
     ) from e
 from src.tools import (
+    set_session_uploads,
     build_mcp_servers,
     get_anthropic_tool_schemas,
     get_tool_dispatch,
@@ -332,6 +333,7 @@ def create_session() -> str:
         # Troubleshooting / project-memory fields (Phase 2)
         "project_name": None,            # user-assigned project label (optional)
         "experimental_outcomes": [],     # list of {status, observation, construct_name, timestamp}
+        "uploads": {},                   # session-scoped uploaded sequences {name: parsed_dict}
     }
     _save_sessions()
     return sid
@@ -480,6 +482,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
 
     tracker = ReferenceTracker()
     set_tracker(tracker)
+    set_session_uploads(session.get("uploads") or {})
     clear_last_plot_json()
     export_called = False
 
@@ -2182,15 +2185,19 @@ function uploadSequenceFile(filename, contentB64) {
   fetch('/api/upload', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({filename: filename, content_b64: contentB64, save_to_library: false}),
+    body: JSON.stringify({
+      filename: filename, content_b64: contentB64,
+      save_to_library: false, session_id: currentSessionId,
+    }),
   })
   .then(function(r) { return r.json(); })
   .then(function(data) {
     if (data.error) { addUploadCard({error: data.error}); return; }
     addUploadCard(data);
     var p = data.parsed;
-    var prefix = '[Uploaded sequence: ' + p.name + ' — ' + p.length +
-                 ' bp ' + p.format + (p.organism ? ', ' + p.organism : '') + ']\n';
+    var prefix = '[Uploaded sequence: ' + p.name + ' (' + p.length +
+                 ' bp ' + p.format + '). Use get_uploaded_sequence("' + p.name +
+                 '") to retrieve it.]\n';
     inputEl.value = prefix + inputEl.value;
     autoResize(inputEl);
   })
@@ -2228,9 +2235,13 @@ function addUploadCard(data) {
     if (data.saved) {
       hint = '<div style="font-size:12px;color:#1e7e34;margin-top:6px;">Saved as <code>' + escapeHtml(data.saved.id) + '</code></div>';
     }
+    var nameInputId = 'upload-name-' + Date.now();
+    if (lastUpload) lastUpload.nameInputId = nameInputId;
     inner = '<div class="msg-bubble-assistant" style="padding:12px;">' +
       '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;">Uploaded sequence</div>' +
-      '<div style="font-size:14px;font-weight:600;margin-top:4px;">' + escapeHtml(p.name) + '</div>' +
+      '<input id="' + nameInputId + '" value="' + escapeHtml(p.name) + '" ' +
+        'style="font-size:14px;font-weight:600;margin-top:4px;border:1px solid var(--sand-200);' +
+        'border-radius:4px;padding:2px 6px;width:60%;">' +
       '<div style="font-size:13px;color:var(--sand-600);margin-top:2px;">' +
         escapeHtml(p.length + ' bp · ' + p.format + (p.topology ? ' · ' + p.topology : '') +
                    (p.organism ? ' · ' + p.organism : '') +
@@ -2276,12 +2287,15 @@ var lastUpload = null;
 
 function saveLastUploadToLibrary(kind) {
   if (!lastUpload) return;
+  var nameInput = document.getElementById(lastUpload.nameInputId);
+  var override = nameInput ? nameInput.value : undefined;
   fetch('/api/upload', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       filename: lastUpload.filename, content_b64: lastUpload.content_b64,
-      save_to_library: true, kind: kind,
+      save_to_library: true, kind: kind, override_name: override,
+      session_id: currentSessionId,
     }),
   })
   .then(function(r) { return r.json(); })
@@ -2595,6 +2609,7 @@ def _run_batch_agent(prompt: str, model: str, append_log, exports: list, *,
     follow-up messages (``_continue_batch_row``) replay the same context."""
     tracker = ReferenceTracker()
     set_tracker(tracker)
+    set_session_uploads({})
     clear_last_plot_json()
     history.append({"role": "user", "content": prompt})
 
@@ -3057,7 +3072,16 @@ class AgentHandler(SimpleHTTPRequestHandler):
             except ValueError as e:
                 self._send_json({"error": str(e)}, 400)
                 return
+            override = body.get("override_name")
+            if override:
+                from src.upload import safe_filename
+                parsed["name"] = safe_filename(override)
             result = {"parsed": parsed, "library": get_library_status()}
+            sid = body.get("session_id")
+            if sid and (sess := get_session(sid)) is not None:
+                sess.setdefault("uploads", {})[parsed["name"]] = parsed
+                result["stashed_as"] = parsed["name"]
+                _save_sessions()
             if do_save:
                 try:
                     save_result = save_to_library(parsed, kind, raw)

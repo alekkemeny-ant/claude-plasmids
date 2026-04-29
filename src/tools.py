@@ -160,6 +160,18 @@ def get_tracker() -> Optional[ReferenceTracker]:
     return _tracker
 
 
+_session_uploads: dict[str, dict] = {}
+
+
+def set_session_uploads(uploads: dict[str, dict]) -> None:
+    global _session_uploads
+    _session_uploads = uploads or {}
+
+
+def get_session_uploads() -> dict[str, dict]:
+    return _session_uploads
+
+
 def _record(method_name: str, *args, **kwargs) -> None:
     """Call a tracker method if a tracker is set, silently ignore otherwise."""
     if _tracker is not None:
@@ -1686,6 +1698,49 @@ async def log_experimental_outcome_tool(args):
     )
 
 
+@tool(
+    "get_uploaded_sequence",
+    "Retrieve a sequence the user uploaded into this session via the web "
+    "UI's file picker or drag-and-drop. Returns the full sequence and "
+    "extracted metadata. Use this when the user references an uploaded "
+    "file by name.",
+    {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Name of the uploaded sequence (as shown in the [Uploaded sequence: …] line).",
+            },
+        },
+        "required": ["name"],
+    },
+)
+async def get_uploaded_sequence_tool(args):
+    name = args["name"]
+    uploads = get_session_uploads()
+    if name not in uploads:
+        available = ", ".join(sorted(uploads)) or "(none)"
+        return _error(
+            f"No uploaded sequence named {name!r} in this session. "
+            f"Available uploads: {available}"
+        )
+    p = uploads[name]
+    feats = p.get("features") or []
+    feat_summary = ", ".join(
+        f"{f.get('type', '?')}:{f.get('label') or f.get('product') or '?'}"
+        for f in feats[:10]
+    )
+    return _text(
+        f"Uploaded sequence '{p.get('name')}':\n"
+        f"  Length: {p.get('length')} bp\n"
+        f"  Format: {p.get('format')}\n"
+        f"  Topology: {p.get('topology') or 'unknown'}\n"
+        f"  Organism: {p.get('organism') or 'unknown'}\n"
+        f"  Features ({len(feats)}): {feat_summary or '(none)'}\n"
+        f"\nSequence:\n{p.get('sequence', '')}"
+    )
+
+
 # Collect all tool objects
 ALL_TOOLS = [
     search_backbones,
@@ -1726,6 +1781,8 @@ ALL_TOOLS = [
     search_fpbase_tool,
     # Troubleshooting / project memory
     log_experimental_outcome_tool,
+    # Session-scoped uploads
+    get_uploaded_sequence_tool,
 ]
 
 ALL_TOOL_NAMES = [t.name for t in ALL_TOOLS]

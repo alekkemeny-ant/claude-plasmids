@@ -73,6 +73,7 @@ Use tools to obtain both sequences. Follow this resolution order:
 
    **⚠ CRITICAL — Addgene fetch failure**: If `fetch_addgene_sequence_with_metadata` returns an error or empty result for a plasmid the user explicitly named (by ID or name), **stop immediately and ask the user to provide the sequence**. Do NOT search for similar plasmids, related plasmids, or alternatives. Do NOT proceed with a substitute. End your turn with a single question: "I wasn't able to retrieve plasmid #XXXXX from Addgene. Could you provide the sequence directly?"
 5. **User library**: IDs starting with `user:` (e.g., `user:pMyVector`) come from GenBank files the user placed in their local library directory (`$PLASMID_USER_LIBRARY/backbones/` or `inserts/`). These are equally valid sources — treat them like any other backbone or insert.
+   - **Session uploads**: If the user dropped a sequence file into this chat (you'll see a line like `[Uploaded sequence: <name> ...]`), call `get_uploaded_sequence(name)` to retrieve the full sequence and metadata. Treat it as a verified user-provided source.
 6. **Custom annotations**: If the user has placed annotated GenBank files in `$PLASMID_USER_LIBRARY/annotations/`, those feature annotations are automatically available to pLannotate during extraction. This allows lab-private or recently-published sequences to be recognised by name in `extract_insert_from_plasmid` and `extract_inserts_from_plasmid`.
 
 **When working with an unknown plasmid (user-provided or from Addgene):**

@@ -54,6 +54,7 @@ from .assembler import (
     assemble_golden_gate as _assemble_golden_gate,
     GG_ENZYMES,
 )
+from .gg_denovo import design_golden_gate_oligos as _design_gg_denovo
 
 # NCBI integration (optional)
 try:
@@ -1633,6 +1634,247 @@ async def assemble_golden_gate_tool(args):
     )
 
 
+# ── Golden Gate De Novo Oligo Design Tool ────────────────────────────────────
+
+@tool(
+    "design_golden_gate_oligos",
+    (
+        "Design outputs for de novo Golden Gate assembly from raw fragment sequences. "
+        "Unlike assemble_golden_gate (which requires parts already in carrier vectors), "
+        "this tool takes bare insert sequences and designs orthogonal 4-nt overhangs for "
+        "every junction, then produces one of three output types: "
+        "(1) PCR primers — forward + reverse primers to amplify each fragment from a template, "
+        "with overhangs and enzyme sites in the primer tails; "
+        "(2) Annealing oligos — tiled complementary top/bottom strand oligos that are mixed "
+        "and annealed to form a ready-to-ligate ds fragment (no template needed; best for ≤~500 bp); "
+        "(3) gBlocks — complete synthesis-ready sequences with flanking Type IIS sites and "
+        "overhangs, ready to order from IDT/Twist; "
+        "(4) Part-in-vector — full circular plasmid sequence (fragment inserted into a carrier "
+        "backbone with flanking Type IIS sites), ready for whole-plasmid synthesis ordering "
+        "(e.g. from Azenta/Genewiz). Equivalent to the 'part_in_vector' format used by the "
+        "Allen Institute modular system. "
+        "Use when the user has raw sequences (from library, NCBI, or user-provided) and wants "
+        "to build a Golden Gate assembly from scratch without pre-existing carrier vectors."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "fragments": {
+                "type": "array",
+                "description": (
+                    "Ordered list of fragments to assemble (5' to 3' in the final construct). "
+                    "Each entry must have 'name' (string) and 'sequence' (DNA string). "
+                    "Accepts 2–10 fragments."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "sequence": {"type": "string"},
+                    },
+                    "required": ["name", "sequence"],
+                },
+                "minItems": 2,
+                "maxItems": 10,
+            },
+            "output_format": {
+                "type": "string",
+                "enum": ["primers", "oligos", "gblocks", "part_in_vector", "both"],
+                "description": (
+                    "What to output for each fragment: "
+                    "'primers' = PCR forward + reverse primers (requires existing template DNA); "
+                    "'oligos' = tiled annealing oligos (top + bottom strands that anneal into the ds fragment, no template needed); "
+                    "'gblocks' = complete synthesis sequences to order from IDT/Twist; "
+                    "'part_in_vector' = full circular plasmid sequence (fragment in a carrier backbone with flanking enzyme sites) for whole-plasmid synthesis ordering — requires carrier_backbone_id; "
+                    "'both' = all of the above."
+                ),
+            },
+            "enzyme_name": {
+                "type": "string",
+                "enum": list(GG_ENZYMES.keys()),
+                "description": (
+                    "Type IIS restriction enzyme for the assembly. "
+                    "BsaI is the most common for de novo design. "
+                    "PaqCI gives the best ligation fidelity (recommended for ≥4 fragments). "
+                    "Esp3I/BsmBI share the same recognition site (Allen Institute system). "
+                    "Defaults to BsaI."
+                ),
+            },
+            "backbone_id": {
+                "type": "string",
+                "description": (
+                    "Optional library ID of a Golden Gate-ready backbone. "
+                    "If provided, the backbone's existing Type IIS cut sites are used to fix "
+                    "the assembly endpoint overhangs, ensuring the fragments ligate correctly "
+                    "into the open backbone. If omitted, all overhangs are designed de novo."
+                ),
+            },
+            "binding_length": {
+                "type": "integer",
+                "description": (
+                    "Gene-specific nucleotides at the 3' end of each PCR primer (annealing region). "
+                    "Default 20 nt. Only used when output_format includes 'primers'."
+                ),
+            },
+            "max_oligo_len": {
+                "type": "integer",
+                "description": (
+                    "Maximum length per annealing oligo in nucleotides. Default 60 nt. "
+                    "Only used when output_format includes 'oligos'."
+                ),
+            },
+            "carrier_backbone_id": {
+                "type": "string",
+                "description": (
+                    "Library ID of the carrier backbone vector for part_in_vector output. "
+                    "The fragment (with flanking enzyme sites) is inserted into this backbone's MCS. "
+                    "Default: 'pUC19' (small, high-copy, AmpR — standard for part storage). "
+                    "Only used when output_format is 'part_in_vector' or 'both'."
+                ),
+            },
+        },
+        "required": ["fragments", "output_format"],
+    },
+)
+async def design_golden_gate_oligos_tool(args):
+    fragments = args["fragments"]
+    output_format = args["output_format"]
+    enzyme_name = args.get("enzyme_name", "BsaI")
+    backbone_id = args.get("backbone_id")
+    binding_length = args.get("binding_length", 20)
+    max_oligo_len = args.get("max_oligo_len", 60)
+    carrier_backbone_id = args.get("carrier_backbone_id", "pUC19")
+
+    # Resolve backbone sequence if provided
+    backbone_seq = None
+    if backbone_id:
+        bb = get_backbone_by_id(backbone_id)
+        if not bb:
+            return _error(f"Backbone {backbone_id!r} not found in library.")
+        backbone_seq = bb.get("plasmid_sequence") or bb.get("sequence", "")
+        if not backbone_seq:
+            return _error(
+                f"Backbone {backbone_id!r} found but has no sequence. "
+                "Cannot extract existing overhang endpoints."
+            )
+
+    # Resolve carrier backbone for part_in_vector output
+    carrier_backbone = None
+    if output_format in ("part_in_vector", "both"):
+        carrier_backbone = get_backbone_by_id(carrier_backbone_id)
+        if not carrier_backbone:
+            return _error(
+                f"Carrier backbone {carrier_backbone_id!r} not found in library. "
+                "Try 'pUC19' or another backbone with a known sequence."
+            )
+
+    result = _design_gg_denovo(
+        fragments=fragments,
+        enzyme_name=enzyme_name,
+        backbone_seq=backbone_seq,
+        output_format=output_format,
+        binding_length=binding_length,
+        max_oligo_len=max_oligo_len,
+        carrier_backbone=carrier_backbone,
+    )
+
+    if not result.success:
+        return _error(
+            "Golden Gate oligo design failed:\n"
+            + "\n".join(f"  - {e}" for e in result.errors)
+        )
+
+    want_primers = output_format in ("primers", "both")
+    want_oligos = output_format in ("oligos", "both")
+    want_gblocks = output_format in ("gblocks", "both")
+    want_piv = output_format in ("part_in_vector", "both")
+
+    lines = [
+        f"Golden Gate De Novo Design ({result.enzyme_name})",
+        f"Fragments : {len(result.fragments)}",
+        f"Output    : {output_format}",
+        "",
+    ]
+
+    if backbone_id and result.backbone_left_oh:
+        lines += [
+            f"Backbone  : {backbone_id}",
+            f"  Left endpoint overhang : {result.backbone_left_oh}",
+            f"  Right endpoint overhang: {result.backbone_right_oh}",
+            "",
+        ]
+
+    if want_piv and result.carrier_backbone_id:
+        lines += [
+            f"Carrier backbone (part-in-vector): {result.carrier_backbone_id}",
+            "",
+        ]
+
+    lines.append("Junction overhang map:")
+    for junction, oh in result.junction_map.items():
+        lines.append(f"  {junction}: 5'-{oh}-3'")
+    lines.append("")
+
+    for fd in result.fragments:
+        lines.append(f"[{fd.fragment_name}]")
+        lines.append(f"  Left overhang : 5'-{fd.oh_left}-3'")
+        lines.append(f"  Right overhang: 5'-{fd.oh_right}-3'")
+
+        if want_primers:
+            lines += [
+                f"  Forward primer: 5'-{fd.fwd_primer}-3'",
+                f"  Reverse primer: 5'-{fd.rev_primer}-3'",
+                f"  Amplicon size : {fd.amplicon_size_bp} bp",
+            ]
+
+        if want_oligos:
+            lines.append(f"  Annealing oligos ({len(fd.annealing_oligos)} oligos, no enzyme digestion needed):")
+            for oligo in fd.annealing_oligos:
+                lines.append(f"    {oligo.name} ({oligo.strand}): 5'-{oligo.sequence}-3'")
+
+        if want_gblocks:
+            lines += [
+                f"  Synthesis sequence ({fd.synthesis_size_bp} bp):",
+                f"    5'-{fd.synthesis_seq}-3'",
+            ]
+
+        if want_piv:
+            lines += [
+                f"  Part-in-vector plasmid ({fd.plasmid_size_bp} bp, carrier: {fd.carrier_backbone_id}):",
+                f"    {fd.plasmid_seq}",
+            ]
+
+        lines.append("")
+
+    if want_primers:
+        lines.append(
+            "Note (primers): 'N' in the enzyme prefix can be any nucleotide — "
+            "vendors typically synthesize as 'A'."
+        )
+    if want_piv:
+        lines.append(
+            "Note (part-in-vector): The full plasmid sequence above can be ordered as "
+            f"a whole-plasmid synthesis from Azenta/Genewiz or similar services. "
+            "The fragment is flanked by two "
+            f"{result.enzyme_name} sites — use {result.enzyme_name} Golden Gate to excise it "
+            "when you're ready to assemble."
+        )
+    if want_oligos:
+        lines.append(
+            "Note (annealing oligos): Mix equal amounts of top and bottom oligos, "
+            "heat to 95 °C, then cool slowly to room temperature to anneal. "
+            "The resulting ds fragment has the correct 4-nt sticky ends ready for ligation — "
+            "no restriction enzyme digestion step is needed."
+        )
+
+    if result.warnings:
+        lines.append("\nWarnings:")
+        for w in result.warnings:
+            lines.append(f"  - {w}")
+
+    return _text("\n".join(lines))
+
+
 # ── Server factory ─────────────────────────────────────────────────────
 
 @tool(
@@ -1776,6 +2018,7 @@ ALL_TOOLS = [
     fetch_promoter_region_tool,
     # Golden Gate assembly
     assemble_golden_gate_tool,
+    design_golden_gate_oligos_tool,
     # Literature
     fetch_oa_fulltext_tool,
     # FPbase fluorescent protein search

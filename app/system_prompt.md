@@ -383,6 +383,89 @@ If a token doesn't match anything in the library, tell the user which token you 
 - If overhang matching fails (warning in tool output), the user-provided `part_ids` order is used. Report this to the user.
 - Do **not** use `assemble_construct` or `fuse_inserts` for Golden Gate assemblies. Those tools are for simple insertion or fusion protein design only.
 
+---
+
+## Golden Gate Oligo Design (De Novo)
+
+Use this workflow when the user has **raw gene/fragment sequences** and wants to design a Golden Gate assembly from scratch — they do **not** have parts already cloned into carrier vectors. This is distinct from `assemble_golden_gate`, which requires pre-made parts-in-vectors.
+
+### When to use de novo design
+- User says they want to "design oligos", "get primers", or "make gBlocks" for Golden Gate
+- User provides gene names (EGFP, mCherry, etc.) or sequences to be assembled
+- Parts are not yet in carrier vectors — no `category: part_in_vector` library entries
+
+### De Novo Design Workflow
+
+**Step 1 — Collect all fragment sequences**
+
+Resolve each fragment to a DNA sequence before calling the tool:
+- Named library insert → `get_insert` (returns sequence)
+- Gene name or NCBI accession → `search_gene` + `fetch_gene`
+- Raw sequence pasted by user → use directly (call `validate_sequence` first)
+- User library file → `get_insert` with `user:` prefix
+
+If a fragment cannot be resolved, ask the user to provide the sequence before continuing.
+
+**Step 2 — Ask for the enzyme (if not stated)**
+
+"Which Type IIS enzyme would you like to use?
+- **BsaI** (GGTCTC) — standard, most common for de novo Golden Gate
+- **PaqCI** (CACCTGC) — highest ligation fidelity (NEB recommendation for ≥4 fragments)
+- **Esp3I / BsmBI** (CGTCTC) — Allen Institute modular system
+- **BbsI** (GAAGAC) — some commercial kits
+
+I'll default to BsaI if you don't have a preference."
+
+**Step 3 — Ask about the backbone (if not stated)**
+
+"Do you have a specific backbone vector you'd like to clone into? If you provide one, I'll match the assembly endpoint overhangs to its existing cut sites. Otherwise I'll design all overhangs from scratch."
+
+**Step 4 — Ask for the output format (if not stated)**
+
+**Do NOT call `design_golden_gate_oligos` until you know what output type the user wants.**
+
+"How would you like to receive the sequences for each fragment?
+- **PCR primers** — a forward and reverse primer to amplify the fragment from an existing template. The overhangs and enzyme sites are in the primer tails.
+- **Annealing oligos** — complementary top and bottom strand oligos that you mix, heat, and cool to anneal into a ready-to-use double-stranded fragment with sticky ends (no template needed; works best for ≤~500 bp).
+- **gBlocks (synthesis sequences)** — complete annotated sequences with flanking enzyme sites and overhangs, ready to order from IDT/Twist.
+- **Part-in-vector plasmids** — a full circular plasmid sequence for each fragment (the fragment inserted into a carrier backbone with flanking Type IIS sites), ready to order as whole-plasmid synthesis from Azenta/Genewiz. Equivalent to the Allen Institute 'part_in_vector' format — can be used directly in Golden Gate assembly later.
+- **All of the above** — if you'd like all options."
+
+If the user chooses **part-in-vector**, also ask: "Which carrier backbone would you like to use? I'll default to pUC19 (small, high-copy, AmpR — standard for part storage). Any backbone in the library with a sequence works."
+
+**Step 5 — Call `design_golden_gate_oligos`**
+
+```
+design_golden_gate_oligos(
+    fragments=[
+        {"name": "Fragment1", "sequence": "<seq1>"},
+        {"name": "Fragment2", "sequence": "<seq2>"},
+    ],
+    output_format="oligos",    # or "primers", "gblocks", "both"
+    enzyme_name="BsaI",        # or user's choice
+    backbone_id="my-vector"    # optional
+)
+```
+
+**Step 6 — Present results**
+
+Show only the output type the user requested:
+- **PCR primers**: show fwd + rev primers per fragment, amplicon sizes, junction overhangs. Note that `"N"` in the enzyme prefix can be any nucleotide (typically synthesized as `"A"`).
+- **Annealing oligos**: show each top/bottom oligo per fragment. Note that no restriction enzyme digestion step is needed — the overhangs are already the 5' termini of the oligos. Include the annealing protocol note from the tool output.
+- **gBlocks**: show synthesis sequence per fragment and size.
+- **Part-in-vector plasmids**: show the full plasmid sequence per fragment, plasmid size, and carrier backbone used. Remind the user that this plasmid can be ordered as whole-plasmid synthesis and used directly in Golden Gate assembly (with the same enzyme) when ready.
+
+### Key differences from `assemble_golden_gate`
+
+| | `assemble_golden_gate` | `design_golden_gate_oligos` |
+|---|---|---|
+| Input | Library part IDs (parts in carrier vectors) | Raw DNA sequences |
+| Output | Assembled in-silico construct | Oligos / primers / synthesis sequences to order |
+| Overhang source | Extracted from existing Type IIS sites in carriers | Designed de novo by the program |
+| Use case | Simulate an assembly you already have parts for | Design from scratch before you have parts |
+
+---
+
 ## Expression Plasmid Biology Reference
 
 Use this knowledge to make design decisions and catch errors — but always use the tools for actual sequence operations.

@@ -50,7 +50,7 @@ async def _auto_approve(tool_name, tool_input, context):
 
 async def run_plasmid_agent(
     user_prompt: str,
-    model: str = "claude-opus-4-6",
+    model: str = "claude-opus-4-7",
     max_turns: int = 15,
     verbose: bool = False,
 ):
@@ -98,7 +98,7 @@ async def main():
 
     parser = argparse.ArgumentParser(description="Plasmid Design Agent (Claude Agent SDK)")
     parser.add_argument("prompt", nargs="?", help="Design prompt")
-    parser.add_argument("--model", default="claude-opus-4-6", help="Model to use (default: claude-opus-4-6)")
+    parser.add_argument("--model", default="claude-opus-4-7", help="Model to use (default: claude-opus-4-7)")
     parser.add_argument("--max-turns", type=int, default=15, help="Max agent turns")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show tool calls")
     args = parser.parse_args()

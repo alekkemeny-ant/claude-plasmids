@@ -199,6 +199,18 @@ class TestFindGgSites:
         assert len(fwd) == 1
         assert fwd[0]["overhang"] == oh
 
+    def test_paqci_enzyme(self):
+        # PaqCI: CACCTGC(4/8) — 4-nt 5' overhang
+        # recognition = CACCTGC (7 bp), cut_top=4, cut_bottom=8
+        oh = "ATCG"
+        seq = "AAAA" + "CACCTGC" + "NNNN" + oh + "TTTTTTTT"
+        sites = find_gg_sites(seq, "PaqCI")
+        fwd = [s for s in sites if s["strand"] == "+"]
+        assert len(fwd) == 1
+        assert fwd[0]["overhang"] == oh
+        assert fwd[0]["cut_top"] == 4 + 7 + 4   # start(4) + reclen(7) + d_top(4)
+        assert fwd[0]["cut_bottom"] == 4 + 7 + 8  # start(4) + reclen(7) + d_bot(8)
+
     def test_bbsi_enzyme_different_offsets(self):
         # BbsI: GAAGAC, d_top=2, d_bot=6
         # cut_top = 0+6+2=8, cut_bottom = 0+6+6=12

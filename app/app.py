@@ -428,7 +428,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
     turn_system_prompt = _build_system_prompt(session)
     history = session["history"]
     history.append({"role": "user", "content": user_message})
-    session["display_messages"].append({"role": "user", "content": user_message})
+    session["display_messages"].append({"role": "user", "content": user_message, "timestamp": time.time()})
 
     if session["first_message"] is None:
         session["first_message"] = user_message[:80]
@@ -672,6 +672,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Plasmid Designer</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23D97757' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714a2.25 2.25 0 00.659 1.591L19 14.5M14.25 3.104c.251.023.501.05.75.082M19 14.5l-2.47 2.47a2.25 2.25 0 01-1.591.659H9.061a2.25 2.25 0 01-1.591-.659L5 14.5m14 0V17a2 2 0 01-2 2H7a2 2 0 01-2-2v-2.5'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.bokeh.org/bokeh/release/bokeh-2.4.1.min.js"></script>
 <link href="https://unpkg.com/tabulator-tables@6.3.0/dist/css/tabulator_bootstrap5.min.css" rel="stylesheet">
@@ -920,6 +921,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
     font-size: 14px; line-height: 1.6;
     white-space: pre-wrap; word-wrap: break-word;
   }
+  .msg-date {
+    font-size: 11px; color: var(--sand-400);
+    text-align: right; margin-top: 4px;
+  }
   .msg-bubble-assistant {
     color: var(--sand-800); max-width: 80%;
     font-size: 14px; line-height: 1.6;
@@ -1022,6 +1027,30 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .msg-bubble-assistant th { background: var(--sand-50); font-weight: 600; }
   .msg-bubble-assistant tr:nth-child(even) { background: var(--sand-50); }
+
+  /* ── DNA sequence display ── */
+  .seq-block { position: relative; }
+  .seq-block pre { padding-right: 40px !important; }
+  .seq-copy-btn {
+    background: none; border: 1px solid transparent; cursor: pointer; padding: 3px 4px;
+    color: var(--sand-500); border-radius: 3px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    vertical-align: middle; margin-left: 4px; transition: color 0.1s, background 0.1s, border-color 0.1s;
+  }
+  .seq-copy-btn:hover { color: var(--sand-800); background: var(--sand-100); border-color: var(--sand-300); }
+  .seq-copy-btn.copied { color: #16a34a; }
+  .seq-copy-btn.block-btn { position: absolute; top: 6px; right: 6px; margin-left: 0; }
+  .seq-table { margin: 8px 0; overflow-x: auto; }
+  .seq-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .seq-table th, .seq-table td { border: 1px solid var(--sand-200); padding: 5px 10px; text-align: left; }
+  .seq-table th { background: var(--sand-50); font-weight: 600; }
+  .seq-table tr:nth-child(even) { background: var(--sand-50); }
+  .seq-table td:last-child { width: 32px; text-align: center; padding: 3px; }
+  code.dna-seq { letter-spacing: 0.03em; }
+  .tbl-copy-row { display: flex; justify-content: flex-end; margin-top: 4px; }
+  .code-block-wrap { position: relative; }
+  .code-block-wrap pre { padding-right: 40px !important; }
+  .code-block-wrap .seq-copy-btn { position: absolute; top: 6px; right: 6px; margin-left: 0; }
 
   /* ── Input area ── */
   .input-area { padding: 8px 24px 24px; flex-shrink: 0; }
@@ -1623,7 +1652,8 @@ function renderStoredMessages(msgs) {
     if (m.role === 'user') {
       const div = document.createElement('div');
       div.className = 'msg user';
-      div.innerHTML = '<div class="msg-bubble-user">' + escapeHtml(m.content) + '</div>';
+      const dateStr = m.timestamp ? new Date(m.timestamp * 1000).toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'}) : '';
+      div.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(m.content) + '</div>' + (dateStr ? '<div class="msg-date">' + dateStr + '</div>' : '') + '</div>';
       inner.appendChild(div);
     } else if (m.blocks && m.blocks.length > 0) {
       m.blocks.forEach(function(block) { renderStoredBlock(block, inner); });
@@ -1793,9 +1823,132 @@ function toggleUserLibrary() {
 }
 
 // ── Markdown rendering ──
+// ── DNA sequence helpers ─────────────────────────────────────────────────────
+const _CLIP_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+const _CHECK_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
+function isDnaSeq(s) {
+  // Strip whitespace, digits, hyphens, prime/apostrophe, brackets, parens, slashes, punctuation
+  const clean = s.replace(/[\s\d\-'()\[\]\/\\.,;:*>]/g, '').toUpperCase();
+  return clean.length >= 10 && /^[ACGTURYSWKMBDHVN]+$/.test(clean);
+}
+
+function mkCopyBtn(seq, extraClass) {
+  return '<button class="seq-copy-btn' + (extraClass ? ' ' + extraClass : '') +
+    '" data-seq="' + escapeHtml(seq) + '" onclick="copySeq(this.dataset.seq,this)" title="Copy sequence">' +
+    _CLIP_SVG + '</button>';
+}
+
+function copySeq(seq, btn) {
+  seq = seq.replace(/\s/g, '');
+  navigator.clipboard.writeText(seq).then(function() {
+    var orig = btn.innerHTML;
+    btn.innerHTML = _CHECK_SVG;
+    btn.classList.add('copied');
+    setTimeout(function() { btn.innerHTML = orig; btn.classList.remove('copied'); }, 1500);
+  });
+}
+
+function copyRaw(text, btn) {
+  navigator.clipboard.writeText(text).then(function() {
+    var orig = btn.innerHTML;
+    btn.innerHTML = _CHECK_SVG;
+    btn.classList.add('copied');
+    setTimeout(function() { btn.innerHTML = orig; btn.classList.remove('copied'); }, 1500);
+  });
+}
+
+function mkRawCopyBtn(text, extraClass) {
+  return '<button class="seq-copy-btn' + (extraClass ? ' ' + extraClass : '') +
+    '" data-raw="' + escapeHtml(text) + '" onclick="copyRaw(this.dataset.raw,this)" title="Copy">' +
+    _CLIP_SVG + '</button>';
+}
+
+function renderSeqCodeBlock(rawCode) {
+  var langMatch = rawCode.match(/^([a-zA-Z][a-zA-Z0-9_]*)\n/);
+  var code = langMatch ? rawCode.slice(langMatch[0].length) : rawCode;
+  var trimmed = code.trim();
+  var lines = trimmed.split('\n').filter(function(l) { return l.trim(); });
+
+  // FASTA format (lines starting with >)
+  if (lines.length >= 1 && lines[0].charAt(0) === '>') {
+    var entries = [], curName = null, curSeq = '';
+    lines.forEach(function(l) {
+      if (l.charAt(0) === '>') {
+        if (curName !== null) entries.push({name: curName, seq: curSeq});
+        curName = l.slice(1).trim(); curSeq = '';
+      } else { curSeq += l.trim(); }
+    });
+    if (curName !== null) entries.push({name: curName, seq: curSeq});
+    if (entries.length > 0 && entries.every(function(e) { return isDnaSeq(e.seq); })) {
+      if (entries.length === 1) {
+        return '<div class="seq-block"><pre><code>&gt;' + escapeHtml(entries[0].name) + '\n' +
+          escapeHtml(entries[0].seq) + '</code></pre>' + mkCopyBtn(entries[0].seq, 'block-btn') + '</div>';
+      }
+      var allTsv = 'Name\tSequence\n' + entries.map(function(e) { return e.name + '\t' + e.seq; }).join('\n');
+      var t = '<div class="seq-table"><table><thead><tr><th>Name</th><th>Sequence</th><th></th></tr></thead><tbody>';
+      entries.forEach(function(e) {
+        t += '<tr><td>' + escapeHtml(e.name) + '</td><td><code class="dna-seq">' +
+          escapeHtml(e.seq) + '</code></td><td>' + mkCopyBtn(e.seq) + '</td></tr>';
+      });
+      return t + '</tbody></table><div class="tbl-copy-row">' + mkRawCopyBtn(allTsv) + '</div></div>';
+    }
+  }
+
+  // Named sequences: "Label: SEQUENCE" or "Label = SEQUENCE"
+  var namedRe = /^(.{1,50}?)\s*[:=]\s*([ACGTUacgtuRYSWKMBDHVNryswkmbdhvn]{10,})\s*$/;
+  var namedMs = lines.map(function(l) { return l.match(namedRe); });
+  if (lines.length >= 2 && namedMs.every(function(m) { return m; })) {
+    var allTsv = 'Name\tSequence\n' + namedMs.map(function(m) { return m[1].trim() + '\t' + m[2]; }).join('\n');
+    var t = '<div class="seq-table"><table><thead><tr><th>Name</th><th>Sequence</th><th></th></tr></thead><tbody>';
+    namedMs.forEach(function(m) {
+      t += '<tr><td>' + escapeHtml(m[1].trim()) + '</td><td><code class="dna-seq">' +
+        escapeHtml(m[2]) + '</code></td><td>' + mkCopyBtn(m[2]) + '</td></tr>';
+    });
+    return t + '</tbody></table><div class="tbl-copy-row">' + mkRawCopyBtn(allTsv) + '</div></div>';
+  }
+
+  // Multiple bare sequences (one per line)
+  if (lines.length >= 2 && lines.every(function(l) { return isDnaSeq(l.trim()); })) {
+    var seqs = lines.map(function(l) { return l.trim(); });
+    var allTsv = seqs.join('\n');
+    var t = '<div class="seq-table"><table><thead><tr><th>#</th><th>Sequence</th><th></th></tr></thead><tbody>';
+    seqs.forEach(function(s, i) {
+      t += '<tr><td>' + (i+1) + '</td><td><code class="dna-seq">' +
+        escapeHtml(s) + '</code></td><td>' + mkCopyBtn(s) + '</td></tr>';
+    });
+    return t + '</tbody></table><div class="tbl-copy-row">' + mkRawCopyBtn(allTsv) + '</div></div>';
+  }
+
+  // Single DNA sequence
+  if (isDnaSeq(trimmed)) {
+    return '<div class="seq-block"><pre><code>' + escapeHtml(trimmed) + '</code></pre>' +
+      mkCopyBtn(trimmed.replace(/\s/g, ''), 'block-btn') + '</div>';
+  }
+
+  // Regular code block
+  return '<div class="code-block-wrap"><pre><code>' + escapeHtml(code) + '</code></pre>' +
+    mkRawCopyBtn(code, 'block-btn') + '</div>';
+}
+
+// Wrap bare DNA sequences in plain text (skips content already inside backticks)
+function applyBareDnaInLine(h) {
+  var parts = h.split(/(`[^`]*`)/);
+  return parts.map(function(part, i) {
+    if (i % 2 === 1) return part;
+    return part.replace(/\b([ACGTUacgtu][ACGTUacgtuRYSWKMBDHVNryswkmbdhvn]{14,})\b/g, function(m) {
+      return isDnaSeq(m) ? ('<code class="dna-seq">' + m + '</code>' + mkCopyBtn(m)) : m;
+    });
+  }).join('');
+}
+
 function inlineMarkdown(text) {
   let h = escapeHtml(text);
-  h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+  h = applyBareDnaInLine(h);
+  h = h.replace(/`([^`]+)`/g, function(match, code) {
+    if (isDnaSeq(code)) return '<code class="dna-seq">' + code + '</code>' + mkCopyBtn(code);
+    return '<code>' + code + '</code>';
+  });
   h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   return h;
 }
@@ -1822,15 +1975,24 @@ function renderContent(text) {
         bodyRows.push(cells);
         i++;
       }
-      let t = '<table><thead><tr>';
+      var tsvRows = [headerCells.join('\t')].concat(bodyRows.map(function(row) { return row.join('\t'); }));
+      var tblTsv = tsvRows.join('\n');
+      let t = '<div class="seq-table"><table><thead><tr>';
       headerCells.forEach(function(c) { t += '<th>' + inlineMarkdown(c) + '</th>'; });
       t += '</tr></thead><tbody>';
       bodyRows.forEach(function(row) {
         t += '<tr>';
-        row.forEach(function(c) { t += '<td>' + inlineMarkdown(c) + '</td>'; });
+        row.forEach(function(c) {
+          const stripped = c.trim();
+          if (isDnaSeq(stripped)) {
+            t += '<td><code class="dna-seq">' + escapeHtml(stripped) + '</code>' + mkCopyBtn(stripped) + '</td>';
+          } else {
+            t += '<td>' + inlineMarkdown(c) + '</td>';
+          }
+        });
         t += '</tr>';
       });
-      t += '</tbody></table>';
+      t += '</tbody></table><div class="tbl-copy-row">' + mkRawCopyBtn(tblTsv) + '</div></div>';
       outputParts.push(t);
     } else {
       const trimmed = lines[i].trim();
@@ -1841,7 +2003,11 @@ function renderContent(text) {
         continue;
       }
       let h = escapeHtml(lines[i]);
-      h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+      h = applyBareDnaInLine(h);
+      h = h.replace(/`([^`]+)`/g, function(match, code) {
+        if (isDnaSeq(code)) return '<code class="dna-seq">' + code + '</code>' + mkCopyBtn(code);
+        return '<code>' + code + '</code>';
+      });
       h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
       h = h.replace(/^### (.+)$/, '<strong style="font-size:14px">$1</strong>');
       h = h.replace(/^## (.+)$/, '<strong style="font-size:15px">$1</strong>');
@@ -1853,7 +2019,7 @@ function renderContent(text) {
 
   let html = outputParts.join('<br>\n');
   codeBlocks.forEach(function(code, idx) {
-    html = html.replace('%%CODEBLOCK' + idx + '%%', '<pre><code>' + escapeHtml(code) + '</code></pre>');
+    html = html.replace('%%CODEBLOCK' + idx + '%%', renderSeqCodeBlock(code));
   });
   return html;
 }
@@ -2006,25 +2172,107 @@ const WORKING_LABELS = [
   'Checking the freezer…',
   'Growing colonies…',
   'Spinning down…',
-  'Running BLAST…',
-  'Optimizing codons…',
   'Thawing reagents…',
-  'Loading the NanoDrop…',
   'Asking a grad student…',
   'Reading the manual…',
-  'Designing primers…',
   'Autoclaving…',
-  'Checking for off-targets…',
   'Counting clones…',
   'Labeling tubes…',
   'Calibrating the pipette…',
-  'Checking restriction sites…',
-  'Annotating features…',
-  'Sequencing…',
-  'Making competent cells…',
   'Staring at the gel…',
   'Refilling tip boxes…',
-  'Googling the protocol…',
+  'Making competent cells…',
+  'Waiting for the PCR…',
+  'Pouring a plate…',
+  'Streaking for singles…',
+  'Checking the incubator…',
+  'Ordering reagents…',
+  'Waiting for the centrifuge…',
+  'Defrosting the -20°C…',
+  'Wiping down the bench…',
+  'Preparing the buffer…',
+  'Changing gloves…',
+  'Signing the safety form…',
+  'Finding the right tube…',
+  'Checking the OD600…',
+  'Setting up the water bath…',
+  'Asking the PI…',
+  'Asking a postdoc…',
+  'Reprinting the label…',
+  'Hunting for the protocol binder…',
+  'Waiting for the autoclave…',
+  'Mixing by pipetting up and down…',
+  'Pipetting…',
+  'Vortexing…',
+  'Flash freezing…',
+  'Filling out the order form…',
+  'Checking if the kit expired…',
+  'Making 10× buffer…',
+  'Weighing out the powder…',
+  'pH-ing the solution…',
+  'Waiting for the gel to set…',
+  'Realizing the gel ran backwards…',
+  'Borrowing tips from the next lab…',
+  'Searching for the marker…',
+  'Checking the thermocycler program…',
+  'Waiting for the overnight culture…',
+  'Diluting the sample…',
+  'Aliquoting…',
+  'Topping off the liquid nitrogen…',
+  'De-icing the freezer…',
+  'Wiping down the hood…',
+  'Running the Western…',
+  'Blocking the membrane…',
+  'Developing the blot…',
+  'Staining with EtBr…',
+  'Destaining the gel…',
+  'Imaging the blot…',
+  'Spinning the columns…',
+  'Eluting the DNA…',
+  'Measuring the absorbance…',
+  'Plating the cells…',
+  'Trypsinizing…',
+  'Counting cells…',
+  'Checking confluency…',
+  'Changing the media…',
+  'Spinning down the pellet…',
+  'Resuspending in buffer…',
+  'Snap freezing…',
+  'Running the SDS-PAGE…',
+  'Loading the samples…',
+  'Casting the gel…',
+  'Transferring to membrane…',
+  'Probing with antibody…',
+  'Washing the membrane…',
+  'Exposing the film…',
+  'Scraping the cells…',
+  'Lysing the cells…',
+  'Sonicating…',
+  'Clarifying the lysate…',
+  'Checking the protein concentration…',
+  'Setting up the ligation…',
+  'Running the digest…',
+  'Gel extracting…',
+  'Incubating on ice…',
+  'Heat shocking…',
+  'Recovering in SOC…',
+  'Spreading the plates…',
+  'Picking colonies…',
+  'Inoculating the culture…',
+  'Doing a colony PCR…',
+  'Checking the growth curve…',
+  'Inducing expression…',
+  'Harvesting cells…',
+  'Resuspending the pellet…',
+  'Filtering the solution…',
+  'Running the FPLC…',
+  'Collecting fractions…',
+  'Pooling the peaks…',
+  'Concentrating the sample…',
+  'Running a Bradford…',
+  'Preparing the cryovials…',
+  'Labeling the boxes…',
+  'Checking the balance…',
 ];
 
 function randomWorkingLabel() {
@@ -2170,7 +2418,8 @@ async function sendMessage() {
   streamingInner = inner;
   const userDiv = document.createElement('div');
   userDiv.className = 'msg user';
-  userDiv.innerHTML = '<div class="msg-bubble-user">' + escapeHtml(text) + '</div>';
+  const nowStr = new Date().toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'});
+  userDiv.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(text) + '</div><div class="msg-date">' + nowStr + '</div></div>';
   inner.appendChild(userDiv);
   scrollToBottom();
   showPendingCursor();

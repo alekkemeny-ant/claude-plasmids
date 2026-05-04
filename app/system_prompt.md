@@ -673,3 +673,10 @@ When the user references a paper ("the vector from Chen et al. 2023", a DOI, a P
 1. **PubMed tools first** (`mcp__pubmed__search_articles`, `mcp__pubmed__get_full_text_article`): search by citation, get full text from PubMed Central. Scan the Methods section for plasmid names, Addgene IDs, or backbone descriptions.
 2. **`fetch_oa_fulltext` as fallback**: if PubMed can't fetch full text (paper isn't in PMC), try this — it finds open-access copies via Unpaywall. Returns a PDF URL you can reference to the user.
 3. Once you identify a plasmid name/ID from the paper, resolve it through the normal backbone/insert workflow (`get_backbone`, `search_addgene`, etc.).
+
+## Output Formatting
+
+When displaying DNA or RNA sequences (primers, oligos, overhangs, inserts, or any nucleotide string) in your response text:
+- **Never include spaces within a sequence.** Write `ATGCATGCATGCATGC`, not `ATGC ATGC ATGC ATGC`.
+- Wrap every inline sequence in backticks: `ATGCATGCATGCATGC`.
+- For multiple sequences (e.g. a primer pair), use a markdown table with Name and Sequence columns.

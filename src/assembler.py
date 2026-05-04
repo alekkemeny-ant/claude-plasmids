@@ -1268,6 +1268,22 @@ def get_plasmid_plot_json(df, linear: bool = False) -> str:
     """
     if not _PLANNOTATE_AVAILABLE:
         raise RuntimeError(_PLANNOTATE_MISSING_MSG)
+    df = df.copy()
+    if "fragment" in df.columns:
+        df["fragment"] = df["fragment"].astype(bool)
+    # Drop rows that would produce NaN/inf in pLannotate's rstart/rend calculation
+    # (qlen=0 → 0/0=NaN; any NaN in position cols → propagates through trig).
+    _pos_cols = [c for c in ("qstart", "qend", "qlen") if c in df.columns]
+    if _pos_cols:
+        df = df.dropna(subset=_pos_cols)
+        if "qlen" in df.columns:
+            df = df[df["qlen"] > 0]
+        # Verify rstart/rend will be finite for all remaining rows.
+        from math import pi as _pi
+        import numpy as _np
+        _rs = (df["qstart"] / df["qlen"]) * 2 * _pi
+        _re = (df["qend"] / df["qlen"]) * 2 * _pi
+        df = df[_np.isfinite(_rs) & _np.isfinite(_re)]
     plot = get_bokeh(df, linear=linear)
     plot.plot_width = 600
     plot.plot_height = 200 if linear else 600

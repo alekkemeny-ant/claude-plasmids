@@ -62,15 +62,30 @@ except ImportError as e:
         f"Run: pip install -r requirements.txt"
     ) from e
 from src.tools import (
+    set_session_uploads,
     build_mcp_servers,
     get_anthropic_tool_schemas,
     get_tool_dispatch,
     set_tracker,
     get_last_plot_json,
+    get_plot_skipped_reason,
     clear_last_plot_json,
 )
 from src.references import ReferenceTracker
 from src.library import load_backbones, load_inserts
+_DB_MODULE_PATH = Path(__file__).parent / "database.py"
+import importlib.util as _importlib_util
+_db_spec = _importlib_util.spec_from_file_location("plasmid_database", _DB_MODULE_PATH)
+_db_mod = _importlib_util.module_from_spec(_db_spec)
+_db_spec.loader.exec_module(_db_mod)
+_init_db = _db_mod.init_db
+_db_save_construct = _db_mod.save_construct
+_db_list_constructs = _db_mod.list_constructs
+_db_update_construct = _db_mod.update_construct
+_db_get_genbank = _db_mod.get_construct_genbank
+_db_get_graph = _db_mod.get_graph_data
+build_parts_from_library = _db_mod.build_parts_from_library
+run_validation_structured = _db_mod.run_validation_structured
 
 logger = logging.getLogger(__name__)
 
@@ -189,10 +204,11 @@ _sessions_lock = threading.Lock()
 _batch_jobs: dict[str, dict] = {}
 SESSIONS_FILE = Path(__file__).parent / ".sessions.json"
 
-MODEL = "claude-opus-4-6"
+MODEL = "claude-opus-4-7"
 
 # Context window sizes by model (tokens)
 CONTEXT_WINDOW = {
+    "claude-opus-4-7":          1_000_000,
     "claude-opus-4-6":          1_000_000,
     "claude-sonnet-4-6":        1_000_000,
     "claude-haiku-4-5-20251001":  200_000,
@@ -217,9 +233,13 @@ def _serialize_content(content):
                 d = b
             else:
                 continue
-            # Skip thinking blocks — they cause Error 400 on replay
+            # Preserve thinking blocks that carry a signature (Opus 4.7
+            # adaptive thinking) — they must be replayed in multi-turn history.
+            # Strip unsigned thinking blocks (Opus 4.6 and older) which cause
+            # 400 errors on replay.
             if isinstance(d, dict) and d.get("type") == "thinking":
-                continue
+                if not d.get("signature"):
+                    continue
             serialized.append(d)
         return serialized
     return content
@@ -320,6 +340,10 @@ def _load_sessions():
 # Load persisted sessions at import time
 _load_sessions()
 
+# ── Database ─────────────────────────────────────────────────────────────────
+DB_PATH = Path(__file__).parent / "constructs.db"
+_init_db(DB_PATH)
+
 
 def format_conversation_markdown(title: str, messages: list[dict]) -> str:
     """Render display_messages as a Markdown transcript."""
@@ -385,6 +409,7 @@ def create_session() -> str:
         # Troubleshooting / project-memory fields (Phase 2)
         "project_name": None,            # user-assigned project label (optional)
         "experimental_outcomes": [],     # list of {status, observation, construct_name, timestamp}
+        "uploads": {},                   # session-scoped uploaded sequences {name: parsed_dict}
     }
     _save_sessions()
     return sid
@@ -503,9 +528,12 @@ def _emit_tool_result(
         ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
         event_data["download_filename"] = cname + ext
     safe_write(event_data)
-    plot = get_last_plot_json()
-    if tool_name == "export_construct" and plot:
-        safe_write({"type": "plot_data", "plot_json": json.loads(plot)})
+    if tool_name == "export_construct":
+        plot = get_last_plot_json()
+        if plot:
+            safe_write({"type": "plot_data", "plot_json": json.loads(plot)})
+        elif reason := get_plot_skipped_reason():
+            safe_write({"type": "plot_skipped", "reason": reason})
         clear_last_plot_json()
     assistant_blocks.append({
         "type": "tool_use",
@@ -533,6 +561,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
 
     tracker = ReferenceTracker()
     set_tracker(tracker)
+    set_session_uploads(session.get("uploads") or {})
     clear_last_plot_json()
     export_called = False
 
@@ -682,9 +711,12 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         })
     _save_sessions()
 
-    plot = get_last_plot_json()
-    if export_called and plot:
-        safe_write({"type": "plot_data", "plot_json": json.loads(plot)})
+    if export_called:
+        plot = get_last_plot_json()
+        if plot:
+            safe_write({"type": "plot_data", "plot_json": json.loads(plot)})
+        elif reason := get_plot_skipped_reason():
+            safe_write({"type": "plot_skipped", "reason": reason})
         clear_last_plot_json()
 
     if not disconnected:
@@ -704,6 +736,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <title>Plasmid Designer</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.bokeh.org/bokeh/release/bokeh-2.4.1.min.js"></script>
+<link href="https://unpkg.com/tabulator-tables@6.3.0/dist/css/tabulator_bootstrap5.min.css" rel="stylesheet">
+<script src="https://unpkg.com/tabulator-tables@6.3.0/dist/js/tabulator.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<script src="https://unpkg.com/klayjs@0.4.1/klay.js"></script>
+<script src="https://unpkg.com/cytoscape-klay@3.1.4/cytoscape-klay.js"></script>
 <style>
   :root {
     --brand-fig: #D97757;
@@ -962,6 +999,31 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   @keyframes blink { 50% { opacity: 0; } }
 
+  /* ── Working indicator ── */
+  .working-indicator {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 0; color: var(--sand-500); font-size: 13px;
+  }
+  .working-dots { display: flex; align-items: center; gap: 3px; }
+  .working-dots span {
+    display: inline-block; width: 5px; height: 5px;
+    background: var(--brand-fig); border-radius: 50%;
+    animation: working-bounce 1.1s ease-in-out infinite;
+    opacity: 0.35;
+  }
+  .working-dots span:nth-child(2) { animation-delay: 0.18s; }
+  .working-dots span:nth-child(3) { animation-delay: 0.36s; }
+  @keyframes working-bounce {
+    0%, 100% { transform: translateY(0); opacity: 0.35; }
+    40% { transform: translateY(-4px); opacity: 1; }
+  }
+  .slow-note {
+    font-size: 12px; color: var(--sand-400);
+    margin-top: 4px; font-style: italic;
+    animation: fadein 0.6s ease;
+  }
+  @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+
   /* ── Collapsible blocks (thinking + tool) ── */
   .thinking-block, .tool-block { margin: 6px 0; }
   .block-card {
@@ -1055,6 +1117,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .model-select:hover { border-color: var(--sand-300); }
   .model-select:focus { border-color: var(--brand-fig); }
+  .attach-btn {
+    background: transparent; border: 1px solid var(--sand-200); border-radius: 6px;
+    padding: 6px 8px; margin-right: 8px; cursor: pointer; color: var(--sand-600);
+    display: inline-flex; align-items: center;
+  }
+  .attach-btn:hover { border-color: var(--sand-300); color: var(--sand-700); }
   .token-indicator {
     display: none; align-items: center; gap: 5px;
     margin-left: 8px; font-size: 11px; color: var(--sand-400);
@@ -1183,6 +1251,88 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .batch-followup-send:disabled { opacity: 0.35; cursor: not-allowed; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .spin { animation: spin 1s linear infinite; transform-origin: center; }
+
+  /* ── Saved Constructs button in header ──────────────────────────────── */
+  .saved-constructs-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 500;
+    cursor: pointer; border: 1.5px solid var(--sand-300); background: var(--sand-50);
+    color: var(--text-primary); font-family: Inter, sans-serif;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .saved-constructs-btn:hover { background: var(--sand-100); border-color: var(--sand-400); }
+  .saved-constructs-btn.active {
+    background: var(--brand-fig); border-color: var(--brand-fig); color: white;
+  }
+  .saved-constructs-btn.active svg { stroke: white; }
+
+  /* ── Saved Constructs full-screen overlay ───────────────────────────── */
+  .library-overlay {
+    position: fixed; inset: 0; z-index: 9000;
+    display: flex; flex-direction: column;
+    background: var(--sand-50);
+  }
+  .library-panel-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 20px; border-bottom: 1px solid var(--sand-200);
+    background: white; flex-shrink: 0;
+    justify-content: space-between;
+  }
+  .library-panel-header > div > span {
+    font-weight: 600; font-size: 14px; color: var(--text-primary);
+  }
+  .library-panel-header > div > svg { stroke: var(--brand-fig); }
+  .lib-tab {
+    padding: 4px 10px; font-size: 12px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--sand-300); background: var(--sand-50);
+    color: var(--text-secondary); font-family: Inter, sans-serif;
+  }
+  .lib-tab:hover { background: var(--sand-200); }
+  .lib-tab.active { background: var(--brand-fig); color: #fff; border-color: var(--brand-fig); }
+  .lib-close {
+    padding: 5px; border: none; background: none; cursor: pointer;
+    color: var(--text-secondary); border-radius: 6px; display: flex; align-items: center;
+    flex-shrink: 0;
+  }
+  .lib-close:hover { background: var(--sand-200); color: var(--text-primary); }
+  .lib-tab-bar { display: flex; gap: 6px; align-items: center; }
+  #lib-table-pane { flex: 1; overflow: auto; padding: 0; }
+  #lib-graph-pane { flex: 1; overflow: hidden; position: relative; }
+  #constructs-graph { width: 100%; height: 100%; min-height: 400px; }
+  .save-btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 12px; border-radius: 6px; font-size: 12px; font-weight: 500;
+    cursor: pointer; border: none; font-family: Inter, sans-serif;
+    background: var(--brand-fig); color: #fff; margin-left: 8px;
+  }
+  .save-btn:hover { background: var(--brand-fig-hover); }
+  .save-btn:disabled { opacity: 0.6; cursor: default; }
+  /* Tabulator theme overrides */
+  .tabulator { font-family: Inter, sans-serif; font-size: 12px;
+    border: none; background: var(--sand-50); }
+  .tabulator .tabulator-header { background: var(--sand-100);
+    border-bottom: 1px solid var(--sand-300); }
+  .tabulator .tabulator-header .tabulator-col { background: var(--sand-100);
+    border-right: 1px solid var(--sand-200); }
+  .tabulator .tabulator-row { background: var(--sand-50); border-bottom: 1px solid var(--sand-100); }
+  .tabulator .tabulator-row:hover { background: var(--sand-100); }
+  .tabulator .tabulator-row.tabulator-selected { background: var(--brand-fig-10); }
+  .parts-sub-table { width: 100%; border-collapse: collapse;
+    font-size: 11px; margin: 6px 0; }
+  .parts-sub-table th { background: var(--sand-200); padding: 4px 8px;
+    text-align: left; font-weight: 500; color: var(--text-secondary); }
+  .parts-sub-table td { padding: 4px 8px; border-bottom: 1px solid var(--sand-100);
+    color: var(--text-primary); }
+  .parts-sub-table tr:last-child td { border-bottom: none; }
+  .parts-sub-table a { color: var(--brand-fig); text-decoration: none; }
+  .parts-sub-table a:hover { text-decoration: underline; }
+  .row-detail-wrap { padding: 8px 12px; background: var(--sand-100); }
+  .row-detail-wrap h4 { font-size: 11px; font-weight: 600; color: var(--text-secondary);
+    margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.05em; }
+  .upload-verified-btn { font-size: 11px; margin-top: 6px; padding: 3px 8px;
+    background: var(--sand-200); border: 1px solid var(--sand-300); border-radius: 4px;
+    cursor: pointer; font-family: Inter, sans-serif; color: var(--text-secondary); }
+  .upload-verified-btn:hover { background: var(--sand-300); }
 </style>
 </head>
 <body>
@@ -1200,12 +1350,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <p>Allen Institute - OCTO AI</p>
     </div>
   </div>
-  <div>
-    <span id="export-menu" style="display:none;margin-right:12px;font-size:13px;">
-      Export:
-      <a id="export-md" href="#" style="margin:0 4px;">Markdown</a> ·
-      <a id="export-json" href="#" style="margin:0 4px;">JSON</a>
-    </span>
+  <div style="display:flex;align-items:center;gap:12px">
+    <button class="saved-constructs-btn" id="lib-panel-btn" onclick="toggleLibraryPanel()">
+      <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+      </svg>
+      Saved Constructs
+    </button>
     <span class="health-badge offline" id="health-badge">
       <span class="health-dot"></span>
       <span id="health-text">Agent Offline</span>
@@ -1256,8 +1407,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <svg width="36" height="36" fill="none" stroke="var(--brand-fig)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
         <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
       </svg>
-      <div class="drop-overlay-label">Drop CSV to batch design</div>
-      <div class="drop-overlay-sub">Required column: description &nbsp;·&nbsp; Optional: name, output_format</div>
+      <div class="drop-overlay-label">Drop a file</div>
+      <div class="drop-overlay-sub">.gb / .fasta — add a sequence to this session &nbsp;·&nbsp; .csv — batch design</div>
     </div>
     <div class="messages" id="messages">
       <div class="welcome" id="welcome">
@@ -1288,7 +1439,17 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <textarea id="input" placeholder="Describe the plasmid you want to design…" rows="1"
           oninput="autoResize(this)"></textarea>
         <div class="input-meta">
+          <input type="file" id="seq-file-input" accept=".gb,.gbk,.genbank,.fa,.fasta,.fna,.csv"
+                 style="display:none" onchange="onSeqFileChosen(this)">
+          <button class="attach-btn" id="attach-btn" title="Upload a sequence file (.gb, .fasta) or batch CSV"
+                  onclick="document.getElementById('seq-file-input').click()">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+            </svg>
+          </button>
           <select id="model-select" class="model-select">
+            <option value="claude-opus-4-7">Opus 4.7</option>
             <option value="claude-opus-4-6">Opus 4.6</option>
             <option value="claude-sonnet-4-6">Sonnet 4.6</option>
             <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
@@ -1315,11 +1476,42 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
 
   <input type="file" id="batch-csv-input" accept=".csv" style="display:none" onchange="onBatchFileChosen(this)">
+
+</div>
+
+<!-- Saved Constructs full-screen overlay -->
+<div class="library-overlay" id="library-panel" style="display:none">
+  <div class="library-panel-header">
+    <div style="display:flex;align-items:center;gap:10px">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+      </svg>
+      <span>Saved Constructs</span>
+    </div>
+    <div class="lib-tab-bar">
+      <button class="lib-tab active" id="lib-tab-table" onclick="showLibraryTab('table')">&#9776; Table</button>
+      <button class="lib-tab" id="lib-tab-graph" onclick="showLibraryTab('graph')">&#9672; Graph</button>
+      <button class="lib-tab" onclick="refreshLibraryData()">&#8635; Refresh</button>
+    </div>
+    <button class="lib-close" onclick="toggleLibraryPanel()" title="Close">
+      <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div id="lib-table-pane" style="flex:1;overflow:auto;min-height:0">
+    <div id="constructs-table"></div>
+  </div>
+  <div id="lib-graph-pane" style="display:none;flex:1;overflow:hidden;min-height:0;position:relative">
+    <div id="constructs-graph" style="width:100%;height:100%"></div>
+    <div id="cy-tooltip" style="display:none;position:absolute;z-index:100;pointer-events:none;
+      background:white;border:1px solid var(--sand-200);border-radius:8px;
+      padding:10px 13px;font-size:12px;font-family:Inter,sans-serif;
+      box-shadow:0 4px 16px rgba(0,0,0,0.12);max-width:240px;line-height:1.5"></div>
+  </div>
 </div>
 
 <script>
 // ── State ──
-let currentSessionId = sessionStorage.getItem('plasmid_session_id') || null;
+let currentSessionId = localStorage.getItem('plasmid_session_id') || null;
 let sessions = [];
 let isStreaming = false;
 let abortController = null;
@@ -1344,11 +1536,10 @@ function updateTokenIndicator(inputTokens, contextWindow) {
 function saveSessionId(id) {
   currentSessionId = id;
   if (id) {
-    sessionStorage.setItem('plasmid_session_id', id);
+    localStorage.setItem('plasmid_session_id', id);
   } else {
-    sessionStorage.removeItem('plasmid_session_id');
+    localStorage.removeItem('plasmid_session_id');
   }
-  updateExportLinks();
 }
 
 // ── DOM refs ──
@@ -1554,16 +1745,6 @@ async function deleteSessionById(sessionId) {
     }
     loadSessions();
   } catch {}
-}
-
-function updateExportLinks() {
-  var menu = document.getElementById('export-menu');
-  if (!currentSessionId) { menu.style.display = 'none'; return; }
-  menu.style.display = 'inline';
-  document.getElementById('export-md').href =
-    '/api/sessions/' + currentSessionId + '/export?format=md';
-  document.getElementById('export-json').href =
-    '/api/sessions/' + currentSessionId + '/export?format=json';
 }
 
 function newChat() {
@@ -1917,23 +2098,68 @@ function flushTextBuffer() {
 // Show a blinking cursor immediately on send so the user sees activity
 // during TTFT, before any text/thinking/tool event arrives.
 let pendingCursorEl = null;
+let pendingCursorTimer = null;
+const SLOW_THRESHOLD_MS = 7000;
+const SLOW_NOTE = 'Complex designs can take a minute or two — hang tight.';
 
-function showPendingCursor() {
+const WORKING_LABELS = [
+  'Pipetting…',
+  'Running a gel…',
+  'Miniprepping…',
+  'Consulting the literature…',
+  'Transforming bacteria…',
+  'Checking the freezer…',
+  'Growing colonies…',
+  'Spinning down…',
+  'Running BLAST…',
+  'Optimizing codons…',
+  'Thawing reagents…',
+  'Loading the NanoDrop…',
+  'Asking a grad student…',
+  'Reading the manual…',
+  'Designing primers…',
+  'Autoclaving…',
+  'Checking for off-targets…',
+  'Counting clones…',
+  'Labeling tubes…',
+  'Calibrating the pipette…',
+  'Checking restriction sites…',
+  'Annotating features…',
+  'Sequencing…',
+  'Making competent cells…',
+  'Staring at the gel…',
+  'Refilling tip boxes…',
+  'Googling the protocol…',
+];
+
+function randomWorkingLabel() {
+  return WORKING_LABELS[Math.floor(Math.random() * WORKING_LABELS.length)];
+}
+
+function showPendingCursor(label) {
   clearPendingCursor();
   const div = document.createElement('div');
   div.className = 'msg assistant';
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble-assistant';
-  const cursor = document.createElement('span');
-  cursor.className = 'streaming-cursor';
-  bubble.appendChild(cursor);
-  div.appendChild(bubble);
+  div.innerHTML =
+    '<div class="msg-bubble-assistant">' +
+      '<div class="working-indicator">' +
+        '<span class="working-dots"><span></span><span></span><span></span></span>' +
+        '<span class="working-label">' + (label || randomWorkingLabel()) + '</span>' +
+      '</div>' +
+      '<div class="slow-note" style="display:none"></div>' +
+    '</div>';
   getInner().appendChild(div);
   pendingCursorEl = div;
+  pendingCursorTimer = setTimeout(function() {
+    if (!pendingCursorEl) return;
+    const note = pendingCursorEl.querySelector('.slow-note');
+    if (note) { note.textContent = SLOW_NOTE; note.style.display = ''; }
+  }, SLOW_THRESHOLD_MS);
   scrollToBottom();
 }
 
 function clearPendingCursor() {
+  if (pendingCursorTimer) { clearTimeout(pendingCursorTimer); pendingCursorTimer = null; }
   if (pendingCursorEl) { pendingCursorEl.remove(); pendingCursorEl = null; }
 }
 
@@ -1967,6 +2193,17 @@ function startToolBlock(toolName) {
   scrollToBottom();
 }
 
+function addPlotSkipped(reason) {
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.innerHTML = '<div class="msg-bubble-assistant" style="margin-top:8px;padding:12px;background:#fff8f0;border-left:3px solid #e8a23c;">' +
+    '<div style="font-size:11px;font-weight:600;color:#a86a1d;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Plasmid map skipped</div>' +
+    '<div style="font-size:13px;color:#6b4a1a;">' + escapeHtml(reason) + '</div>' +
+  '</div>';
+  getInner().appendChild(div);
+  scrollToBottom();
+}
+
 function addPlasmidPlot(plotJson) {
   var bokehItem = plotJson.plot !== undefined ? plotJson.plot : plotJson;
   var isLinear = plotJson.linear === true;
@@ -1984,18 +2221,17 @@ function addPlasmidPlot(plotJson) {
 }
 
 function addDownloadButton(container, content, filename) {
-  const dlId = 'dl-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
   const div = document.createElement('div');
   div.className = 'msg assistant';
   div.innerHTML = '<div class="msg-bubble-assistant" style="margin-top:8px">' +
-    '<button class="download-btn" id="' + dlId + '">' +
+    '<button class="download-btn">' +
       '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">' +
         '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>' +
       '</svg>' +
       ' Download ' + escapeHtml(filename) +
     '</button></div>';
   container.appendChild(div);
-  document.getElementById(dlId).addEventListener('click', function() {
+  div.querySelector('.download-btn').addEventListener('click', function() {
     const blob = new Blob([content], {type: 'application/octet-stream'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -2022,8 +2258,14 @@ function finishToolBlock(toolName, toolInput, toolResult, downloadContent, downl
   // Surface download button in the main chat (not just inside the collapsed tool block)
   if (downloadContent && downloadFilename) {
     addDownloadButton(getInner(), downloadContent, downloadFilename);
+    // Add "Save to Library" button for GenBank exports
+    if (toolName === 'export_construct' &&
+        ['genbank', 'gb'].includes((toolInput.output_format || '').toLowerCase())) {
+      addSaveToLibraryButton(getInner(), toolInput, downloadContent);
+    }
   }
   currentToolId = pendingToolIds.length > 0 ? pendingToolIds[pendingToolIds.length - 1] : null;
+  showPendingCursor();
   scrollToBottom();
 }
 
@@ -2100,6 +2342,7 @@ async function sendMessage() {
           case 'tool_use_start': clearPendingCursor(); startToolBlock(event.tool); break;
           case 'tool_result': finishToolBlock(event.tool, event.input || {}, event.content, event.download_content, event.download_filename); break;
           case 'plot_data': addPlasmidPlot(event.plot_json); break;
+          case 'plot_skipped': addPlotSkipped(event.reason); break;
           case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
           case 'error':
             clearPendingCursor();
@@ -2201,20 +2444,108 @@ chatPanelEl.addEventListener('dragover', function(e) {
   e.dataTransfer.dropEffect = 'copy';
 });
 
+var SEQ_EXTS = ['.gb', '.gbk', '.genbank', '.fa', '.fasta', '.fna'];
+
+function isSequenceFile(file) {
+  var lower = file.name.toLowerCase();
+  return SEQ_EXTS.some(function(ext) { return lower.endsWith(ext); });
+}
+
 chatPanelEl.addEventListener('drop', function(e) {
   e.preventDefault();
   dragCounter = 0;
   dropOverlayEl.classList.remove('active');
   var file = e.dataTransfer.files[0];
   if (!file) return;
-  if (!file.name.endsWith('.csv') && file.type !== 'text/csv') {
-    alert('Please drop a .csv file.');
-    return;
+  if (isSequenceFile(file)) {
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      var bytes = new Uint8Array(ev.target.result);
+      var b64 = btoa(String.fromCharCode.apply(null, bytes));
+      uploadSequenceFile(file.name, b64);
+    };
+    reader.readAsArrayBuffer(file);
+  } else if (file.name.endsWith('.csv') || file.type === 'text/csv') {
+    var reader2 = new FileReader();
+    reader2.onload = function(ev) { uploadBatchCSV(ev.target.result, file.name); };
+    reader2.readAsText(file);
+  } else {
+    addUploadCard({error: 'Unsupported file type. Drop a .gb / .fasta sequence or a .csv for batch design.'});
   }
-  var reader = new FileReader();
-  reader.onload = function(ev) { uploadBatchCSV(ev.target.result, file.name); };
-  reader.readAsText(file);
 });
+
+function uploadSequenceFile(filename, contentB64) {
+  lastUpload = {filename: filename, content_b64: contentB64};
+  fetch('/api/upload', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      filename: filename, content_b64: contentB64,
+      save_to_library: false, session_id: currentSessionId,
+    }),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) { addUploadCard({error: data.error}); return; }
+    addUploadCard(data);
+    var p = data.parsed;
+    var prefix = '[Uploaded sequence: ' + p.name + ' (' + p.length +
+                 ' bp ' + p.format + '). Use get_uploaded_sequence("' + p.name +
+                 '") to retrieve it.]\n';
+    inputEl.value = prefix + inputEl.value;
+    autoResize(inputEl);
+  })
+  .catch(function(e) { addUploadCard({error: 'Upload failed: ' + e}); });
+}
+
+function addUploadCard(data) {
+  var div = document.createElement('div');
+  div.className = 'msg assistant';
+  var inner;
+  if (data.error) {
+    inner = '<div class="msg-bubble-assistant" style="background:#fdecea;border-left:3px solid #d93025;padding:12px;">' +
+      '<div style="font-size:11px;font-weight:600;color:#a50e0e;text-transform:uppercase;">Upload error</div>' +
+      '<div style="font-size:13px;color:#5f1a14;margin-top:4px;">' + escapeHtml(data.error) + '</div></div>';
+  } else if (data.saved_only) {
+    inner = '<div class="msg-bubble-assistant" style="padding:10px;">' +
+      '<div style="font-size:12px;color:#1e7e34;">Saved to library as <code>' +
+      escapeHtml(data.saved_only.id) + '</code> &nbsp;→&nbsp; ' +
+      '<span style="color:var(--sand-500);">' + escapeHtml(data.saved_only.saved_path) + '</span></div></div>';
+  } else {
+    var p = data.parsed;
+    var lib = data.library;
+    var hint;
+    if (lib && lib.configured) {
+      hint = '<div style="font-size:12px;margin-top:8px;border-top:1px solid var(--sand-200);padding-top:8px;">' +
+        'Save to library as: ' +
+        '<button class="attach-btn" style="margin:0 4px;padding:3px 8px;font-size:12px;" onclick="saveLastUploadToLibrary(\'backbones\')">Backbone</button>' +
+        '<button class="attach-btn" style="margin:0 4px;padding:3px 8px;font-size:12px;" onclick="saveLastUploadToLibrary(\'inserts\')">Insert</button>' +
+        '<button class="attach-btn" style="margin:0 4px;padding:3px 8px;font-size:12px;" onclick="saveLastUploadToLibrary(\'annotations\')">Annotation</button>' +
+        ' &nbsp;<span style="color:var(--sand-500);">or just use in this session</span></div>';
+    } else {
+      hint = '<div style="font-size:12px;color:var(--sand-500);margin-top:8px;border-top:1px solid var(--sand-200);padding-top:8px;">' +
+        'To save to your local library, set <code>PLASMID_USER_LIBRARY</code> — see server log for details.</div>';
+    }
+    if (data.saved) {
+      hint = '<div style="font-size:12px;color:#1e7e34;margin-top:6px;">Saved as <code>' + escapeHtml(data.saved.id) + '</code></div>';
+    }
+    var nameInputId = 'upload-name-' + Date.now();
+    if (lastUpload) lastUpload.nameInputId = nameInputId;
+    inner = '<div class="msg-bubble-assistant" style="padding:12px;">' +
+      '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;">Uploaded sequence</div>' +
+      '<input id="' + nameInputId + '" value="' + escapeHtml(p.name) + '" ' +
+        'style="font-size:14px;font-weight:600;margin-top:4px;border:1px solid var(--sand-200);' +
+        'border-radius:4px;padding:2px 6px;width:60%;">' +
+      '<div style="font-size:13px;color:var(--sand-600);margin-top:2px;">' +
+        escapeHtml(p.length + ' bp · ' + p.format + (p.topology ? ' · ' + p.topology : '') +
+                   (p.organism ? ' · ' + p.organism : '') +
+                   ' · ' + (p.features ? p.features.length : 0) + ' features') +
+      '</div>' + hint + '</div>';
+  }
+  div.innerHTML = inner;
+  getInner().appendChild(div);
+  scrollToBottom();
+}
 
 function onBatchFileChosen(input) {
   var file = input.files[0];
@@ -2223,6 +2554,49 @@ function onBatchFileChosen(input) {
   reader.onload = function(e) { uploadBatchCSV(e.target.result, file.name); };
   reader.readAsText(file);
   input.value = '';
+}
+
+function onSeqFileChosen(input) {
+  var file = input.files[0];
+  if (!file) { input.value = ''; return; }
+  if (file.name.toLowerCase().endsWith('.csv')) {
+    var r = new FileReader();
+    r.onload = function(ev) { uploadBatchCSV(ev.target.result, file.name); };
+    r.readAsText(file);
+  } else if (isSequenceFile(file)) {
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      var bytes = new Uint8Array(ev.target.result);
+      var b64 = btoa(String.fromCharCode.apply(null, bytes));
+      uploadSequenceFile(file.name, b64);
+    };
+    reader.readAsArrayBuffer(file);
+  } else {
+    addUploadCard({error: 'Unsupported file type. Choose a .gb / .fasta sequence or a .csv for batch design.'});
+  }
+  input.value = '';
+}
+
+var lastUpload = null;
+
+function saveLastUploadToLibrary(kind) {
+  if (!lastUpload) return;
+  var nameInput = document.getElementById(lastUpload.nameInputId);
+  var override = nameInput ? nameInput.value : undefined;
+  fetch('/api/upload', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      filename: lastUpload.filename, content_b64: lastUpload.content_b64,
+      save_to_library: true, kind: kind, override_name: override,
+      session_id: currentSessionId,
+    }),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.save_error) { addUploadCard({error: d.save_error}); }
+    else if (d.saved) { addUploadCard({saved_only: d.saved}); }
+  });
 }
 
 function uploadBatchCSV(csvText, filename) {
@@ -2501,6 +2875,375 @@ function downloadAllBatch(jobId) {
   document.body.removeChild(a);
 }
 
+// ── Saved Constructs ─────────────────────────────────────────────────────────
+
+function addSaveToLibraryButton(container, toolInput, genbankContent) {
+  const div = document.createElement('div');
+  div.style.marginTop = '4px';
+  const btn = document.createElement('button');
+  btn.className = 'save-btn';
+  btn.innerHTML = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> Save Construct';
+  div.appendChild(btn);
+  container.appendChild(div);
+  btn.addEventListener('click', function() {
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    saveConstructToLibrary(toolInput, genbankContent, btn);
+  });
+}
+
+async function saveConstructToLibrary(toolInput, genbankContent, btn) {
+  const body = {
+    construct_name: toolInput.construct_name || 'construct',
+    genbank_content: genbankContent,
+    total_size_bp: null,
+    session_id: currentSessionId,
+    backbone_name: toolInput.backbone_name || '',
+    insert_name: toolInput.insert_name || '',
+  };
+  try {
+    const r = await fetch('/api/db/constructs', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (data.id) {
+      btn.innerHTML = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> Saved';
+      btn.style.opacity = '0.75';
+    } else {
+      btn.textContent = 'Save failed';
+      btn.disabled = false;
+    }
+  } catch(e) {
+    btn.textContent = 'Save failed';
+    btn.disabled = false;
+  }
+}
+
+// ── Library panel toggle ─────────────────────────────────────────────────────
+
+let _libraryPanelOpen = false;
+
+function toggleLibraryPanel() {
+  const panel = document.getElementById('library-panel');
+  _libraryPanelOpen = !_libraryPanelOpen;
+  panel.style.display = _libraryPanelOpen ? 'flex' : 'none';
+  const btn = document.getElementById('lib-panel-btn');
+  if (btn) btn.classList.toggle('active', _libraryPanelOpen);
+  if (_libraryPanelOpen) {
+    if (!_constructsTable) {
+      _initTabulator();
+    } else {
+      _constructsTable.setData('/api/db/constructs');
+    }
+    if (!_cy) _initCytoscape();
+  }
+}
+
+function showLibraryTab(tab) {
+  document.getElementById('lib-table-pane').style.display = tab === 'table' ? '' : 'none';
+  document.getElementById('lib-graph-pane').style.display = tab === 'graph' ? 'flex' : 'none';
+  document.getElementById('lib-tab-table').classList.toggle('active', tab === 'table');
+  document.getElementById('lib-tab-graph').classList.toggle('active', tab === 'graph');
+  if (tab === 'graph') {
+    _loadGraphData();
+    if (_cy) { setTimeout(function() { _cy.resize(); _cy.fit(); }, 50); }
+  }
+}
+
+function refreshLibraryData() {
+  if (_constructsTable) _constructsTable.setData('/api/db/constructs');
+  if (_cy && document.getElementById('lib-graph-pane').style.display !== 'none') _loadGraphData();
+}
+
+// ── Tabulator ────────────────────────────────────────────────────────────────
+
+let _constructsTable = null;
+
+function _initTabulator() {
+  _constructsTable = new Tabulator('#constructs-table', {
+    ajaxURL: '/api/db/constructs',
+    layout: 'fitColumns',
+    height: 'calc(100vh - 100px)',
+    placeholder: 'No constructs saved yet. Export a construct as GenBank and click "Save Construct".',
+    columns: [
+      {title: 'ID', field: 'accession', frozen: true, width: 100,
+       sorter: 'string', hozAlign: 'center',
+       formatter: function(cell) {
+         return '<code style="font-size:11px;color:var(--brand-fig);font-weight:600">' + escapeHtml(cell.getValue() || '') + '</code>';
+       }},
+      {title: 'Construct Name', field: 'construct_name', frozen: true, width: 190,
+       sorter: 'string', tooltip: true},
+      {title: 'User Label', field: 'user_name', editor: 'input', width: 130,
+       cellEdited: _onCellEdited, placeholder: 'Add label…'},
+      {title: 'bp', field: 'total_size_bp', sorter: 'number', width: 70, hozAlign: 'right'},
+      {title: 'Created', field: 'created_at', sorter: 'datetime', width: 140,
+       formatter: function(cell) {
+         const v = cell.getValue();
+         return v ? v.slice(0, 16).replace('T', ' ') : '';
+       }},
+      {title: '&#10003;', field: 'sequence_verified', formatter: 'tickCross',
+       editor: true, width: 42, hozAlign: 'center', cellEdited: _onCellEdited,
+       headerTooltip: 'Sequence verified'},
+      {title: 'File', width: 52, formatter: function(cell) {
+         const id = cell.getRow().getData().id;
+         return '<a class="download-btn" style="font-size:11px;padding:3px 7px" href="/api/db/constructs/' + id + '/genbank">GBK</a>';
+       }, hozAlign: 'center', headerSort: false, cellClick: function(e) { e.stopPropagation(); }},
+      {title: 'Notes', field: 'notes', editor: 'textarea', widthGrow: 1,
+       cellEdited: _onCellEdited, formatter: 'plaintext', tooltip: true},
+    ],
+    rowFormatter: function(row) {
+      row.getElement().addEventListener('click', function(e) {
+        if (e.target.tagName === 'A' || e.target.tagName === 'INPUT') return;
+        _toggleRowDetail(row);
+      });
+    },
+  });
+}
+
+async function _onCellEdited(cell) {
+  const id = cell.getRow().getData().id;
+  const field = cell.getField();
+  const value = cell.getValue();
+  await fetch('/api/db/constructs/' + id, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({[field]: value}),
+  });
+}
+
+function _toggleRowDetail(row) {
+  const el = row.getElement();
+  const existing = el.nextElementSibling;
+  if (existing && existing.classList.contains('row-detail-wrap')) {
+    existing.remove();
+    return;
+  }
+  const data = row.getData();
+  const wrap = document.createElement('div');
+  wrap.className = 'row-detail-wrap';
+
+  // Parts table
+  let partsHtml = '<h4>Parts &amp; Provenance</h4>';
+  if (data.parts && data.parts.length) {
+    partsHtml += '<table class="parts-sub-table"><thead><tr>' +
+      '<th>Part</th><th>Type</th><th>Region</th><th>Source</th><th>DOI / Accession</th>' +
+      '</tr></thead><tbody>';
+    data.parts.forEach(function(p) {
+      const srcLink = p.source_url
+        ? '<a href="' + escapeHtml(p.source_url) + '" target="_blank" rel="noopener">' + escapeHtml(p.source_system || p.source_url) + '</a>'
+        : escapeHtml(p.source_system || '—');
+      let ref = '—';
+      if (p.source_doi) ref = '<a href="https://doi.org/' + escapeHtml(p.source_doi) + '" target="_blank" rel="noopener">' + escapeHtml(p.source_doi) + '</a>';
+      else if (p.genbank_accession) ref = '<a href="https://www.ncbi.nlm.nih.gov/nuccore/' + escapeHtml(p.genbank_accession) + '" target="_blank" rel="noopener">' + escapeHtml(p.genbank_accession) + '</a>';
+      partsHtml += '<tr><td>' + escapeHtml(p.part_name) + '</td><td>' + escapeHtml(p.part_type) +
+        '</td><td>' + escapeHtml(p.part_region || '—') + '</td><td>' + srcLink + '</td><td>' + ref + '</td></tr>';
+    });
+    partsHtml += '</tbody></table>';
+  } else {
+    partsHtml += '<p style="font-size:11px;color:var(--text-secondary)">No part details captured.</p>';
+  }
+
+  // Upload verified sequence
+  const uploadId = 'upload-seq-' + data.id;
+  partsHtml += '<label class="upload-verified-btn" for="' + uploadId + '">' +
+    '&#8679; Upload verified sequence</label>' +
+    '<input type="file" id="' + uploadId + '" accept=".gb,.fasta,.fa,.txt" style="display:none">';
+
+  wrap.innerHTML = partsHtml;
+  el.after(wrap);
+
+  // Wire up upload
+  const fileInput = wrap.querySelector('#' + uploadId);
+  fileInput.addEventListener('change', async function() {
+    if (!fileInput.files.length) return;
+    const text = await fileInput.files[0].text();
+    await fetch('/api/db/constructs/' + data.id, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({verified_sequence: text, sequence_verified: true}),
+    });
+    // Update the cell in the table
+    if (_constructsTable) {
+      const r = _constructsTable.getRow(data.id);
+      if (r) r.update({sequence_verified: true});
+    }
+    const lbl = wrap.querySelector('label.upload-verified-btn');
+    if (lbl) lbl.textContent = '✓ Verified sequence uploaded';
+  });
+}
+
+// ── Cytoscape ────────────────────────────────────────────────────────────────
+
+let _cy = null;
+
+function _buildTooltipHtml(node) {
+  const d = node.data();
+  const type = d.nodeType;
+  let rows = '';
+  const row = (label, val) => val
+    ? '<tr><td style="color:#87867F;padding-right:10px;white-space:nowrap">' + label + '</td>' +
+      '<td style="font-weight:500">' + val + '</td></tr>'
+    : '';
+
+  if (type === 'construct') {
+    rows += row('Accession', '<code style="color:#D97757;font-weight:600">' + escapeHtml(d.accession) + '</code>');
+    rows += row('Name', escapeHtml(d.label));
+    if (d.user_name) rows += row('Label', escapeHtml(d.user_name));
+    if (d.size_bp) rows += row('Size', d.size_bp.toLocaleString() + ' bp');
+    if (d.backbone_name) rows += row('Backbone', escapeHtml(d.backbone_name));
+    if (d.insert_names && d.insert_names.length)
+      rows += row('Inserts', escapeHtml(d.insert_names.join(', ')));
+    if (d.created_at) rows += row('Created', escapeHtml(d.created_at));
+    if (d.sequence_verified)
+      rows += row('', '<span style="color:#24B283;font-weight:600">&#10003; Sequence verified</span>');
+  } else if (type === 'backbone') {
+    rows += row('Backbone', '<strong>' + escapeHtml(d.label) + '</strong>');
+    if (d.source_system) rows += row('Source', escapeHtml(d.source_system));
+    if (d.addgene_id) rows += row('Addgene', '#' + escapeHtml(d.addgene_id));
+    if (d.source_doi) rows += row('DOI', '<a href="https://doi.org/' + escapeHtml(d.source_doi) + '" target="_blank" style="color:#D97757">' + escapeHtml(d.source_doi) + '</a>');
+    if (d.usage_count > 1) rows += row('Used in', d.usage_count + ' constructs');
+  } else if (type === 'insert') {
+    rows += row('Insert', '<strong>' + escapeHtml(d.label) + '</strong>');
+    if (d.source_system) rows += row('Source', escapeHtml(d.source_system));
+    if (d.genbank_accession) rows += row('Accession', escapeHtml(d.genbank_accession));
+    if (d.usage_count > 1) rows += row('Used in', d.usage_count + ' constructs');
+  }
+  return '<table style="border-collapse:collapse;font-size:12px">' + rows + '</table>';
+}
+
+function _showCyTooltip(evt) {
+  const tip = document.getElementById('cy-tooltip');
+  if (!tip) return;
+  tip.innerHTML = _buildTooltipHtml(evt.target);
+  tip.style.display = 'block';
+  _positionCyTooltip(evt);
+}
+
+function _positionCyTooltip(evt) {
+  const tip = document.getElementById('cy-tooltip');
+  if (!tip || tip.style.display === 'none') return;
+  const container = document.getElementById('constructs-graph');
+  if (!container) return;
+  const rect = container.getBoundingClientRect();
+  const pos = evt.renderedPosition || evt.target.renderedPosition();
+  let x = pos.x + 14;
+  let y = pos.y + 14;
+  // Clamp to container bounds
+  const tw = tip.offsetWidth || 220;
+  const th = tip.offsetHeight || 100;
+  if (x + tw > rect.width - 10) x = pos.x - tw - 10;
+  if (y + th > rect.height - 10) y = pos.y - th - 10;
+  tip.style.left = Math.max(4, x) + 'px';
+  tip.style.top = Math.max(4, y) + 'px';
+}
+
+function _hideCyTooltip() {
+  const tip = document.getElementById('cy-tooltip');
+  if (tip) tip.style.display = 'none';
+}
+
+function _initCytoscape() {
+  const container = document.getElementById('constructs-graph');
+  if (!container || typeof cytoscape === 'undefined') return;
+  _cy = cytoscape({
+    container: container,
+    elements: [],
+    style: [
+      {selector: 'node[nodeType="construct"]', style: {
+        'background-color': '#24B283',
+        'label': 'data(label)',
+        'font-size': '10px',
+        'color': '#3D3D3A',
+        'text-wrap': 'wrap',
+        'text-max-width': '70px',
+        'width': '65px', 'height': '65px',
+        'border-width': '2px', 'border-color': '#E8E6DC',
+        'font-family': 'Inter, sans-serif',
+        'cursor': 'pointer',
+      }},
+      {selector: 'node[nodeType="backbone"]', style: {
+        'background-color': '#D97757',
+        'shape': 'diamond',
+        'label': 'data(label)',
+        'font-size': '10px',
+        'color': '#3D3D3A',
+        'text-wrap': 'wrap',
+        'text-max-width': '70px',
+        'width': '64px', 'height': '64px',
+        'font-family': 'Inter, sans-serif',
+        'cursor': 'pointer',
+      }},
+      {selector: 'node[nodeType="insert"]', style: {
+        'background-color': '#5C5B56',
+        'shape': 'round-rectangle',
+        'label': 'data(label)',
+        'font-size': '10px',
+        'color': '#3D3D3A',
+        'text-wrap': 'wrap',
+        'text-max-width': '65px',
+        'width': '65px', 'height': '40px',
+        'font-family': 'Inter, sans-serif',
+        'cursor': 'pointer',
+      }},
+      {selector: 'node:selected', style: {
+        'border-color': '#E86235', 'border-width': '3px',
+      }},
+      {selector: 'node:active', style: {
+        'overlay-opacity': 0.1,
+      }},
+      {selector: 'edge', style: {
+        'width': 1.5,
+        'line-color': '#ADAAA0',
+        'curve-style': 'bezier',
+        'opacity': 0.7,
+      }},
+      {selector: 'edge:selected', style: {
+        'line-color': '#D97757', 'opacity': 1, 'width': 2.5,
+      }},
+    ],
+    layout: {name: 'klay', klay: {spacing: 55, direction: 'RIGHT'}},
+  });
+
+  _cy.on('tap', 'node[nodeType="construct"]', function(evt) {
+    _hideCyTooltip();
+    const rawId = evt.target.id().replace('c_', '');
+    const numId = parseInt(rawId, 10);
+    if (_constructsTable && !isNaN(numId)) {
+      showLibraryTab('table');
+      const r = _constructsTable.getRow(numId);
+      if (r) { r.select(); r.scrollTo(); }
+    }
+  });
+
+  _cy.on('mouseover', 'node', function(evt) { _showCyTooltip(evt); });
+  _cy.on('mousemove', 'node', function(evt) { _positionCyTooltip(evt); });
+  _cy.on('mouseout', 'node', function() { _hideCyTooltip(); });
+  _cy.on('tap', 'node[nodeType="backbone"], node[nodeType="insert"]', function() {
+    _hideCyTooltip();
+  });
+  _cy.on('tap', function(evt) {
+    if (evt.target === _cy) _hideCyTooltip();
+  });
+}
+
+async function _loadGraphData() {
+  if (!_cy) return;
+  try {
+    const r = await fetch('/api/db/graph');
+    const data = await r.json();
+    _cy.elements().remove();
+    _cy.add(data.nodes || []);
+    _cy.add(data.edges || []);
+    if (data.nodes && data.nodes.length) {
+      _cy.layout({name: 'klay', klay: {spacing: 50, direction: 'RIGHT'}}).run();
+    }
+  } catch(e) {
+    console.warn('Graph load failed', e);
+  }
+}
+
 function downloadBatchFile(jobId, rowIdx, expIdx, filename) {
   fetch('/api/batch/' + jobId + '/download/' + rowIdx + '/' + expIdx)
   .then(function(r) { return r.blob(); })
@@ -2529,6 +3272,7 @@ def _run_batch_agent(prompt: str, model: str, append_log, exports: list, *,
     follow-up messages (``_continue_batch_row``) replay the same context."""
     tracker = ReferenceTracker()
     set_tracker(tracker)
+    set_session_uploads({})
     clear_last_plot_json()
     history.append({"role": "user", "content": prompt})
 
@@ -2752,6 +3496,10 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(payload)
 
+        elif path == "/api/library/status":
+            from src.upload import get_library_status
+            self._send_json(get_library_status())
+
         elif path == "/api/user-library":
             bb = [b for b in load_backbones()["backbones"] if b.get("source") == "user_library"]
             ins = [i for i in load_inserts()["inserts"] if i.get("source") == "user_library"]
@@ -2869,6 +3617,33 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self._send_json({"status": job["status"], "rows": rows_summary})
             else:
                 self._send_json({"error": "Job not found"}, 404)
+
+        # ── Plasmid library DB ────────────────────────────────────────────
+        elif path == "/api/db/constructs":
+            self._send_json(_db_list_constructs(DB_PATH))
+
+        elif path == "/api/db/graph":
+            self._send_json(_db_get_graph(DB_PATH))
+
+        elif path.startswith("/api/db/constructs/") and path.endswith("/genbank"):
+            parts_path = path.split("/")
+            try:
+                construct_id = int(parts_path[4])
+            except (IndexError, ValueError):
+                self.send_error(400)
+                return
+            result = _db_get_genbank(DB_PATH, construct_id)
+            if result is None:
+                self.send_error(404)
+                return
+            name, content = result
+            filename = name.replace(" ", "_") + ".gb"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.end_headers()
+            self.wfile.write(content.encode("utf-8"))
 
         else:
             self.send_error(404)
@@ -2994,6 +3769,54 @@ class AgentHandler(SimpleHTTPRequestHandler):
             ).start()
             self._send_json({"status": "ok"})
 
+        elif path == "/api/upload":
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length > 6 * 1024 * 1024:
+                self._send_json({"error": "File too large (max 5 MB)"}, 400)
+                return
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            import base64
+            from src.upload import (
+                parse_sequence_file,
+                save_to_library,
+                get_library_status,
+                MAX_FILE_SIZE,
+            )
+            content_b64 = body.get("content_b64", "")
+            filename = body.get("filename", "upload.gb")
+            kind = body.get("kind", "backbones")
+            do_save = body.get("save_to_library", False)
+            try:
+                raw = base64.b64decode(content_b64)
+            except Exception:
+                self._send_json({"error": "Invalid base64 content"}, 400)
+                return
+            if len(raw) > MAX_FILE_SIZE:
+                self._send_json({"error": "File too large (max 5 MB)"}, 400)
+                return
+            try:
+                parsed = parse_sequence_file(raw, hint_filename=filename)
+            except ValueError as e:
+                self._send_json({"error": str(e)}, 400)
+                return
+            override = body.get("override_name")
+            if override:
+                from src.upload import safe_filename
+                parsed["name"] = safe_filename(override)
+            result = {"parsed": parsed, "library": get_library_status()}
+            sid = body.get("session_id")
+            if sid and (sess := get_session(sid)) is not None:
+                sess.setdefault("uploads", {})[parsed["name"]] = parsed
+                result["stashed_as"] = parsed["name"]
+                _save_sessions()
+            if do_save:
+                try:
+                    save_result = save_to_library(parsed, kind, raw)
+                    result["saved"] = save_result
+                except (ValueError, EnvironmentError) as e:
+                    result["save_error"] = str(e)
+            self._send_json(result)
+
         elif path == "/api/warmup":
             content_length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(content_length)) if content_length else {}
@@ -3036,6 +3859,62 @@ class AgentHandler(SimpleHTTPRequestHandler):
             _save_sessions()
             self._send_json({"status": "ok"})
 
+        # ── Plasmid library DB ────────────────────────────────────────────
+        elif path == "/api/db/constructs":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            construct_name = body.get("construct_name", "construct")
+            genbank_content = body.get("genbank_content", "")
+            session_id = body.get("session_id")
+            backbone_name = body.get("backbone_name", "")
+            raw_insert_name = body.get("insert_name", "")
+            total_size_bp = body.get("total_size_bp")
+
+            # Parse fusion inserts (e.g. "EGFP-mCherry" → ["EGFP", "mCherry"])
+            insert_names = [n.strip() for n in raw_insert_name.split("-") if n.strip()]
+
+            parts = build_parts_from_library(backbone_name, insert_names)
+            validations = run_validation_structured(genbank_content, backbone_name,
+                                                    raw_insert_name)
+
+            # Derive total_size_bp from GenBank if not provided
+            if not total_size_bp and genbank_content:
+                try:
+                    import io as _io
+                    from Bio import SeqIO as _SeqIO
+                    record = next(_SeqIO.parse(_io.StringIO(genbank_content), "genbank"))
+                    total_size_bp = len(record.seq)
+                except Exception:
+                    pass
+
+            construct_id = _db_save_construct(
+                DB_PATH,
+                construct_name=construct_name,
+                genbank_content=genbank_content,
+                total_size_bp=total_size_bp,
+                session_id=session_id,
+                backbone_name=backbone_name,
+                insert_names=insert_names,
+                parts=parts,
+                validations=validations,
+            )
+            self._send_json({"id": construct_id, "status": "saved"})
+
+        else:
+            self.send_error(404)
+
+    def do_PATCH(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        import re as _re
+        m = _re.match(r"^/api/db/constructs/(\d+)$", path)
+        if m:
+            construct_id = int(m.group(1))
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            ok = _db_update_construct(DB_PATH, construct_id, body)
+            self._send_json({"ok": ok})
         else:
             self.send_error(404)
 
@@ -3053,7 +3932,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, PATCH, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 

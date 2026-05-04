@@ -259,7 +259,7 @@ class TestGetPlasmidPlotJson:
     def test_json_has_bokeh_doc_structure(self):
         result = self._plot_json()
         parsed = json.loads(result)
-        assert "doc" in parsed
+        assert "doc" in parsed.get("plot", parsed)
 
     def test_sizing_mode_set_on_plot(self):
         """Verify stretch_width sizing is applied to the plot before serialization."""
@@ -354,4 +354,4 @@ class TestAnnotationIntegration:
         assert gbk.count("misc_feature") + gbk.count("CDS") + gbk.count("promoter") > 0
         # Plot JSON should be valid and Bokeh-structured
         parsed = json.loads(plot_json)
-        assert "doc" in parsed
+        assert "doc" in parsed.get("plot", parsed)

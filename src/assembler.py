@@ -487,6 +487,8 @@ GG_ENZYMES = {
     "BsmBI":  {"recognition": "CGTCTC", "cut_top": 1, "cut_bottom": 5},
     "BsaI":   {"recognition": "GGTCTC", "cut_top": 1, "cut_bottom": 5},
     "BbsI":   {"recognition": "GAAGAC", "cut_top": 2, "cut_bottom": 6},
+    # PaqCI: CACCTGC(4/8), 4-nt 5' overhang (NEB #R0745)
+    "PaqCI":  {"recognition": "CACCTGC", "cut_top": 4, "cut_bottom": 8},
 }
 
 

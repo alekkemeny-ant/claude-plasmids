@@ -34,6 +34,7 @@ from .library import (
     format_backbone_summary,
     format_insert_summary,
     annotate_plasmid as _annotate_plasmid,
+    find_duplicate_annotations as _find_duplicate_annotations,
     swap_feature as _swap_feature,
     extract_insert_from_plasmid as _extract_insert_from_plasmid,
     extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
@@ -160,6 +161,18 @@ def get_tracker() -> Optional[ReferenceTracker]:
     return _tracker
 
 
+_session_uploads: dict[str, dict] = {}
+
+
+def set_session_uploads(uploads: dict[str, dict]) -> None:
+    global _session_uploads
+    _session_uploads = uploads or {}
+
+
+def get_session_uploads() -> dict[str, dict]:
+    return _session_uploads
+
+
 def _record(method_name: str, *args, **kwargs) -> None:
     """Call a tracker method if a tracker is set, silently ignore otherwise."""
     if _tracker is not None:
@@ -190,15 +203,26 @@ def _get_cached_sequence(key: str) -> Optional[str]:
 # a plot_data SSE event after the export tool result. Same pattern as
 # set_tracker/get_tracker — caller clears before run, reads after.
 _last_plot_json: Optional[str] = None
+_plot_skipped_reason: Optional[str] = None
 
 
 def get_last_plot_json() -> Optional[str]:
     return _last_plot_json
 
 
+def get_plot_skipped_reason() -> Optional[str]:
+    return _plot_skipped_reason
+
+
+def set_plot_skipped_reason(reason: Optional[str]) -> None:
+    global _plot_skipped_reason
+    _plot_skipped_reason = reason
+
+
 def clear_last_plot_json() -> None:
-    global _last_plot_json
+    global _last_plot_json, _plot_skipped_reason
     _last_plot_json = None
+    _plot_skipped_reason = None
 
 
 def _error(s: str) -> dict:
@@ -424,6 +448,60 @@ async def annotate_plasmid_tool(args):
         )
         if f["description"]:
             lines.append(f"       {f['description']}")
+    return _text("\n".join(lines))
+
+
+@tool(
+    "check_duplicate_features",
+    "Check a plasmid sequence for duplicate functional elements using pLannotate. "
+    "Flags any CDS, promoter, or replication origin that appears more than once — "
+    "e.g. two copies of the same fluorescent protein, two antibiotic resistance genes, "
+    "or two promoters of the same type. Run this after assembly and before export to "
+    "catch accidental duplications. Returns PASS if no duplicates, FAIL with details otherwise.",
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {
+                "type": "string",
+                "description": "Full plasmid DNA sequence, OR a sequence_cache_key from fetch_addgene_sequence_with_metadata.",
+            },
+        },
+        "required": ["plasmid_sequence"],
+    },
+)
+async def check_duplicate_features_tool(args):
+    plasmid_seq = args["plasmid_sequence"]
+    if plasmid_seq in _sequence_cache:
+        plasmid_seq = _sequence_cache[plasmid_seq]
+
+    features = _annotate_plasmid(plasmid_seq)
+    if not features:
+        return _text("pLannotate found no features — cannot check for duplicates.")
+
+    duplicates = _find_duplicate_annotations(features)
+
+    if not duplicates:
+        return _text(
+            f"PASS — no duplicate features detected "
+            f"({len(features)} features annotated)."
+        )
+
+    lines = [
+        f"FAIL — {len(duplicates)} duplicate functional element(s) detected:\n"
+    ]
+    for d in duplicates:
+        lines.append(f"  {d['name']} ({d['type']}) — appears {d['count']} times:")
+        for inst in d["instances"]:
+            strand = "+" if inst["strand"] >= 0 else "-"
+            span = f"{inst['start']}..{inst['end']}"
+            if inst.get("origin_spanning"):
+                span += " (origin-spanning)"
+            lines.append(
+                f"    [{strand}] {span}  {inst['length']} bp  {inst['pct_identity']}% id"
+            )
+    lines.append(
+        "\nThis construct contains duplicate elements and must be redesigned."
+    )
     return _text("\n".join(lines))
 
 
@@ -765,8 +843,14 @@ async def export_construct(args):
                     )
                     _last_plot_json = plot_json
                     return _text(gbk)
-                except Exception:
-                    pass  # fall through to non-plot path
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    set_plot_skipped_reason(f"{type(e).__name__}: {e}")
+            else:
+                set_plot_skipped_reason(
+                    "pLannotate not available — install via conda and run `plannotate setupdb`"
+                )
             result = await asyncio.to_thread(
                 format_as_genbank,
                 sequence=seq, name=cname, backbone_name=bname,
@@ -1689,6 +1773,49 @@ async def log_experimental_outcome_tool(args):
     )
 
 
+@tool(
+    "get_uploaded_sequence",
+    "Retrieve a sequence the user uploaded into this session via the web "
+    "UI's file picker or drag-and-drop. Returns the full sequence and "
+    "extracted metadata. Use this when the user references an uploaded "
+    "file by name.",
+    {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Name of the uploaded sequence (as shown in the [Uploaded sequence: …] line).",
+            },
+        },
+        "required": ["name"],
+    },
+)
+async def get_uploaded_sequence_tool(args):
+    name = args["name"]
+    uploads = get_session_uploads()
+    if name not in uploads:
+        available = ", ".join(sorted(uploads)) or "(none)"
+        return _error(
+            f"No uploaded sequence named {name!r} in this session. "
+            f"Available uploads: {available}"
+        )
+    p = uploads[name]
+    feats = p.get("features") or []
+    feat_summary = ", ".join(
+        f"{f.get('type', '?')}:{f.get('label') or f.get('product') or '?'}"
+        for f in feats[:10]
+    )
+    return _text(
+        f"Uploaded sequence '{p.get('name')}':\n"
+        f"  Length: {p.get('length')} bp\n"
+        f"  Format: {p.get('format')}\n"
+        f"  Topology: {p.get('topology') or 'unknown'}\n"
+        f"  Organism: {p.get('organism') or 'unknown'}\n"
+        f"  Features ({len(feats)}): {feat_summary or '(none)'}\n"
+        f"\nSequence:\n{p.get('sequence', '')}"
+    )
+
+
 # Collect all tool objects
 ALL_TOOLS = [
     search_backbones,
@@ -1712,6 +1839,7 @@ ALL_TOOLS = [
     fuse_inserts_tool,
     find_sequence_tool,
     annotate_plasmid_tool,
+    check_duplicate_features_tool,
     swap_feature_tool,
     extract_insert_from_plasmid_tool,
     extract_inserts_from_plasmid_tool,
@@ -1729,6 +1857,8 @@ ALL_TOOLS = [
     search_fpbase_tool,
     # Troubleshooting / project memory
     log_experimental_outcome_tool,
+    # Session-scoped uploads
+    get_uploaded_sequence_tool,
 ]
 
 ALL_TOOL_NAMES = [t.name for t in ALL_TOOLS]

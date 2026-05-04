@@ -256,6 +256,7 @@ def score_construct(
     output_format: Optional[str] = None,
     expect_reverse_complement: bool = False,
     fusion_parts: Optional[list[dict]] = None,
+    construct_annotations: Optional[list[dict]] = None,
 ) -> RubricResult:
     """
     Score an assembled construct against the Allen Institute rubric.
@@ -288,6 +289,12 @@ def score_construct(
                       to C-terminal. Each dict has keys: name (str),
                       sequence (str), type ("protein" or "tag"). Used for
                       fusion linker checks.
+        construct_annotations: Optional pre-computed pLannotate feature list for
+                               the construct (from annotate_plasmid()). When
+                               provided, used directly for the duplicate-element
+                               check. When omitted, the rubric attempts to run
+                               pLannotate itself; if unavailable the check is
+                               skipped rather than failing.
 
     Returns:
         RubricResult with all checks populated.
@@ -894,6 +901,52 @@ def score_construct(
                 passed=True,
                 detail="Skipped — tag-protein junction, no ATG removal expected",
             ))
+
+    # 4h. No duplicate functional elements (via pLannotate)
+    # Use pre-supplied annotations when available; fall back to running
+    # pLannotate on the construct; skip gracefully if unavailable.
+    _dup_features = construct_annotations
+    if _dup_features is None:
+        try:
+            from library import annotate_plasmid as _annotate_rubric
+            _dup_features = _annotate_rubric(construct_seq)
+        except Exception:
+            _dup_features = None
+
+    if _dup_features is not None:
+        try:
+            from library import find_duplicate_annotations as _find_dups
+            _duplicates = _find_dups(_dup_features)
+        except Exception:
+            _duplicates = []
+
+        if _duplicates:
+            _dup_names = ", ".join(
+                f"{d['name']} ({d['count']}×)" for d in _duplicates
+            )
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="No duplicate functional elements",
+                severity="Critical",
+                passed=False,
+                detail=f"Duplicate features: {_dup_names}",
+            ))
+        else:
+            result.checks.append(Check(
+                section="Biological Sanity",
+                name="No duplicate functional elements",
+                severity="Critical",
+                passed=True,
+                detail=f"{len(_dup_features)} features annotated, none duplicated",
+            ))
+    else:
+        result.checks.append(Check(
+            section="Biological Sanity",
+            name="No duplicate functional elements",
+            severity="Info",
+            passed=True,
+            detail="Skipped — pLannotate unavailable",
+        ))
 
     # ── Section 5: Output Verification ──────────────────────────────
 

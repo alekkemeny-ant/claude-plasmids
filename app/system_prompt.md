@@ -73,6 +73,7 @@ Use tools to obtain both sequences. Follow this resolution order:
 
    **⚠ CRITICAL — Addgene fetch failure**: If `fetch_addgene_sequence_with_metadata` returns an error or empty result for a plasmid the user explicitly named (by ID or name), **stop immediately and ask the user to provide the sequence**. Do NOT search for similar plasmids, related plasmids, or alternatives. Do NOT proceed with a substitute. End your turn with a single question: "I wasn't able to retrieve plasmid #XXXXX from Addgene. Could you provide the sequence directly?"
 5. **User library**: IDs starting with `user:` (e.g., `user:pMyVector`) come from GenBank files the user placed in their local library directory (`$PLASMID_USER_LIBRARY/backbones/` or `inserts/`). These are equally valid sources — treat them like any other backbone or insert.
+   - **Session uploads**: If the user dropped a sequence file into this chat (you'll see a line like `[Uploaded sequence: <name> ...]`), call `get_uploaded_sequence(name)` to retrieve the full sequence and metadata. Treat it as a verified user-provided source.
 6. **Custom annotations**: If the user has placed annotated GenBank files in `$PLASMID_USER_LIBRARY/annotations/`, those feature annotations are automatically available to pLannotate during extraction. This allows lab-private or recently-published sequences to be recognised by name in `extract_insert_from_plasmid` and `extract_inserts_from_plasmid`.
 
 **When working with an unknown plasmid (user-provided or from Addgene):**
@@ -97,6 +98,16 @@ Use tools to obtain both sequences. Follow this resolution order:
 - Insert name, size, start/stop codons present
 - Insertion position (MCS start from `get_insertion_site`, unless user specifies otherwise)
 - Any fusions, tags, or linkers being used
+
+**Pre-Assembly Feature Check** — before calling `assemble_construct`, verify the requested insert is not already present in the backbone:
+
+1. Obtain the backbone's feature list. Use the `features` field from `get_backbone` or Addgene metadata if available; otherwise call `annotate_plasmid` on the backbone sequence.
+2. Scan for any feature whose name **exactly or near-exactly matches** the insert name (case-insensitive, ignoring punctuation/spacing). Examples: backbone has "EGFP" and user is adding "EGFP"; backbone has "AmpR" and user is adding "AmpR". Do **not** trigger on functional-category similarity alone — a backbone with KanR and a user adding AmpR is fine; a backbone with a CMV promoter and a user adding a different promoter is fine.
+3. **If a name match is found**: Stop and ask the user:
+   > "I see that [feature name] is already annotated in [backbone name] (position X–Y, [length] bp). Did you intend to add a second copy, replace the existing one, or use the existing one as-is? Please confirm before I proceed."
+
+   End your turn and wait. Do not assemble until you have an explicit answer.
+4. **If no match**: Proceed normally — no message needed.
 
 **Proceed or confirm — intent-gated:**
 - **If the user's prompt explicitly asked for assembly** (verbs like *"assemble"*, *"build"*, *"return the sequence"*, *"give me the construct"*, *"output the DNA"*) → the summary is informational. **Proceed directly to Step 3.** Do not ask for confirmation — the user already delegated the action.
@@ -320,6 +331,7 @@ Ask the user which enzyme they are using, or read it from the backbone metadata 
 - **Esp3I / BsmBI** (CGTCTC) — Allen Institute modular system
 - **BsaI** (GGTCTC) — Level 0/1 MoClo
 - **BbsI** (GAAGAC) — some Golden Gate kits
+- **PaqCI** (CACCTGC) — high-fidelity Golden Gate (NEB)
 
 **Step 2 — Confirm the backbone**
 Use `get_backbone` to retrieve the vector. Confirm it contains the correct enzyme recognition sites and has a dropout cassette (negative selection). The backbone's `assembly_enzyme` field should match the chosen enzyme.
@@ -639,6 +651,12 @@ User wants to build a construct
   │       │   ├─ User provides linker → fuse_inserts([...], linker="<user sequence>")
   │       │   └─ Default → fuse_inserts([...]) (omit linker param)
   │       └─ Use fused sequence for assembly
+  ├─ Pre-assembly check: does backbone already contain the insert (by name)?
+  │   ├─ Use backbone features from get_backbone / Addgene metadata if available
+  │   │   └─ If unavailable → annotate_plasmid(backbone_sequence)
+  │   ├─ Exact/near-exact name match found?
+  │   │   └─ Yes → STOP. Ask user: replace / add second copy / use existing? End turn.
+  │   └─ No match (including different-but-related elements) → proceed
   ├─ Assemble: assemble_construct(...)
   ├─ Validate: validate_construct(...)
   └─ Export: export_construct(...)

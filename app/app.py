@@ -1020,12 +1020,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .msg-bubble-assistant pre code { padding: 0; background: none; }
   .msg-bubble-assistant table {
-    width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px;
+    width: auto; max-width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px;
   }
   .msg-bubble-assistant th, .msg-bubble-assistant td {
     border: 1px solid var(--sand-200); padding: 6px 12px; text-align: left;
   }
-  .msg-bubble-assistant th { background: var(--sand-50); font-weight: 600; }
+  .msg-bubble-assistant th { background: var(--sand-50); font-weight: 600; position: relative; }
   .msg-bubble-assistant tr:nth-child(even) { background: var(--sand-50); }
 
   /* ── DNA sequence display ── */
@@ -1041,11 +1041,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .seq-copy-btn.copied { color: #16a34a; }
   .seq-copy-btn.block-btn { position: absolute; top: 6px; right: 6px; margin-left: 0; }
   .seq-table { margin: 8px 0; overflow-x: auto; }
-  .seq-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .seq-table table { width: auto; max-width: 100%; border-collapse: collapse; font-size: 12px; }
   .seq-table th, .seq-table td { border: 1px solid var(--sand-200); padding: 5px 10px; text-align: left; }
-  .seq-table th { background: var(--sand-50); font-weight: 600; }
+  .seq-table th { background: var(--sand-50); font-weight: 600; position: relative; }
   .seq-table tr:nth-child(even) { background: var(--sand-50); }
   .seq-table td:last-child { width: 32px; text-align: center; padding: 3px; }
+  .col-resizer {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 4px;
+    cursor: col-resize; user-select: none; z-index: 1;
+  }
+  .col-resizer:hover, .col-resizer:active { background: var(--sand-300); }
   code.dna-seq { letter-spacing: 0.03em; }
   .tbl-copy-row { display: flex; justify-content: flex-end; margin-top: 4px; }
   .code-block-wrap { position: relative; }
@@ -1636,6 +1641,7 @@ function renderStoredBlock(block, container) {
     const div = document.createElement('div');
     div.className = 'msg assistant';
     div.innerHTML = '<div class="msg-bubble-assistant">' + renderContent(block.content || '') + '</div>';
+    makeTablesResizable(div);
     container.appendChild(div);
   }
 }
@@ -1661,6 +1667,7 @@ function renderStoredMessages(msgs) {
       const div = document.createElement('div');
       div.className = 'msg assistant';
       div.innerHTML = '<div class="msg-bubble-assistant">' + renderContent(m.content || '') + '</div>';
+      makeTablesResizable(div);
       inner.appendChild(div);
     }
   });
@@ -1864,6 +1871,40 @@ function mkRawCopyBtn(text, extraClass) {
     _CLIP_SVG + '</button>';
 }
 
+function stripMarkdown(text) {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^#{1,6}\s+/, '');
+}
+
+function makeTablesResizable(root) {
+  if (!root) return;
+  root.querySelectorAll('table:not([data-resizable])').forEach(function(table) {
+    table.setAttribute('data-resizable', '1');
+    table.querySelectorAll('th').forEach(function(th) {
+      var resizer = document.createElement('div');
+      resizer.className = 'col-resizer';
+      th.appendChild(resizer);
+      var startX, startW;
+      resizer.addEventListener('mousedown', function(e) {
+        var allThs = table.querySelectorAll('th');
+        allThs.forEach(function(t) { t.style.width = t.offsetWidth + 'px'; });
+        table.style.tableLayout = 'fixed';
+        table.style.width = table.offsetWidth + 'px';
+        startX = e.pageX;
+        startW = th.offsetWidth;
+        function onMove(e) { th.style.width = Math.max(40, startW + e.pageX - startX) + 'px'; }
+        function onUp() { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        e.preventDefault();
+      });
+    });
+  });
+}
+
 function renderSeqCodeBlock(rawCode) {
   var langMatch = rawCode.match(/^([a-zA-Z][a-zA-Z0-9_]*)\n/);
   var code = langMatch ? rawCode.slice(langMatch[0].length) : rawCode;
@@ -1975,7 +2016,7 @@ function renderContent(text) {
         bodyRows.push(cells);
         i++;
       }
-      var tsvRows = [headerCells.join('\t')].concat(bodyRows.map(function(row) { return row.join('\t'); }));
+      var tsvRows = [headerCells.map(stripMarkdown).join('\t')].concat(bodyRows.map(function(row) { return row.map(stripMarkdown).join('\t'); }));
       var tblTsv = tsvRows.join('\n');
       let t = '<div class="seq-table"><table><thead><tr>';
       headerCells.forEach(function(c) { t += '<th>' + inlineMarkdown(c) + '</th>'; });
@@ -2311,6 +2352,7 @@ function endTextBlock() {
   if (currentTextDiv) {
     const cursor = currentTextDiv.querySelector('.streaming-cursor');
     if (cursor) cursor.remove();
+    makeTablesResizable(currentTextDiv);
   }
   currentTextDiv = null;
   currentTextRaw = '';

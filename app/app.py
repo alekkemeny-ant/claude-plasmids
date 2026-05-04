@@ -61,6 +61,7 @@ except ImportError as e:
         f"Run: pip install -r requirements.txt"
     ) from e
 from src.tools import (
+    set_session_uploads,
     build_mcp_servers,
     get_anthropic_tool_schemas,
     get_tool_dispatch,
@@ -333,6 +334,7 @@ def create_session() -> str:
         # Troubleshooting / project-memory fields (Phase 2)
         "project_name": None,            # user-assigned project label (optional)
         "experimental_outcomes": [],     # list of {status, observation, construct_name, timestamp}
+        "uploads": {},                   # session-scoped uploaded sequences {name: parsed_dict}
     }
     _save_sessions()
     return sid
@@ -484,6 +486,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
 
     tracker = ReferenceTracker()
     set_tracker(tracker)
+    set_session_uploads(session.get("uploads") or {})
     clear_last_plot_json()
     export_called = False
 
@@ -1009,6 +1012,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .model-select:hover { border-color: var(--sand-300); }
   .model-select:focus { border-color: var(--brand-fig); }
+  .attach-btn {
+    background: transparent; border: 1px solid var(--sand-200); border-radius: 6px;
+    padding: 6px 8px; margin-right: 8px; cursor: pointer; color: var(--sand-600);
+    display: inline-flex; align-items: center;
+  }
+  .attach-btn:hover { border-color: var(--sand-300); color: var(--sand-700); }
   .token-indicator {
     display: none; align-items: center; gap: 5px;
     margin-left: 8px; font-size: 11px; color: var(--sand-400);
@@ -1205,8 +1214,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <svg width="36" height="36" fill="none" stroke="var(--brand-fig)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
         <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
       </svg>
-      <div class="drop-overlay-label">Drop CSV to batch design</div>
-      <div class="drop-overlay-sub">Required column: description &nbsp;·&nbsp; Optional: name, output_format</div>
+      <div class="drop-overlay-label">Drop a file</div>
+      <div class="drop-overlay-sub">.gb / .fasta — add a sequence to this session &nbsp;·&nbsp; .csv — batch design</div>
     </div>
     <div class="messages" id="messages">
       <div class="welcome" id="welcome">
@@ -1237,6 +1246,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
         <textarea id="input" placeholder="Describe the plasmid you want to design…" rows="1"
           oninput="autoResize(this)"></textarea>
         <div class="input-meta">
+          <input type="file" id="seq-file-input" accept=".gb,.gbk,.genbank,.fa,.fasta,.fna,.csv"
+                 style="display:none" onchange="onSeqFileChosen(this)">
+          <button class="attach-btn" id="attach-btn" title="Upload a sequence file (.gb, .fasta) or batch CSV"
+                  onclick="document.getElementById('seq-file-input').click()">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+            </svg>
+          </button>
           <select id="model-select" class="model-select">
             <option value="claude-opus-4-6">Opus 4.6</option>
             <option value="claude-sonnet-4-6">Sonnet 4.6</option>
@@ -2151,20 +2169,108 @@ chatPanelEl.addEventListener('dragover', function(e) {
   e.dataTransfer.dropEffect = 'copy';
 });
 
+var SEQ_EXTS = ['.gb', '.gbk', '.genbank', '.fa', '.fasta', '.fna'];
+
+function isSequenceFile(file) {
+  var lower = file.name.toLowerCase();
+  return SEQ_EXTS.some(function(ext) { return lower.endsWith(ext); });
+}
+
 chatPanelEl.addEventListener('drop', function(e) {
   e.preventDefault();
   dragCounter = 0;
   dropOverlayEl.classList.remove('active');
   var file = e.dataTransfer.files[0];
   if (!file) return;
-  if (!file.name.endsWith('.csv') && file.type !== 'text/csv') {
-    alert('Please drop a .csv file.');
-    return;
+  if (isSequenceFile(file)) {
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      var bytes = new Uint8Array(ev.target.result);
+      var b64 = btoa(String.fromCharCode.apply(null, bytes));
+      uploadSequenceFile(file.name, b64);
+    };
+    reader.readAsArrayBuffer(file);
+  } else if (file.name.endsWith('.csv') || file.type === 'text/csv') {
+    var reader2 = new FileReader();
+    reader2.onload = function(ev) { uploadBatchCSV(ev.target.result, file.name); };
+    reader2.readAsText(file);
+  } else {
+    addUploadCard({error: 'Unsupported file type. Drop a .gb / .fasta sequence or a .csv for batch design.'});
   }
-  var reader = new FileReader();
-  reader.onload = function(ev) { uploadBatchCSV(ev.target.result, file.name); };
-  reader.readAsText(file);
 });
+
+function uploadSequenceFile(filename, contentB64) {
+  lastUpload = {filename: filename, content_b64: contentB64};
+  fetch('/api/upload', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      filename: filename, content_b64: contentB64,
+      save_to_library: false, session_id: currentSessionId,
+    }),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) { addUploadCard({error: data.error}); return; }
+    addUploadCard(data);
+    var p = data.parsed;
+    var prefix = '[Uploaded sequence: ' + p.name + ' (' + p.length +
+                 ' bp ' + p.format + '). Use get_uploaded_sequence("' + p.name +
+                 '") to retrieve it.]\n';
+    inputEl.value = prefix + inputEl.value;
+    autoResize(inputEl);
+  })
+  .catch(function(e) { addUploadCard({error: 'Upload failed: ' + e}); });
+}
+
+function addUploadCard(data) {
+  var div = document.createElement('div');
+  div.className = 'msg assistant';
+  var inner;
+  if (data.error) {
+    inner = '<div class="msg-bubble-assistant" style="background:#fdecea;border-left:3px solid #d93025;padding:12px;">' +
+      '<div style="font-size:11px;font-weight:600;color:#a50e0e;text-transform:uppercase;">Upload error</div>' +
+      '<div style="font-size:13px;color:#5f1a14;margin-top:4px;">' + escapeHtml(data.error) + '</div></div>';
+  } else if (data.saved_only) {
+    inner = '<div class="msg-bubble-assistant" style="padding:10px;">' +
+      '<div style="font-size:12px;color:#1e7e34;">Saved to library as <code>' +
+      escapeHtml(data.saved_only.id) + '</code> &nbsp;→&nbsp; ' +
+      '<span style="color:var(--sand-500);">' + escapeHtml(data.saved_only.saved_path) + '</span></div></div>';
+  } else {
+    var p = data.parsed;
+    var lib = data.library;
+    var hint;
+    if (lib && lib.configured) {
+      hint = '<div style="font-size:12px;margin-top:8px;border-top:1px solid var(--sand-200);padding-top:8px;">' +
+        'Save to library as: ' +
+        '<button class="attach-btn" style="margin:0 4px;padding:3px 8px;font-size:12px;" onclick="saveLastUploadToLibrary(\'backbones\')">Backbone</button>' +
+        '<button class="attach-btn" style="margin:0 4px;padding:3px 8px;font-size:12px;" onclick="saveLastUploadToLibrary(\'inserts\')">Insert</button>' +
+        '<button class="attach-btn" style="margin:0 4px;padding:3px 8px;font-size:12px;" onclick="saveLastUploadToLibrary(\'annotations\')">Annotation</button>' +
+        ' &nbsp;<span style="color:var(--sand-500);">or just use in this session</span></div>';
+    } else {
+      hint = '<div style="font-size:12px;color:var(--sand-500);margin-top:8px;border-top:1px solid var(--sand-200);padding-top:8px;">' +
+        'To save to your local library, set <code>PLASMID_USER_LIBRARY</code> — see server log for details.</div>';
+    }
+    if (data.saved) {
+      hint = '<div style="font-size:12px;color:#1e7e34;margin-top:6px;">Saved as <code>' + escapeHtml(data.saved.id) + '</code></div>';
+    }
+    var nameInputId = 'upload-name-' + Date.now();
+    if (lastUpload) lastUpload.nameInputId = nameInputId;
+    inner = '<div class="msg-bubble-assistant" style="padding:12px;">' +
+      '<div style="font-size:11px;font-weight:600;color:var(--sand-500);text-transform:uppercase;letter-spacing:0.05em;">Uploaded sequence</div>' +
+      '<input id="' + nameInputId + '" value="' + escapeHtml(p.name) + '" ' +
+        'style="font-size:14px;font-weight:600;margin-top:4px;border:1px solid var(--sand-200);' +
+        'border-radius:4px;padding:2px 6px;width:60%;">' +
+      '<div style="font-size:13px;color:var(--sand-600);margin-top:2px;">' +
+        escapeHtml(p.length + ' bp · ' + p.format + (p.topology ? ' · ' + p.topology : '') +
+                   (p.organism ? ' · ' + p.organism : '') +
+                   ' · ' + (p.features ? p.features.length : 0) + ' features') +
+      '</div>' + hint + '</div>';
+  }
+  div.innerHTML = inner;
+  getInner().appendChild(div);
+  scrollToBottom();
+}
 
 function onBatchFileChosen(input) {
   var file = input.files[0];
@@ -2173,6 +2279,49 @@ function onBatchFileChosen(input) {
   reader.onload = function(e) { uploadBatchCSV(e.target.result, file.name); };
   reader.readAsText(file);
   input.value = '';
+}
+
+function onSeqFileChosen(input) {
+  var file = input.files[0];
+  if (!file) { input.value = ''; return; }
+  if (file.name.toLowerCase().endsWith('.csv')) {
+    var r = new FileReader();
+    r.onload = function(ev) { uploadBatchCSV(ev.target.result, file.name); };
+    r.readAsText(file);
+  } else if (isSequenceFile(file)) {
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      var bytes = new Uint8Array(ev.target.result);
+      var b64 = btoa(String.fromCharCode.apply(null, bytes));
+      uploadSequenceFile(file.name, b64);
+    };
+    reader.readAsArrayBuffer(file);
+  } else {
+    addUploadCard({error: 'Unsupported file type. Choose a .gb / .fasta sequence or a .csv for batch design.'});
+  }
+  input.value = '';
+}
+
+var lastUpload = null;
+
+function saveLastUploadToLibrary(kind) {
+  if (!lastUpload) return;
+  var nameInput = document.getElementById(lastUpload.nameInputId);
+  var override = nameInput ? nameInput.value : undefined;
+  fetch('/api/upload', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      filename: lastUpload.filename, content_b64: lastUpload.content_b64,
+      save_to_library: true, kind: kind, override_name: override,
+      session_id: currentSessionId,
+    }),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.save_error) { addUploadCard({error: d.save_error}); }
+    else if (d.saved) { addUploadCard({saved_only: d.saved}); }
+  });
 }
 
 function uploadBatchCSV(csvText, filename) {
@@ -2479,6 +2628,7 @@ def _run_batch_agent(prompt: str, model: str, append_log, exports: list, *,
     follow-up messages (``_continue_batch_row``) replay the same context."""
     tracker = ReferenceTracker()
     set_tracker(tracker)
+    set_session_uploads({})
     clear_last_plot_json()
     history.append({"role": "user", "content": prompt})
 
@@ -2664,6 +2814,10 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self._send_json(session["display_messages"])
             else:
                 self._send_json([], 404)
+
+        elif path == "/api/library/status":
+            from src.upload import get_library_status
+            self._send_json(get_library_status())
 
         elif path == "/api/user-library":
             bb = [b for b in load_backbones()["backbones"] if b.get("source") == "user_library"]
@@ -2906,6 +3060,54 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 daemon=True,
             ).start()
             self._send_json({"status": "ok"})
+
+        elif path == "/api/upload":
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length > 6 * 1024 * 1024:
+                self._send_json({"error": "File too large (max 5 MB)"}, 400)
+                return
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            import base64
+            from src.upload import (
+                parse_sequence_file,
+                save_to_library,
+                get_library_status,
+                MAX_FILE_SIZE,
+            )
+            content_b64 = body.get("content_b64", "")
+            filename = body.get("filename", "upload.gb")
+            kind = body.get("kind", "backbones")
+            do_save = body.get("save_to_library", False)
+            try:
+                raw = base64.b64decode(content_b64)
+            except Exception:
+                self._send_json({"error": "Invalid base64 content"}, 400)
+                return
+            if len(raw) > MAX_FILE_SIZE:
+                self._send_json({"error": "File too large (max 5 MB)"}, 400)
+                return
+            try:
+                parsed = parse_sequence_file(raw, hint_filename=filename)
+            except ValueError as e:
+                self._send_json({"error": str(e)}, 400)
+                return
+            override = body.get("override_name")
+            if override:
+                from src.upload import safe_filename
+                parsed["name"] = safe_filename(override)
+            result = {"parsed": parsed, "library": get_library_status()}
+            sid = body.get("session_id")
+            if sid and (sess := get_session(sid)) is not None:
+                sess.setdefault("uploads", {})[parsed["name"]] = parsed
+                result["stashed_as"] = parsed["name"]
+                _save_sessions()
+            if do_save:
+                try:
+                    save_result = save_to_library(parsed, kind, raw)
+                    result["saved"] = save_result
+                except (ValueError, EnvironmentError) as e:
+                    result["save_error"] = str(e)
+            self._send_json(result)
 
         elif path == "/api/warmup":
             content_length = int(self.headers.get("Content-Length", 0))

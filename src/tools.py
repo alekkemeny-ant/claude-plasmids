@@ -817,8 +817,11 @@ async def export_construct(args):
                     )
                     _last_plot_json = plot_json
                     return _text(gbk)
-                except Exception:
-                    pass  # fall through to non-plot path
+                except Exception as _plot_exc:
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "pLannotate plot generation failed: %s", _plot_exc, exc_info=True
+                    )
             result = await asyncio.to_thread(
                 format_as_genbank,
                 sequence=seq, name=cname, backbone_name=bname,

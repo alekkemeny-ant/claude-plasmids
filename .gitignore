@@ -19,6 +19,11 @@ env/
 # Session state
 .sessions.json
 
+# User construct database (per-deployment, not shared)
+app/constructs.db
+app/constructs.db-wal
+app/constructs.db-shm
+
 # IDE
 .vscode/
 .idea/

@@ -62,6 +62,8 @@ _db_list_constructs = _db_mod.list_constructs
 _db_update_construct = _db_mod.update_construct
 _db_get_genbank = _db_mod.get_construct_genbank
 _db_get_graph = _db_mod.get_graph_data
+_db_get_by_local_path = _db_mod.get_construct_by_local_path
+_db_delete_construct = _db_mod.delete_construct
 build_parts_from_library = _db_mod.build_parts_from_library
 run_validation_structured = _db_mod.run_validation_structured
 
@@ -428,7 +430,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
     turn_system_prompt = _build_system_prompt(session)
     history = session["history"]
     history.append({"role": "user", "content": user_message})
-    session["display_messages"].append({"role": "user", "content": user_message})
+    session["display_messages"].append({"role": "user", "content": user_message, "timestamp": time.time()})
 
     if session["first_message"] is None:
         session["first_message"] = user_message[:80]
@@ -641,6 +643,8 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             safe_write({"type": "text_start"})
             safe_write({"type": "text_delta", "content": ref_block})
             safe_write({"type": "text_end"})
+        # Persist structured references so the save handler can use them
+        session["last_export_references"] = tracker.to_list()
 
     if assistant_text or assistant_blocks:
         session["display_messages"].append({
@@ -672,6 +676,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Plasmid Designer</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23D97757' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714a2.25 2.25 0 00.659 1.591L19 14.5M14.25 3.104c.251.023.501.05.75.082M19 14.5l-2.47 2.47a2.25 2.25 0 01-1.591.659H9.061a2.25 2.25 0 01-1.591-.659L5 14.5m14 0V17a2 2 0 01-2 2H7a2 2 0 01-2-2v-2.5'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.bokeh.org/bokeh/release/bokeh-2.4.1.min.js"></script>
 <link href="https://unpkg.com/tabulator-tables@6.3.0/dist/css/tabulator_bootstrap5.min.css" rel="stylesheet">
@@ -815,7 +820,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     color: var(--sand-500); font-size: 12px; font-weight: 600;
     cursor: pointer; display: flex; align-items: center;
     justify-content: space-between; gap: 6px;
-    text-transform: uppercase; letter-spacing: 0.05em;
     font-family: inherit; transition: background 0.15s;
   }
   .user-library-toggle:hover { background: var(--sand-100); color: var(--sand-700); }
@@ -920,6 +924,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
     font-size: 14px; line-height: 1.6;
     white-space: pre-wrap; word-wrap: break-word;
   }
+  .msg-date {
+    font-size: 11px; color: var(--sand-400);
+    text-align: right; margin-top: 4px;
+  }
   .msg-bubble-assistant {
     color: var(--sand-800); max-width: 80%;
     font-size: 14px; line-height: 1.6;
@@ -1022,6 +1030,36 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .msg-bubble-assistant th { background: var(--sand-50); font-weight: 600; }
   .msg-bubble-assistant tr:nth-child(even) { background: var(--sand-50); }
+
+  /* ── DNA sequence display ── */
+  .seq-block { position: relative; }
+  .seq-block pre { padding-right: 40px !important; }
+  .seq-copy-btn {
+    background: none; border: 1px solid transparent; cursor: pointer; padding: 3px 4px;
+    color: var(--sand-500); border-radius: 3px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    vertical-align: middle; margin-left: 4px; transition: color 0.1s, background 0.1s, border-color 0.1s;
+  }
+  .seq-copy-btn:hover { color: var(--sand-800); background: var(--sand-100); border-color: var(--sand-300); }
+  .seq-copy-btn.copied { color: #16a34a; }
+  .seq-copy-btn.block-btn { position: absolute; top: 6px; right: 6px; margin-left: 0; }
+  .seq-table { margin: 8px 0; overflow-x: auto; }
+  .seq-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .seq-table th, .seq-table td { border: 1px solid var(--sand-200); padding: 5px 10px; text-align: left; }
+  .seq-table th { background: var(--sand-50); font-weight: 600; position: relative; }
+  .seq-table tr:nth-child(even) { background: var(--sand-50); }
+  .seq-table td:first-child, .seq-table th:first-child { width: 1%; white-space: nowrap; }
+  .seq-table td:last-child { width: 32px; text-align: center; padding: 3px; }
+  .col-resizer {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 4px;
+    cursor: col-resize; user-select: none; z-index: 1;
+  }
+  .col-resizer:hover, .col-resizer:active { background: var(--sand-300); }
+  code.dna-seq { letter-spacing: 0.03em; }
+  .tbl-copy-row { display: flex; justify-content: flex-end; margin-top: 4px; }
+  .code-block-wrap { position: relative; }
+  .code-block-wrap pre { padding-right: 40px !important; }
+  .code-block-wrap .seq-copy-btn { position: absolute; top: 6px; right: 6px; margin-left: 0; }
 
   /* ── Input area ── */
   .input-area { padding: 8px 24px 24px; flex-shrink: 0; }
@@ -1184,6 +1222,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
   @keyframes spin { to { transform: rotate(360deg); } }
   .spin { animation: spin 1s linear infinite; transform-origin: center; }
 
+  #global-tip {
+    position: fixed; z-index: 99999; pointer-events: none;
+    opacity: 0; transition: opacity 0.15s;
+    background: #2D2C28; color: #F5F3ED;
+    font-size: 11px; font-family: Inter, sans-serif; font-weight: 400;
+    line-height: 1.55; padding: 9px 12px; border-radius: 7px;
+    width: 230px; white-space: normal;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.22);
+  }
+
   /* ── Saved Constructs button in header ──────────────────────────────── */
   .saved-constructs-btn {
     display: inline-flex; align-items: center; gap: 6px;
@@ -1200,14 +1248,20 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   /* ── Saved Constructs full-screen overlay ───────────────────────────── */
   .library-overlay {
-    position: fixed; inset: 0; z-index: 9000;
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.45);
+  }
+  .library-card {
+    background: #FAFAF8; border-radius: 12px;
+    width: min(1200px, 96vw); height: 90vh;
     display: flex; flex-direction: column;
-    background: var(--sand-50);
+    box-shadow: 0 8px 40px rgba(0,0,0,0.22); overflow: hidden;
   }
   .library-panel-header {
     display: flex; align-items: center; gap: 12px;
-    padding: 11px 20px; border-bottom: 1px solid var(--sand-200);
-    background: white; flex-shrink: 0;
+    padding: 14px 20px; border-bottom: 1px solid var(--sand-200);
+    background: #FAFAF8; flex-shrink: 0;
     justify-content: space-between;
   }
   .library-panel-header > div > span {
@@ -1227,9 +1281,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
     flex-shrink: 0;
   }
   .lib-close:hover { background: var(--sand-200); color: var(--text-primary); }
-  .lib-tab-bar { display: flex; gap: 6px; align-items: center; }
-  #lib-table-pane { flex: 1; overflow: auto; padding: 0; }
-  #lib-graph-pane { flex: 1; overflow: hidden; position: relative; }
+  .lib-tab-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  #lib-table-pane { flex: 1; overflow: auto; padding: 0; min-height: 0; }
+  #lib-graph-pane { flex: 1; overflow: hidden; position: relative; min-height: 0; }
   #constructs-graph { width: 100%; height: 100%; min-height: 400px; }
   .save-btn {
     display: inline-flex; align-items: center; gap: 5px;
@@ -1283,7 +1337,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
-    <button class="saved-constructs-btn" id="lib-panel-btn" onclick="toggleLibraryPanel()">
+    <button class="saved-constructs-btn" id="lib-panel-btn" onclick="toggleLibraryPanel()"
+      data-tooltip="Constructs designed here are saved to a local database on your machine — not committed to GitHub or shared with anyone.">
       <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
         <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
       </svg>
@@ -1317,7 +1372,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <p class="no-sessions">No conversations yet</p>
     </div>
     <div class="user-library-panel" id="user-library-panel" style="display:none">
-      <button class="user-library-toggle" id="user-library-toggle" onclick="toggleUserLibrary()">
+      <button class="user-library-toggle" id="user-library-toggle" onclick="toggleUserLibrary()"
+        data-tooltip="Your local collection of backbones and inserts loaded from a folder on this machine. These are available to the designer but live separately from the saved constructs database.">
         <span>Your Library</span>
         <em class="chevron">&#8964;</em>
       </button>
@@ -1404,40 +1460,127 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
 <!-- Saved Constructs full-screen overlay -->
 <div class="library-overlay" id="library-panel" style="display:none">
-  <div class="library-panel-header">
-    <div style="display:flex;align-items:center;gap:10px">
-      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
-      </svg>
-      <span>Saved Constructs</span>
+  <div class="library-card">
+    <div class="library-panel-header">
+      <div style="display:flex;align-items:center;gap:10px">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+        </svg>
+        <span>Library</span>
+      </div>
+      <div class="lib-tab-bar">
+        <button class="lib-tab active" id="lib-tab-table" onclick="showLibraryTab('table')">&#9776; Table</button>
+        <button class="lib-tab" id="lib-tab-graph" onclick="showLibraryTab('graph')">&#9672; Graph</button>
+        <button class="lib-tab" onclick="refreshLibraryData()">&#8635; Refresh</button>
+        <button class="lib-tab" id="import-lib-btn" style="display:none" onclick="importUserLibrary()">&#8679; Import from Library</button>
+      </div>
+      <button id="lib-remove-btn" onclick="_removeSelected()" style="display:none;
+        padding:5px 14px;border:none;border-radius:6px;cursor:pointer;font-size:12px;
+        font-family:Inter,sans-serif;font-weight:500;background:#E86235;color:#fff;
+        white-space:nowrap;flex-shrink:0">
+        Remove <span id="lib-remove-count">0</span> selected
+      </button>
+      <button class="lib-close" onclick="toggleLibraryPanel()" title="Close">
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
     </div>
-    <div class="lib-tab-bar">
-      <button class="lib-tab active" id="lib-tab-table" onclick="showLibraryTab('table')">&#9776; Table</button>
-      <button class="lib-tab" id="lib-tab-graph" onclick="showLibraryTab('graph')">&#9672; Graph</button>
-      <button class="lib-tab" onclick="refreshLibraryData()">&#8635; Refresh</button>
+    <div id="lib-table-pane" style="flex:1;overflow:auto;min-height:0">
+      <div id="constructs-table"></div>
     </div>
-    <button class="lib-close" onclick="toggleLibraryPanel()" title="Close">
-      <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
-    </button>
+    <div id="lib-graph-pane" style="display:none;flex:1;overflow:hidden;min-height:0;position:relative">
+      <div id="constructs-graph" style="width:100%;height:100%"></div>
+      <div id="cy-tooltip" style="display:none;position:absolute;z-index:100;pointer-events:none;
+        background:white;border:1px solid var(--sand-200);border-radius:8px;
+        padding:10px 13px;font-size:12px;font-family:Inter,sans-serif;
+        box-shadow:0 4px 16px rgba(0,0,0,0.12);max-width:240px;line-height:1.5"></div>
+    </div>
   </div>
-  <div id="lib-table-pane" style="flex:1;overflow:auto;min-height:0">
-    <div id="constructs-table"></div>
-  </div>
-  <div id="lib-graph-pane" style="display:none;flex:1;overflow:hidden;min-height:0;position:relative">
-    <div id="constructs-graph" style="width:100%;height:100%"></div>
-    <div id="cy-tooltip" style="display:none;position:absolute;z-index:100;pointer-events:none;
-      background:white;border:1px solid var(--sand-200);border-radius:8px;
-      padding:10px 13px;font-size:12px;font-family:Inter,sans-serif;
-      box-shadow:0 4px 16px rgba(0,0,0,0.12);max-width:240px;line-height:1.5"></div>
+</div>
+
+<!-- Import library modal -->
+<div id="import-modal" style="display:none;position:fixed;inset:0;z-index:2000;
+  background:rgba(0,0,0,0.35);align-items:center;justify-content:center">
+  <div style="background:#FAFAF8;border-radius:12px;width:min(760px,88vw);max-height:78vh;
+    display:flex;flex-direction:column;box-shadow:0 12px 48px rgba(0,0,0,0.28);overflow:hidden">
+    <div style="padding:16px 20px;border-bottom:1px solid var(--sand-200);display:flex;align-items:center;justify-content:space-between">
+      <strong style="font-size:14px;font-family:Inter,sans-serif">Import from Your Library</strong>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="toggleImportSelectAll()" id="import-select-all-btn"
+          style="font-size:12px;padding:4px 10px;border:1px solid var(--sand-300);border-radius:6px;
+          background:var(--sand-100);cursor:pointer;font-family:Inter,sans-serif">Select all</button>
+        <button onclick="closeImportModal()"
+          style="background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:18px;line-height:1">&#10005;</button>
+      </div>
+    </div>
+    <div style="overflow-y:auto;flex:1">
+      <table id="import-preview-table" style="width:100%;border-collapse:collapse;font-size:12px;font-family:Inter,sans-serif">
+        <thead style="position:sticky;top:0;background:#F5F3ED;z-index:1">
+          <tr>
+            <th style="width:32px;padding:8px 10px;text-align:center;border-bottom:1px solid var(--sand-200)">
+              <input type="checkbox" id="import-check-all" onchange="onCheckAllChange(this)"></th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Name</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Type</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Size</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Category / Enzyme</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Resistance</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Status</th>
+          </tr>
+        </thead>
+        <tbody id="import-preview-body"></tbody>
+      </table>
+    </div>
+    <div style="padding:12px 20px;border-top:1px solid var(--sand-200);display:flex;align-items:center;gap:10px;justify-content:flex-end">
+      <span id="import-selected-count" style="font-size:12px;color:var(--text-secondary);font-family:Inter,sans-serif;margin-right:auto">0 selected</span>
+      <button onclick="closeImportModal()"
+        style="padding:7px 16px;border:1px solid var(--sand-300);border-radius:8px;background:var(--sand-100);
+        cursor:pointer;font-size:13px;font-family:Inter,sans-serif">Cancel</button>
+      <button id="import-confirm-btn" onclick="confirmImport()"
+        style="padding:7px 16px;border:none;border-radius:8px;background:var(--brand-fig);color:#fff;
+        cursor:pointer;font-size:13px;font-family:Inter,sans-serif;font-weight:500">Import Selected</button>
+    </div>
   </div>
 </div>
 
 <script>
+// ── Global tooltip ──
+(function() {
+  const tip = document.createElement('div');
+  tip.id = 'global-tip';
+  document.body.appendChild(tip);
+  document.addEventListener('mouseover', function(e) {
+    const el = e.target.closest('[data-tooltip]');
+    if (!el) return;
+    tip.textContent = el.getAttribute('data-tooltip');
+    const r = el.getBoundingClientRect();
+    let left = r.right - 230;
+    let top = r.bottom + 8;
+    left = Math.max(8, Math.min(left, window.innerWidth - 238));
+    top  = Math.max(8, Math.min(top,  window.innerHeight - 120));
+    tip.style.left = left + 'px';
+    tip.style.top  = top  + 'px';
+    tip.style.opacity = '1';
+  });
+  document.addEventListener('mouseout', function(e) {
+    if (e.target.closest('[data-tooltip]')) tip.style.opacity = '0';
+  });
+})();
+
 // ── State ──
 let currentSessionId = localStorage.getItem('plasmid_session_id') || null;
 let sessions = [];
 let isStreaming = false;
 let abortController = null;
+let _userLibraryAvailable = false;
+
+async function _checkUserLibrary() {
+  try {
+    const r = await fetch('/api/config/user-library');
+    const d = await r.json();
+    _userLibraryAvailable = d.available || false;
+    const btn = document.getElementById('import-lib-btn');
+    if (btn) btn.style.display = _userLibraryAvailable ? '' : 'none';
+  } catch(e) { _userLibraryAvailable = false; }
+}
 
 // ── Token indicator ──
 function updateTokenIndicator(inputTokens, contextWindow) {
@@ -1602,11 +1745,16 @@ function renderStoredBlock(block, container) {
     container.appendChild(div);
     if (block.download_content && block.download_filename) {
       addDownloadButton(container, block.download_content, block.download_filename);
+      if (block.name === 'export_construct' &&
+          ['genbank', 'gb'].includes((block.input && block.input.output_format || '').toLowerCase())) {
+        addSaveToLibraryButton(container, block.input || {}, block.download_content);
+      }
     }
   } else if (block.type === 'text') {
     const div = document.createElement('div');
     div.className = 'msg assistant';
     div.innerHTML = '<div class="msg-bubble-assistant">' + renderContent(block.content || '') + '</div>';
+    makeTablesResizable(div);
     container.appendChild(div);
   }
 }
@@ -1623,7 +1771,8 @@ function renderStoredMessages(msgs) {
     if (m.role === 'user') {
       const div = document.createElement('div');
       div.className = 'msg user';
-      div.innerHTML = '<div class="msg-bubble-user">' + escapeHtml(m.content) + '</div>';
+      const dateStr = m.timestamp ? new Date(m.timestamp * 1000).toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'}) : '';
+      div.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(m.content) + '</div>' + (dateStr ? '<div class="msg-date">' + dateStr + '</div>' : '') + '</div>';
       inner.appendChild(div);
     } else if (m.blocks && m.blocks.length > 0) {
       m.blocks.forEach(function(block) { renderStoredBlock(block, inner); });
@@ -1631,6 +1780,7 @@ function renderStoredMessages(msgs) {
       const div = document.createElement('div');
       div.className = 'msg assistant';
       div.innerHTML = '<div class="msg-bubble-assistant">' + renderContent(m.content || '') + '</div>';
+      makeTablesResizable(div);
       inner.appendChild(div);
     }
   });
@@ -1793,9 +1943,166 @@ function toggleUserLibrary() {
 }
 
 // ── Markdown rendering ──
+// ── DNA sequence helpers ─────────────────────────────────────────────────────
+const _CLIP_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+const _CHECK_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
+function isDnaSeq(s) {
+  // Strip whitespace, digits, hyphens, prime/apostrophe, brackets, parens, slashes, punctuation
+  const clean = s.replace(/[\s\d\-'()\[\]\/\\.,;:*>]/g, '').toUpperCase();
+  return clean.length >= 10 && /^[ACGTURYSWKMBDHVN]+$/.test(clean);
+}
+
+function mkCopyBtn(seq, extraClass) {
+  return '<button class="seq-copy-btn' + (extraClass ? ' ' + extraClass : '') +
+    '" data-seq="' + escapeHtml(seq) + '" onclick="copySeq(this.dataset.seq,this)" title="Copy sequence">' +
+    _CLIP_SVG + '</button>';
+}
+
+function copySeq(seq, btn) {
+  seq = seq.replace(/\s/g, '');
+  navigator.clipboard.writeText(seq).then(function() {
+    var orig = btn.innerHTML;
+    btn.innerHTML = _CHECK_SVG;
+    btn.classList.add('copied');
+    setTimeout(function() { btn.innerHTML = orig; btn.classList.remove('copied'); }, 1500);
+  });
+}
+
+function copyRaw(text, btn) {
+  navigator.clipboard.writeText(text).then(function() {
+    var orig = btn.innerHTML;
+    btn.innerHTML = _CHECK_SVG;
+    btn.classList.add('copied');
+    setTimeout(function() { btn.innerHTML = orig; btn.classList.remove('copied'); }, 1500);
+  });
+}
+
+function mkRawCopyBtn(text, extraClass) {
+  return '<button class="seq-copy-btn' + (extraClass ? ' ' + extraClass : '') +
+    '" data-raw="' + escapeHtml(text) + '" onclick="copyRaw(this.dataset.raw,this)" title="Copy">' +
+    _CLIP_SVG + '</button>';
+}
+
+function stripMarkdown(text) {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^#{1,6}\s+/, '');
+}
+
+function makeTablesResizable(root) {
+  if (!root) return;
+  root.querySelectorAll('table:not([data-resizable])').forEach(function(table) {
+    table.setAttribute('data-resizable', '1');
+    table.querySelectorAll('th').forEach(function(th) {
+      var resizer = document.createElement('div');
+      resizer.className = 'col-resizer';
+      th.appendChild(resizer);
+      var startX, startW;
+      resizer.addEventListener('mousedown', function(e) {
+        var allThs = table.querySelectorAll('th');
+        allThs.forEach(function(t) { t.style.width = t.offsetWidth + 'px'; });
+        table.style.tableLayout = 'fixed';
+        table.style.width = table.offsetWidth + 'px';
+        startX = e.pageX;
+        startW = th.offsetWidth;
+        function onMove(e) { th.style.width = Math.max(40, startW + e.pageX - startX) + 'px'; }
+        function onUp() { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        e.preventDefault();
+      });
+    });
+  });
+}
+
+function renderSeqCodeBlock(rawCode) {
+  var langMatch = rawCode.match(/^([a-zA-Z][a-zA-Z0-9_]*)\n/);
+  var code = langMatch ? rawCode.slice(langMatch[0].length) : rawCode;
+  var trimmed = code.trim();
+  var lines = trimmed.split('\n').filter(function(l) { return l.trim(); });
+
+  // FASTA format (lines starting with >)
+  if (lines.length >= 1 && lines[0].charAt(0) === '>') {
+    var entries = [], curName = null, curSeq = '';
+    lines.forEach(function(l) {
+      if (l.charAt(0) === '>') {
+        if (curName !== null) entries.push({name: curName, seq: curSeq});
+        curName = l.slice(1).trim(); curSeq = '';
+      } else { curSeq += l.trim(); }
+    });
+    if (curName !== null) entries.push({name: curName, seq: curSeq});
+    if (entries.length > 0 && entries.every(function(e) { return isDnaSeq(e.seq); })) {
+      if (entries.length === 1) {
+        return '<div class="seq-block"><pre><code>&gt;' + escapeHtml(entries[0].name) + '\n' +
+          escapeHtml(entries[0].seq) + '</code></pre>' + mkCopyBtn(entries[0].seq, 'block-btn') + '</div>';
+      }
+      var allTsv = 'Name\tSequence\n' + entries.map(function(e) { return e.name + '\t' + e.seq; }).join('\n');
+      var t = '<div class="seq-table"><table><thead><tr><th>Name</th><th>Sequence</th><th></th></tr></thead><tbody>';
+      entries.forEach(function(e) {
+        t += '<tr><td>' + escapeHtml(e.name) + '</td><td><code class="dna-seq">' +
+          escapeHtml(e.seq) + '</code></td><td>' + mkCopyBtn(e.seq) + '</td></tr>';
+      });
+      return t + '</tbody></table><div class="tbl-copy-row">' + mkRawCopyBtn(allTsv) + '</div></div>';
+    }
+  }
+
+  // Named sequences: "Label: SEQUENCE" or "Label = SEQUENCE"
+  var namedRe = /^(.{1,50}?)\s*[:=]\s*([ACGTUacgtuRYSWKMBDHVNryswkmbdhvn]{10,})\s*$/;
+  var namedMs = lines.map(function(l) { return l.match(namedRe); });
+  if (lines.length >= 2 && namedMs.every(function(m) { return m; })) {
+    var allTsv = 'Name\tSequence\n' + namedMs.map(function(m) { return m[1].trim() + '\t' + m[2]; }).join('\n');
+    var t = '<div class="seq-table"><table><thead><tr><th>Name</th><th>Sequence</th><th></th></tr></thead><tbody>';
+    namedMs.forEach(function(m) {
+      t += '<tr><td>' + escapeHtml(m[1].trim()) + '</td><td><code class="dna-seq">' +
+        escapeHtml(m[2]) + '</code></td><td>' + mkCopyBtn(m[2]) + '</td></tr>';
+    });
+    return t + '</tbody></table><div class="tbl-copy-row">' + mkRawCopyBtn(allTsv) + '</div></div>';
+  }
+
+  // Multiple bare sequences (one per line)
+  if (lines.length >= 2 && lines.every(function(l) { return isDnaSeq(l.trim()); })) {
+    var seqs = lines.map(function(l) { return l.trim(); });
+    var allTsv = seqs.join('\n');
+    var t = '<div class="seq-table"><table><thead><tr><th>#</th><th>Sequence</th><th></th></tr></thead><tbody>';
+    seqs.forEach(function(s, i) {
+      t += '<tr><td>' + (i+1) + '</td><td><code class="dna-seq">' +
+        escapeHtml(s) + '</code></td><td>' + mkCopyBtn(s) + '</td></tr>';
+    });
+    return t + '</tbody></table><div class="tbl-copy-row">' + mkRawCopyBtn(allTsv) + '</div></div>';
+  }
+
+  // Single DNA sequence
+  if (isDnaSeq(trimmed)) {
+    return '<div class="seq-block"><pre><code>' + escapeHtml(trimmed) + '</code></pre>' +
+      mkCopyBtn(trimmed.replace(/\s/g, ''), 'block-btn') + '</div>';
+  }
+
+  // Regular code block
+  return '<div class="code-block-wrap"><pre><code>' + escapeHtml(code) + '</code></pre>' +
+    mkRawCopyBtn(code, 'block-btn') + '</div>';
+}
+
+// Wrap bare DNA sequences in plain text (skips content already inside backticks)
+function applyBareDnaInLine(h) {
+  var parts = h.split(/(`[^`]*`)/);
+  return parts.map(function(part, i) {
+    if (i % 2 === 1) return part;
+    return part.replace(/\b([ACGTUacgtu][ACGTUacgtuRYSWKMBDHVNryswkmbdhvn]{14,})\b/g, function(m) {
+      return isDnaSeq(m) ? ('<code class="dna-seq">' + m + '</code>' + mkCopyBtn(m)) : m;
+    });
+  }).join('');
+}
+
 function inlineMarkdown(text) {
   let h = escapeHtml(text);
-  h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+  h = applyBareDnaInLine(h);
+  h = h.replace(/`([^`]+)`/g, function(match, code) {
+    if (isDnaSeq(code)) return '<code class="dna-seq">' + code + '</code>' + mkCopyBtn(code);
+    return '<code>' + code + '</code>';
+  });
   h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   return h;
 }
@@ -1822,15 +2129,24 @@ function renderContent(text) {
         bodyRows.push(cells);
         i++;
       }
-      let t = '<table><thead><tr>';
+      var tsvRows = [headerCells.map(stripMarkdown).join('\t')].concat(bodyRows.map(function(row) { return row.map(stripMarkdown).join('\t'); }));
+      var tblTsv = tsvRows.join('\n');
+      let t = '<div class="seq-table"><table><thead><tr>';
       headerCells.forEach(function(c) { t += '<th>' + inlineMarkdown(c) + '</th>'; });
       t += '</tr></thead><tbody>';
       bodyRows.forEach(function(row) {
         t += '<tr>';
-        row.forEach(function(c) { t += '<td>' + inlineMarkdown(c) + '</td>'; });
+        row.forEach(function(c) {
+          const stripped = c.trim();
+          if (isDnaSeq(stripped)) {
+            t += '<td><code class="dna-seq">' + escapeHtml(stripped) + '</code>' + mkCopyBtn(stripped) + '</td>';
+          } else {
+            t += '<td>' + inlineMarkdown(c) + '</td>';
+          }
+        });
         t += '</tr>';
       });
-      t += '</tbody></table>';
+      t += '</tbody></table><div class="tbl-copy-row">' + mkRawCopyBtn(tblTsv) + '</div></div>';
       outputParts.push(t);
     } else {
       const trimmed = lines[i].trim();
@@ -1841,7 +2157,11 @@ function renderContent(text) {
         continue;
       }
       let h = escapeHtml(lines[i]);
-      h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+      h = applyBareDnaInLine(h);
+      h = h.replace(/`([^`]+)`/g, function(match, code) {
+        if (isDnaSeq(code)) return '<code class="dna-seq">' + code + '</code>' + mkCopyBtn(code);
+        return '<code>' + code + '</code>';
+      });
       h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
       h = h.replace(/^### (.+)$/, '<strong style="font-size:14px">$1</strong>');
       h = h.replace(/^## (.+)$/, '<strong style="font-size:15px">$1</strong>');
@@ -1853,7 +2173,7 @@ function renderContent(text) {
 
   let html = outputParts.join('<br>\n');
   codeBlocks.forEach(function(code, idx) {
-    html = html.replace('%%CODEBLOCK' + idx + '%%', '<pre><code>' + escapeHtml(code) + '</code></pre>');
+    html = html.replace('%%CODEBLOCK' + idx + '%%', renderSeqCodeBlock(code));
   });
   return html;
 }
@@ -2006,25 +2326,107 @@ const WORKING_LABELS = [
   'Checking the freezer…',
   'Growing colonies…',
   'Spinning down…',
-  'Running BLAST…',
-  'Optimizing codons…',
   'Thawing reagents…',
-  'Loading the NanoDrop…',
   'Asking a grad student…',
   'Reading the manual…',
-  'Designing primers…',
   'Autoclaving…',
-  'Checking for off-targets…',
   'Counting clones…',
   'Labeling tubes…',
   'Calibrating the pipette…',
-  'Checking restriction sites…',
-  'Annotating features…',
-  'Sequencing…',
-  'Making competent cells…',
   'Staring at the gel…',
   'Refilling tip boxes…',
-  'Googling the protocol…',
+  'Making competent cells…',
+  'Waiting for the PCR…',
+  'Pouring a plate…',
+  'Streaking for singles…',
+  'Checking the incubator…',
+  'Ordering reagents…',
+  'Waiting for the centrifuge…',
+  'Defrosting the -20°C…',
+  'Wiping down the bench…',
+  'Preparing the buffer…',
+  'Changing gloves…',
+  'Signing the safety form…',
+  'Finding the right tube…',
+  'Checking the OD600…',
+  'Setting up the water bath…',
+  'Asking the PI…',
+  'Asking a postdoc…',
+  'Reprinting the label…',
+  'Hunting for the protocol binder…',
+  'Waiting for the autoclave…',
+  'Mixing by pipetting up and down…',
+  'Pipetting…',
+  'Vortexing…',
+  'Flash freezing…',
+  'Filling out the order form…',
+  'Checking if the kit expired…',
+  'Making 10× buffer…',
+  'Weighing out the powder…',
+  'pH-ing the solution…',
+  'Waiting for the gel to set…',
+  'Realizing the gel ran backwards…',
+  'Borrowing tips from the next lab…',
+  'Searching for the marker…',
+  'Checking the thermocycler program…',
+  'Waiting for the overnight culture…',
+  'Diluting the sample…',
+  'Aliquoting…',
+  'Topping off the liquid nitrogen…',
+  'De-icing the freezer…',
+  'Wiping down the hood…',
+  'Running the Western…',
+  'Blocking the membrane…',
+  'Developing the blot…',
+  'Staining with EtBr…',
+  'Destaining the gel…',
+  'Imaging the blot…',
+  'Spinning the columns…',
+  'Eluting the DNA…',
+  'Measuring the absorbance…',
+  'Plating the cells…',
+  'Trypsinizing…',
+  'Counting cells…',
+  'Checking confluency…',
+  'Changing the media…',
+  'Spinning down the pellet…',
+  'Resuspending in buffer…',
+  'Snap freezing…',
+  'Running the SDS-PAGE…',
+  'Loading the samples…',
+  'Casting the gel…',
+  'Transferring to membrane…',
+  'Probing with antibody…',
+  'Washing the membrane…',
+  'Exposing the film…',
+  'Scraping the cells…',
+  'Lysing the cells…',
+  'Sonicating…',
+  'Clarifying the lysate…',
+  'Checking the protein concentration…',
+  'Setting up the ligation…',
+  'Running the digest…',
+  'Gel extracting…',
+  'Incubating on ice…',
+  'Heat shocking…',
+  'Recovering in SOC…',
+  'Spreading the plates…',
+  'Picking colonies…',
+  'Inoculating the culture…',
+  'Doing a colony PCR…',
+  'Checking the growth curve…',
+  'Inducing expression…',
+  'Harvesting cells…',
+  'Resuspending the pellet…',
+  'Filtering the solution…',
+  'Running the FPLC…',
+  'Collecting fractions…',
+  'Pooling the peaks…',
+  'Concentrating the sample…',
+  'Running a Bradford…',
+  'Preparing the cryovials…',
+  'Labeling the boxes…',
+  'Checking the balance…',
 ];
 
 function randomWorkingLabel() {
@@ -2063,6 +2465,7 @@ function endTextBlock() {
   if (currentTextDiv) {
     const cursor = currentTextDiv.querySelector('.streaming-cursor');
     if (cursor) cursor.remove();
+    makeTablesResizable(currentTextDiv);
   }
   currentTextDiv = null;
   currentTextRaw = '';
@@ -2170,7 +2573,8 @@ async function sendMessage() {
   streamingInner = inner;
   const userDiv = document.createElement('div');
   userDiv.className = 'msg user';
-  userDiv.innerHTML = '<div class="msg-bubble-user">' + escapeHtml(text) + '</div>';
+  const nowStr = new Date().toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'});
+  userDiv.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(text) + '</div><div class="msg-date">' + nowStr + '</div></div>';
   inner.appendChild(userDiv);
   scrollToBottom();
   showPendingCursor();
@@ -2650,6 +3054,7 @@ async function saveConstructToLibrary(toolInput, genbankContent, btn) {
     session_id: currentSessionId,
     backbone_name: toolInput.backbone_name || '',
     insert_name: toolInput.insert_name || '',
+    sequence_cache_key: toolInput.sequence_cache_key || '',
   };
   try {
     const r = await fetch('/api/db/constructs', {
@@ -2682,12 +3087,17 @@ function toggleLibraryPanel() {
   const btn = document.getElementById('lib-panel-btn');
   if (btn) btn.classList.toggle('active', _libraryPanelOpen);
   if (_libraryPanelOpen) {
-    if (!_constructsTable) {
-      _initTabulator();
-    } else {
-      _constructsTable.setData('/api/db/constructs');
-    }
-    if (!_cy) _initCytoscape();
+    _checkUserLibrary();
+    // Defer init until after the browser has painted the panel so Tabulator
+    // measures the real container width, not 0.
+    requestAnimationFrame(function() {
+      if (!_constructsTable) {
+        _initTabulator();
+      } else {
+        _constructsTable.setData('/api/db/constructs');
+      }
+      if (!_cy) _initCytoscape();
+    });
   }
 }
 
@@ -2715,9 +3125,12 @@ function _initTabulator() {
   _constructsTable = new Tabulator('#constructs-table', {
     ajaxURL: '/api/db/constructs',
     layout: 'fitColumns',
-    height: 'calc(100vh - 100px)',
+    height: 'calc(90vh - 58px)',
     placeholder: 'No constructs saved yet. Export a construct as GenBank and click "Save Construct".',
     columns: [
+      {formatter: 'rowSelection', titleFormatter: 'rowSelection', width: 42,
+       hozAlign: 'center', headerSort: false, frozen: true,
+       cellClick: function(e) { e.stopPropagation(); }},
       {title: 'ID', field: 'accession', frozen: true, width: 100,
        sorter: 'string', hozAlign: 'center',
        formatter: function(cell) {
@@ -2725,6 +3138,23 @@ function _initTabulator() {
        }},
       {title: 'Construct Name', field: 'construct_name', frozen: true, width: 190,
        sorter: 'string', tooltip: true},
+      {title: 'Source', field: 'origin', width: 110, headerSort: false,
+       formatter: function(cell) {
+         const v = cell.getValue() || 'designer';
+         const cfg = {
+           'designer':     {bg:'#3B82F6', label:'Designed'},
+           'user_library': {bg:'#10B981', label:'Your Library'},
+           'annotation':   {bg:'#8B5CF6', label:'Annotation'},
+         };
+         const c = cfg[v] || cfg['designer'];
+         return '<span style="background:' + c.bg + ';color:#fff;padding:2px 8px;border-radius:12px;font-size:11px;font-family:Inter,sans-serif;white-space:nowrap">' + c.label + '</span>';
+       }},
+      {title: 'Type', field: 'part_type', width: 80, headerSort: false,
+       formatter: function(cell) {
+         const v = cell.getValue();
+         if (!v) return '';
+         return '<span style="font-size:11px;color:var(--text-secondary);font-family:Inter,sans-serif">' + escapeHtml(v) + '</span>';
+       }},
       {title: 'User Label', field: 'user_name', editor: 'input', width: 130,
        cellEdited: _onCellEdited, placeholder: 'Add label…'},
       {title: 'bp', field: 'total_size_bp', sorter: 'number', width: 70, hozAlign: 'right'},
@@ -2750,6 +3180,13 @@ function _initTabulator() {
       });
     },
   });
+  _constructsTable.on('rowSelectionChanged', function(data, rows) {
+    const n = rows.length;
+    const btn = document.getElementById('lib-remove-btn');
+    const cnt = document.getElementById('lib-remove-count');
+    if (btn) btn.style.display = n > 0 ? '' : 'none';
+    if (cnt) cnt.textContent = n;
+  });
 }
 
 async function _onCellEdited(cell) {
@@ -2774,8 +3211,35 @@ function _toggleRowDetail(row) {
   const wrap = document.createElement('div');
   wrap.className = 'row-detail-wrap';
 
+  // Metadata grid (for imported library items)
+  let partsHtml = '';
+  const meta = data.metadata || {};
+  const metaFields = [
+    ['Description', meta.description],
+    ['Category', meta.category],
+    ['Assembly enzyme', meta.assembly_enzyme],
+    ['Next step enzyme', meta.next_step_enzyme],
+    ['Overhang L', meta.overhang_l],
+    ['Overhang R', meta.overhang_r],
+    ['Overhang pair 1', (meta.overhang_left && meta.overhang_right) ? meta.overhang_left + ' / ' + meta.overhang_right : null],
+    ['Overhang pair 2', (meta.overhang_left_2 && meta.overhang_right_2) ? meta.overhang_left_2 + ' / ' + meta.overhang_right_2 : null],
+    ['Insert size', meta.insert_size_bp ? meta.insert_size_bp + ' bp' : null],
+    ['Bacterial resistance', meta.bacterial_resistance],
+    ['Mammalian selection', meta.mammalian_selection],
+    ['E. coli strain', meta.ecoli_strain],
+  ].filter(function(r) { return r[1]; });
+  if (metaFields.length) {
+    partsHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px 16px;padding:10px 0 6px;border-bottom:1px solid var(--sand-200);margin-bottom:8px">';
+    metaFields.forEach(function(r) {
+      partsHtml += '<div style="font-size:12px;font-family:Inter,sans-serif">' +
+        '<span style="color:var(--text-secondary)">' + escapeHtml(r[0]) + ':</span> ' +
+        '<strong>' + escapeHtml(String(r[1])) + '</strong></div>';
+    });
+    partsHtml += '</div>';
+  }
+
   // Parts table
-  let partsHtml = '<h4>Parts &amp; Provenance</h4>';
+  partsHtml += '<h4>Parts &amp; Provenance</h4>';
   if (data.parts && data.parts.length) {
     partsHtml += '<table class="parts-sub-table"><thead><tr>' +
       '<th>Part</th><th>Type</th><th>Region</th><th>Source</th><th>DOI / Accession</th>' +
@@ -2787,6 +3251,7 @@ function _toggleRowDetail(row) {
       let ref = '—';
       if (p.source_doi) ref = '<a href="https://doi.org/' + escapeHtml(p.source_doi) + '" target="_blank" rel="noopener">' + escapeHtml(p.source_doi) + '</a>';
       else if (p.genbank_accession) ref = '<a href="https://www.ncbi.nlm.nih.gov/nuccore/' + escapeHtml(p.genbank_accession) + '" target="_blank" rel="noopener">' + escapeHtml(p.genbank_accession) + '</a>';
+      else if (p.addgene_id) ref = '<a href="https://www.addgene.org/' + escapeHtml(p.addgene_id) + '/" target="_blank" rel="noopener">Addgene #' + escapeHtml(p.addgene_id) + '</a>';
       partsHtml += '<tr><td>' + escapeHtml(p.part_name) + '</td><td>' + escapeHtml(p.part_type) +
         '</td><td>' + escapeHtml(p.part_region || '—') + '</td><td>' + srcLink + '</td><td>' + ref + '</td></tr>';
     });
@@ -2800,6 +3265,14 @@ function _toggleRowDetail(row) {
   partsHtml += '<label class="upload-verified-btn" for="' + uploadId + '">' +
     '&#8679; Upload verified sequence</label>' +
     '<input type="file" id="' + uploadId + '" accept=".gb,.fasta,.fa,.txt" style="display:none">';
+
+  // Save to local library (only for designer constructs when user library is configured)
+  if ((data.origin || 'designer') === 'designer' && _userLibraryAvailable) {
+    partsHtml += '<button id="save-to-lib-' + data.id + '" class="upload-verified-btn" style="cursor:pointer;border:none;background:var(--sand-200)" onclick="saveToLocalLibrary(' + data.id + ', this)">&#8681; Save to Local Library</button>';
+    if (data.local_path) {
+      partsHtml += '<span style="font-size:11px;color:var(--text-secondary);margin-left:8px">Saved: ' + escapeHtml(data.local_path) + '</span>';
+    }
+  }
 
   wrap.innerHTML = partsHtml;
   el.after(wrap);
@@ -2824,6 +3297,150 @@ function _toggleRowDetail(row) {
   });
 }
 
+async function saveToLocalLibrary(constructId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/db/constructs/' + constructId + '/save-to-library', {
+      method: 'POST',
+    });
+    const data = await r.json();
+    if (data.saved_to) {
+      btn.textContent = '✓ Saved';
+      const span = document.createElement('span');
+      span.style.cssText = 'font-size:11px;color:var(--text-secondary);margin-left:8px';
+      span.textContent = data.saved_to;
+      btn.after(span);
+    } else {
+      btn.textContent = 'Save failed: ' + (data.error || 'unknown error');
+      btn.disabled = false;
+    }
+  } catch(e) {
+    btn.textContent = 'Save failed';
+    btn.disabled = false;
+  }
+}
+
+async function _removeSelected() {
+  if (!_constructsTable) return;
+  const rows = _constructsTable.getSelectedRows();
+  if (!rows.length) return;
+  const n = rows.length;
+  if (!confirm('Remove ' + n + ' item' + (n > 1 ? 's' : '') + ' from the library?\nSource files on disk are not deleted.')) return;
+  for (const row of rows) {
+    const id = row.getData().id;
+    try {
+      await fetch('/api/db/constructs/' + id, {method: 'DELETE'});
+      row.delete();
+    } catch(e) { console.warn('Failed to delete', id, e); }
+  }
+}
+
+// ── Import modal ─────────────────────────────────────────────────────────────
+
+let _importItems = [];
+
+async function importUserLibrary() {
+  const modal = document.getElementById('import-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const tbody = document.getElementById('import-preview-body');
+  tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--text-secondary);font-family:Inter,sans-serif;font-size:12px">Loading…</td></tr>';
+  _updateImportCount();
+  try {
+    const r = await fetch('/api/db/user-library-preview');
+    if (!r.ok) { tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#E86235">Failed to load library</td></tr>'; return; }
+    _importItems = await r.json();
+    _renderImportTable();
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#E86235">' + escapeHtml(String(e)) + '</td></tr>';
+  }
+}
+
+function _renderImportTable() {
+  const tbody = document.getElementById('import-preview-body');
+  if (!_importItems.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--text-secondary);font-family:Inter,sans-serif;font-size:12px">No items found in library directory.</td></tr>';
+    return;
+  }
+  const typeBadge = {'backbone':'#D97757','insert':'#24B283','annotation':'#8B5CF6'};
+  tbody.innerHTML = _importItems.map(function(item, i) {
+    const already = item.already_imported;
+    const badge = typeBadge[item.part_type] || '#888';
+    const sizeStr = item.size_bp ? item.size_bp.toLocaleString() + ' bp' : '—';
+    const catEn = [item.category, item.assembly_enzyme].filter(Boolean).join(' / ') || '—';
+    const res = item.bacterial_resistance || '—';
+    return '<tr style="border-bottom:1px solid var(--sand-200);' + (already ? 'opacity:0.55' : '') + '">' +
+      '<td style="padding:7px 10px;text-align:center">' +
+        '<input type="checkbox" class="import-item-check" data-idx="' + i + '"' +
+        (already ? ' disabled' : '') + ' onchange="_updateImportCount()"></td>' +
+      '<td style="padding:7px 10px;font-family:Inter,sans-serif;font-size:12px">' + escapeHtml(item.name) + '</td>' +
+      '<td style="padding:7px 10px"><span style="background:' + badge + ';color:#fff;padding:1px 7px;border-radius:10px;font-size:10px;font-family:Inter,sans-serif">' + escapeHtml(item.part_type) + '</span></td>' +
+      '<td style="padding:7px 10px;font-size:12px;font-family:Inter,sans-serif;color:var(--text-secondary)">' + escapeHtml(sizeStr) + '</td>' +
+      '<td style="padding:7px 10px;font-size:12px;font-family:Inter,sans-serif">' + escapeHtml(catEn) + '</td>' +
+      '<td style="padding:7px 10px;font-size:12px;font-family:Inter,sans-serif">' + escapeHtml(res) + '</td>' +
+      '<td style="padding:7px 10px;font-size:11px;color:var(--text-secondary);font-family:Inter,sans-serif">' +
+        (already ? '&#10003; already imported' : '') + '</td>' +
+      '</tr>';
+  }).join('');
+  _updateImportCount();
+}
+
+function _updateImportCount() {
+  const checks = document.querySelectorAll('.import-item-check:checked');
+  const lbl = document.getElementById('import-selected-count');
+  if (lbl) lbl.textContent = checks.length + ' selected';
+}
+
+function onCheckAllChange(master) {
+  document.querySelectorAll('.import-item-check:not(:disabled)').forEach(function(cb) {
+    cb.checked = master.checked;
+  });
+  _updateImportCount();
+}
+
+function toggleImportSelectAll() {
+  const checks = document.querySelectorAll('.import-item-check:not(:disabled)');
+  const allChecked = Array.from(checks).every(function(c) { return c.checked; });
+  checks.forEach(function(c) { c.checked = !allChecked; });
+  const master = document.getElementById('import-check-all');
+  if (master) master.checked = !allChecked;
+  _updateImportCount();
+}
+
+function closeImportModal() {
+  const modal = document.getElementById('import-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function confirmImport() {
+  const checks = document.querySelectorAll('.import-item-check:checked');
+  if (!checks.length) { alert('No items selected.'); return; }
+  const selected = Array.from(checks).map(function(cb) {
+    return _importItems[parseInt(cb.dataset.idx)].local_path;
+  }).filter(Boolean);
+  const btn = document.getElementById('import-confirm-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+  try {
+    const r = await fetch('/api/db/import-user-library', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({local_paths: selected}),
+    });
+    const data = await r.json();
+    if (data.error) {
+      alert('Import failed: ' + data.error);
+    } else {
+      closeImportModal();
+      refreshLibraryData();
+    }
+  } catch(e) {
+    alert('Import failed: ' + e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Import Selected'; }
+  }
+}
+
 // ── Cytoscape ────────────────────────────────────────────────────────────────
 
 let _cy = null;
@@ -2846,6 +3463,8 @@ function _buildTooltipHtml(node) {
     if (d.insert_names && d.insert_names.length)
       rows += row('Inserts', escapeHtml(d.insert_names.join(', ')));
     if (d.created_at) rows += row('Created', escapeHtml(d.created_at));
+    const originLabels = {designer:'Designed', user_library:'Your Library', annotation:'Annotation'};
+    if (d.origin && d.origin !== 'designer') rows += row('Source', escapeHtml(originLabels[d.origin] || d.origin));
     if (d.sequence_verified)
       rows += row('', '<span style="color:#24B283;font-weight:600">&#10003; Sequence verified</span>');
   } else if (type === 'backbone') {
@@ -2902,7 +3521,7 @@ function _initCytoscape() {
     elements: [],
     style: [
       {selector: 'node[nodeType="construct"]', style: {
-        'background-color': '#24B283',
+        'background-color': '#3B82F6',
         'label': 'data(label)',
         'font-size': '10px',
         'color': '#3D3D3A',
@@ -2912,6 +3531,12 @@ function _initCytoscape() {
         'border-width': '2px', 'border-color': '#E8E6DC',
         'font-family': 'Inter, sans-serif',
         'cursor': 'pointer',
+      }},
+      {selector: 'node[nodeType="construct"][origin="user_library"]', style: {
+        'background-color': '#10B981',
+      }},
+      {selector: 'node[nodeType="construct"][origin="annotation"]', style: {
+        'background-color': '#8B5CF6',
       }},
       {selector: 'node[nodeType="backbone"]', style: {
         'background-color': '#D97757',
@@ -3169,6 +3794,33 @@ def start_batch_job(rows: list, model: str) -> str:
     return job_id
 
 
+def _enrich_parts_from_references(parts: list[dict], references: list[dict]) -> None:
+    """Fill in missing source fields on parts using the session's reference list."""
+    for part in parts:
+        if part.get("source_url") or part.get("addgene_id") or part.get("genbank_accession"):
+            continue
+        part_type = part.get("part_type")
+        part_name = (part.get("part_name") or "").lower()
+        for ref in references:
+            if ref.get("component_type") != part_type:
+                continue
+            if (ref.get("name") or "").lower() not in part_name and part_name not in (ref.get("name") or "").lower():
+                continue
+            if ref.get("source") == "addgene":
+                addgene_id = str(ref.get("identifier") or "")
+                part["source_system"] = "Addgene"
+                part["source_url"] = ref.get("url") or (f"https://www.addgene.org/{addgene_id}/" if addgene_id else None)
+                part["addgene_id"] = addgene_id or None
+            elif ref.get("source") == "ncbi":
+                accession = ref.get("accession") or ref.get("identifier")
+                part["source_system"] = "NCBI"
+                part["source_url"] = ref.get("url") or (f"https://www.ncbi.nlm.nih.gov/nuccore/{accession}" if accession else None)
+                part["genbank_accession"] = accession
+            elif ref.get("source") == "library":
+                part["source_system"] = "local library"
+            break
+
+
 # ── HTTP Server ─────────────────────────────────────────────────────────
 
 class AgentHandler(SimpleHTTPRequestHandler):
@@ -3325,6 +3977,58 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self._send_json({"status": job["status"], "rows": rows_summary})
             else:
                 self._send_json({"error": "Job not found"}, 404)
+
+        elif path == "/api/config/user-library":
+            user_lib = os.environ.get("PLASMID_USER_LIBRARY")
+            self._send_json({
+                "available": bool(user_lib and Path(user_lib).expanduser().is_dir()),
+                "path": user_lib or None,
+            })
+
+        elif path == "/api/db/user-library-preview":
+            user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+            if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
+                self._send_json({"error": "PLASMID_USER_LIBRARY not set"}, 400)
+                return
+            from src.user_library import load_user_backbones, load_user_inserts, GENBANK_EXTENSIONS
+            items = []
+            for bb in load_user_backbones():
+                lp = bb.get("local_path")
+                items.append({
+                    "local_path": lp,
+                    "name": bb.get("name") or bb.get("id", ""),
+                    "part_type": "backbone",
+                    "size_bp": bb.get("size_bp"),
+                    "description": bb.get("description", ""),
+                    "bacterial_resistance": bb.get("bacterial_resistance"),
+                    "assembly_enzyme": bb.get("assembly_enzyme"),
+                    "already_imported": bool(lp and _db_get_by_local_path(DB_PATH, lp)),
+                })
+            for ins in load_user_inserts():
+                lp = ins.get("local_path")
+                items.append({
+                    "local_path": lp,
+                    "name": ins.get("name") or ins.get("id", ""),
+                    "part_type": "insert",
+                    "size_bp": ins.get("insert_size_bp") or ins.get("size_bp"),
+                    "description": ins.get("description", ""),
+                    "category": ins.get("category"),
+                    "already_imported": bool(lp and _db_get_by_local_path(DB_PATH, lp)),
+                })
+            ann_dir = Path(user_lib_dir).expanduser() / "annotations"
+            if ann_dir.is_dir():
+                for f in sorted(ann_dir.iterdir()):
+                    if f.suffix.lower() in GENBANK_EXTENSIONS:
+                        lp = str(f)
+                        items.append({
+                            "local_path": lp,
+                            "name": f.stem,
+                            "part_type": "annotation",
+                            "size_bp": None,
+                            "description": "",
+                            "already_imported": bool(_db_get_by_local_path(DB_PATH, lp)),
+                        })
+            self._send_json(items)
 
         # ── Plasmid library DB ────────────────────────────────────────────
         elif path == "/api/db/constructs":
@@ -3518,11 +4222,25 @@ class AgentHandler(SimpleHTTPRequestHandler):
             backbone_name = body.get("backbone_name", "")
             raw_insert_name = body.get("insert_name", "")
             total_size_bp = body.get("total_size_bp")
+            sequence_cache_key = body.get("sequence_cache_key", "")
 
             # Parse fusion inserts (e.g. "EGFP-mCherry" → ["EGFP", "mCherry"])
             insert_names = [n.strip() for n in raw_insert_name.split("-") if n.strip()]
 
-            parts = build_parts_from_library(backbone_name, insert_names)
+            # Extract Addgene ID from cache key (e.g. "addgene:41393" → "41393")
+            backbone_addgene_id = None
+            if sequence_cache_key and sequence_cache_key.startswith("addgene:"):
+                backbone_addgene_id = sequence_cache_key[len("addgene:"):]
+
+            parts = build_parts_from_library(backbone_name, insert_names,
+                                             backbone_addgene_id=backbone_addgene_id)
+
+            # Enrich parts with tracker data captured during the agent turn
+            if session_id:
+                sess = get_session(session_id)
+                if sess and sess.get("last_export_references"):
+                    _enrich_parts_from_references(parts, sess["last_export_references"])
+
             validations = run_validation_structured(genbank_content, backbone_name,
                                                     raw_insert_name)
 
@@ -3548,6 +4266,112 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 validations=validations,
             )
             self._send_json({"id": construct_id, "status": "saved"})
+
+        elif path == "/api/db/import-user-library":
+            user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+            if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
+                self._send_json({"error": "PLASMID_USER_LIBRARY not set or not a directory"}, 400)
+                return
+
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            filter_paths = set(body.get("local_paths") or [])
+
+            from src.user_library import load_user_backbones, load_user_inserts, GENBANK_EXTENSIONS
+
+            imported = 0
+            skipped = 0
+
+            _META_KEYS = [
+                "description", "category", "assembly_enzyme", "next_step_enzyme",
+                "overhang_l", "overhang_r", "overhang_left", "overhang_right",
+                "overhang_left_2", "overhang_right_2", "insert_size_bp",
+                "bacterial_resistance", "mammalian_selection", "ecoli_strain",
+            ]
+
+            entries: list[tuple[str, dict]] = []
+            for bb in load_user_backbones():
+                entries.append(("backbone", bb))
+            for ins in load_user_inserts():
+                entries.append(("insert", ins))
+
+            ann_dir = Path(user_lib_dir).expanduser() / "annotations"
+            if ann_dir.is_dir():
+                for f in sorted(ann_dir.iterdir()):
+                    if f.suffix.lower() in GENBANK_EXTENSIONS:
+                        entries.append(("annotation", {
+                            "local_path": str(f),
+                            "name": f.stem,
+                            "size_bp": None,
+                            "id": f.stem,
+                        }))
+
+            for part_type, entry in entries:
+                local_path = entry.get("local_path")
+                if not local_path:
+                    skipped += 1
+                    continue
+                if filter_paths and local_path not in filter_paths:
+                    skipped += 1
+                    continue
+                if _db_get_by_local_path(DB_PATH, local_path):
+                    skipped += 1
+                    continue
+                try:
+                    genbank_content = Path(local_path).read_text(errors="replace")
+                except Exception:
+                    skipped += 1
+                    continue
+
+                origin = "annotation" if part_type == "annotation" else "user_library"
+                bb_name = entry.get("id", "") if part_type == "backbone" else ""
+                ins_names = [entry.get("id", "")] if part_type == "insert" else []
+                meta = {k: entry[k] for k in _META_KEYS if entry.get(k) is not None}
+                # Use insert_size_bp for size display on inserts; size_bp is the carrier vector
+                display_size = entry.get("insert_size_bp") or entry.get("size_bp")
+
+                _db_save_construct(
+                    DB_PATH,
+                    construct_name=entry.get("name", Path(local_path).stem),
+                    genbank_content=genbank_content,
+                    total_size_bp=display_size,
+                    session_id=None,
+                    backbone_name=bb_name,
+                    insert_names=ins_names,
+                    parts=[],
+                    validations=[],
+                    origin=origin,
+                    local_path=local_path,
+                    part_type=part_type,
+                    metadata=meta or None,
+                )
+                imported += 1
+
+            self._send_json({"imported": imported, "skipped": skipped})
+
+        elif path.startswith("/api/db/constructs/") and path.endswith("/save-to-library"):
+            import re as _re2
+            m2 = _re2.match(r"^/api/db/constructs/(\d+)/save-to-library$", path)
+            if not m2:
+                self.send_error(400)
+                return
+            construct_id = int(m2.group(1))
+            user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+            if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
+                self._send_json({"error": "PLASMID_USER_LIBRARY not set or not a directory"}, 400)
+                return
+            result = _db_get_genbank(DB_PATH, construct_id)
+            if result is None:
+                self.send_error(404)
+                return
+            name, content = result
+            constructs_dir = Path(user_lib_dir).expanduser() / "constructs"
+            constructs_dir.mkdir(exist_ok=True)
+            safe_name = _re2.sub(r'[^\w\-. ]', '_', name).strip().replace(' ', '_')
+            out_path = constructs_dir / f"{safe_name}.gb"
+            out_path.write_text(content)
+            _db_update_construct(DB_PATH, construct_id, {"local_path": str(out_path)})
+            self._send_json({"saved_to": str(out_path)})
 
         else:
             self.send_error(404)
@@ -3575,6 +4399,15 @@ class AgentHandler(SimpleHTTPRequestHandler):
             session_id = path.split("/")[3]
             deleted = delete_session_by_id(session_id)
             self._send_json({"deleted": deleted})
+        elif path.startswith("/api/db/constructs/"):
+            import re as _re_del
+            m = _re_del.match(r"^/api/db/constructs/(\d+)$", path)
+            if m:
+                construct_id = int(m.group(1))
+                deleted = _db_delete_construct(DB_PATH, construct_id)
+                self._send_json({"deleted": deleted})
+            else:
+                self.send_error(400)
         else:
             self.send_error(404)
 

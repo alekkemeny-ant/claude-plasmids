@@ -257,6 +257,7 @@ def _parse_file_to_entry(
         "size_bp": parsed["size_bp"],
         "source": "user_library",
         "features": parsed["features"],
+        "local_path": str(path),
     }
 
     if is_insert and circular:

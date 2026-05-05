@@ -643,6 +643,8 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             safe_write({"type": "text_start"})
             safe_write({"type": "text_delta", "content": ref_block})
             safe_write({"type": "text_end"})
+        # Persist structured references so the save handler can use them
+        session["last_export_references"] = tracker.to_list()
 
     if assistant_text or assistant_blocks:
         session["display_messages"].append({
@@ -1743,6 +1745,10 @@ function renderStoredBlock(block, container) {
     container.appendChild(div);
     if (block.download_content && block.download_filename) {
       addDownloadButton(container, block.download_content, block.download_filename);
+      if (block.name === 'export_construct' &&
+          ['genbank', 'gb'].includes((block.input && block.input.output_format || '').toLowerCase())) {
+        addSaveToLibraryButton(container, block.input || {}, block.download_content);
+      }
     }
   } else if (block.type === 'text') {
     const div = document.createElement('div');
@@ -3048,6 +3054,7 @@ async function saveConstructToLibrary(toolInput, genbankContent, btn) {
     session_id: currentSessionId,
     backbone_name: toolInput.backbone_name || '',
     insert_name: toolInput.insert_name || '',
+    sequence_cache_key: toolInput.sequence_cache_key || '',
   };
   try {
     const r = await fetch('/api/db/constructs', {
@@ -3244,6 +3251,7 @@ function _toggleRowDetail(row) {
       let ref = '—';
       if (p.source_doi) ref = '<a href="https://doi.org/' + escapeHtml(p.source_doi) + '" target="_blank" rel="noopener">' + escapeHtml(p.source_doi) + '</a>';
       else if (p.genbank_accession) ref = '<a href="https://www.ncbi.nlm.nih.gov/nuccore/' + escapeHtml(p.genbank_accession) + '" target="_blank" rel="noopener">' + escapeHtml(p.genbank_accession) + '</a>';
+      else if (p.addgene_id) ref = '<a href="https://www.addgene.org/' + escapeHtml(p.addgene_id) + '/" target="_blank" rel="noopener">Addgene #' + escapeHtml(p.addgene_id) + '</a>';
       partsHtml += '<tr><td>' + escapeHtml(p.part_name) + '</td><td>' + escapeHtml(p.part_type) +
         '</td><td>' + escapeHtml(p.part_region || '—') + '</td><td>' + srcLink + '</td><td>' + ref + '</td></tr>';
     });
@@ -3786,6 +3794,33 @@ def start_batch_job(rows: list, model: str) -> str:
     return job_id
 
 
+def _enrich_parts_from_references(parts: list[dict], references: list[dict]) -> None:
+    """Fill in missing source fields on parts using the session's reference list."""
+    for part in parts:
+        if part.get("source_url") or part.get("addgene_id") or part.get("genbank_accession"):
+            continue
+        part_type = part.get("part_type")
+        part_name = (part.get("part_name") or "").lower()
+        for ref in references:
+            if ref.get("component_type") != part_type:
+                continue
+            if (ref.get("name") or "").lower() not in part_name and part_name not in (ref.get("name") or "").lower():
+                continue
+            if ref.get("source") == "addgene":
+                addgene_id = str(ref.get("identifier") or "")
+                part["source_system"] = "Addgene"
+                part["source_url"] = ref.get("url") or (f"https://www.addgene.org/{addgene_id}/" if addgene_id else None)
+                part["addgene_id"] = addgene_id or None
+            elif ref.get("source") == "ncbi":
+                accession = ref.get("accession") or ref.get("identifier")
+                part["source_system"] = "NCBI"
+                part["source_url"] = ref.get("url") or (f"https://www.ncbi.nlm.nih.gov/nuccore/{accession}" if accession else None)
+                part["genbank_accession"] = accession
+            elif ref.get("source") == "library":
+                part["source_system"] = "local library"
+            break
+
+
 # ── HTTP Server ─────────────────────────────────────────────────────────
 
 class AgentHandler(SimpleHTTPRequestHandler):
@@ -4187,11 +4222,25 @@ class AgentHandler(SimpleHTTPRequestHandler):
             backbone_name = body.get("backbone_name", "")
             raw_insert_name = body.get("insert_name", "")
             total_size_bp = body.get("total_size_bp")
+            sequence_cache_key = body.get("sequence_cache_key", "")
 
             # Parse fusion inserts (e.g. "EGFP-mCherry" → ["EGFP", "mCherry"])
             insert_names = [n.strip() for n in raw_insert_name.split("-") if n.strip()]
 
-            parts = build_parts_from_library(backbone_name, insert_names)
+            # Extract Addgene ID from cache key (e.g. "addgene:41393" → "41393")
+            backbone_addgene_id = None
+            if sequence_cache_key and sequence_cache_key.startswith("addgene:"):
+                backbone_addgene_id = sequence_cache_key[len("addgene:"):]
+
+            parts = build_parts_from_library(backbone_name, insert_names,
+                                             backbone_addgene_id=backbone_addgene_id)
+
+            # Enrich parts with tracker data captured during the agent turn
+            if session_id:
+                sess = get_session(session_id)
+                if sess and sess.get("last_export_references"):
+                    _enrich_parts_from_references(parts, sess["last_export_references"])
+
             validations = run_validation_structured(genbank_content, backbone_name,
                                                     raw_insert_name)
 

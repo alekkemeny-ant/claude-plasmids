@@ -411,6 +411,7 @@ def run_validation_structured(
 def build_parts_from_library(
     backbone_name: str,
     insert_names: list[str],
+    backbone_addgene_id: str | None = None,
 ) -> list[dict]:
     try:
         from src.library import get_backbone_by_id, get_insert_by_id
@@ -427,7 +428,7 @@ def build_parts_from_library(
             bb = None
 
     if bb and not bb.get("needs_disambiguation"):
-        addgene_id = bb.get("addgene_id")
+        addgene_id = bb.get("addgene_id") or backbone_addgene_id
         url = bb.get("url") or (
             f"https://www.addgene.org/{addgene_id}/" if addgene_id else None
         )
@@ -443,16 +444,18 @@ def build_parts_from_library(
             "addgene_id": str(addgene_id) if addgene_id is not None else None,
         })
     elif backbone_name:
+        # Backbone not found in local library or Addgene — use provided addgene_id if available
+        url = f"https://www.addgene.org/{backbone_addgene_id}/" if backbone_addgene_id else None
         parts.append({
             "part_type": "backbone",
             "part_name": backbone_name,
             "part_region": "Vector backbone",
-            "source_system": None,
-            "source_url": None,
+            "source_system": "Addgene" if backbone_addgene_id else None,
+            "source_url": url,
             "source_doi": None,
             "source_pubmed_id": None,
             "genbank_accession": None,
-            "addgene_id": None,
+            "addgene_id": str(backbone_addgene_id) if backbone_addgene_id else None,
         })
 
     regions = _assign_insert_regions(insert_names)

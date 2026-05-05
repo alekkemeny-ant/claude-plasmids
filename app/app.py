@@ -1021,12 +1021,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .msg-bubble-assistant pre code { padding: 0; background: none; }
   .msg-bubble-assistant table {
-    width: auto; max-width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px;
+    width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px;
   }
   .msg-bubble-assistant th, .msg-bubble-assistant td {
     border: 1px solid var(--sand-200); padding: 6px 12px; text-align: left;
   }
-  .msg-bubble-assistant th { background: var(--sand-50); font-weight: 600; position: relative; }
+  .msg-bubble-assistant th { background: var(--sand-50); font-weight: 600; }
   .msg-bubble-assistant tr:nth-child(even) { background: var(--sand-50); }
 
   /* ── DNA sequence display ── */
@@ -1042,10 +1042,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .seq-copy-btn.copied { color: #16a34a; }
   .seq-copy-btn.block-btn { position: absolute; top: 6px; right: 6px; margin-left: 0; }
   .seq-table { margin: 8px 0; overflow-x: auto; }
-  .seq-table table { width: auto; max-width: 100%; border-collapse: collapse; font-size: 12px; }
+  .seq-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .seq-table th, .seq-table td { border: 1px solid var(--sand-200); padding: 5px 10px; text-align: left; }
   .seq-table th { background: var(--sand-50); font-weight: 600; position: relative; }
   .seq-table tr:nth-child(even) { background: var(--sand-50); }
+  .seq-table td:first-child, .seq-table th:first-child { width: 1%; white-space: nowrap; }
   .seq-table td:last-child { width: 32px; text-align: center; padding: 3px; }
   .col-resizer {
     position: absolute; right: 0; top: 0; bottom: 0; width: 4px;

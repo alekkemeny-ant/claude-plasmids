@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS construct_validations (
 );
 """
 
-_EDITABLE_FIELDS = {"user_name", "notes", "sequence_verified", "verified_sequence"}
+_EDITABLE_FIELDS = {"user_name", "notes", "sequence_verified", "verified_sequence", "local_path"}
 
 
 # ── Connection ───────────────────────────────────────────────────────────────
@@ -95,6 +95,16 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 def init_db(db_path: Path) -> None:
     with _connect(db_path) as con:
         con.executescript(_DDL)
+        # Safe migrations for columns added after initial schema
+        existing = {row[1] for row in con.execute("PRAGMA table_info(constructs)")}
+        if "origin" not in existing:
+            con.execute("ALTER TABLE constructs ADD COLUMN origin TEXT DEFAULT 'designer'")
+        if "local_path" not in existing:
+            con.execute("ALTER TABLE constructs ADD COLUMN local_path TEXT")
+        if "part_type" not in existing:
+            con.execute("ALTER TABLE constructs ADD COLUMN part_type TEXT")
+        if "metadata" not in existing:
+            con.execute("ALTER TABLE constructs ADD COLUMN metadata TEXT")
 
 
 def save_construct(
@@ -108,13 +118,17 @@ def save_construct(
     insert_names: list[str],
     parts: list[dict],
     validations: list[dict],
+    origin: str = "designer",
+    local_path: Optional[str] = None,
+    part_type: Optional[str] = None,
+    metadata: Optional[dict] = None,
 ) -> int:
     with _connect(db_path) as con:
         cur = con.execute(
             """INSERT INTO constructs
                (construct_name, genbank_content, total_size_bp, session_id,
-                backbone_name, insert_names)
-               VALUES (?,?,?,?,?,?)""",
+                backbone_name, insert_names, origin, local_path, part_type, metadata)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 construct_name,
                 genbank_content,
@@ -122,6 +136,10 @@ def save_construct(
                 session_id,
                 backbone_name,
                 json.dumps(insert_names),
+                origin,
+                local_path,
+                part_type,
+                json.dumps(metadata) if metadata else None,
             ),
         )
         construct_id = cur.lastrowid
@@ -189,8 +207,15 @@ def list_constructs(db_path: Path) -> list[dict]:
                 {**dict(v), "passed": bool(v["passed"])} for v in validations
             ]
             d["sequence_verified"] = bool(d["sequence_verified"])
+            d["metadata"] = json.loads(d["metadata"]) if d.get("metadata") else {}
             result.append(d)
         return result
+
+
+def delete_construct(db_path: Path, construct_id: int) -> bool:
+    with _connect(db_path) as con:
+        cur = con.execute("DELETE FROM constructs WHERE id=?", (construct_id,))
+        return cur.rowcount > 0
 
 
 def update_construct(db_path: Path, construct_id: int, fields: dict) -> bool:
@@ -217,11 +242,21 @@ def get_construct_genbank(db_path: Path, construct_id: int) -> Optional[tuple[st
         return row["construct_name"], row["genbank_content"]
 
 
+def get_construct_by_local_path(db_path: Path, local_path: str) -> Optional[dict]:
+    with _connect(db_path) as con:
+        row = con.execute(
+            "SELECT id, construct_name FROM constructs WHERE local_path=?",
+            (local_path,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def get_graph_data(db_path: Path) -> dict:
     with _connect(db_path) as con:
         constructs = con.execute(
             """SELECT id, construct_name, total_size_bp, created_at,
-                      backbone_name, insert_names, sequence_verified, user_name
+                      backbone_name, insert_names, sequence_verified, user_name,
+                      origin
                FROM constructs"""
         ).fetchall()
         parts = con.execute(
@@ -255,6 +290,7 @@ def get_graph_data(db_path: Path) -> dict:
                 "insert_names": insert_names,
                 "sequence_verified": bool(c["sequence_verified"]),
                 "user_name": c["user_name"] or "",
+                "origin": c["origin"] or "designer",
             }
         })
 

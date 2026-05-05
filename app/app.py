@@ -62,6 +62,8 @@ _db_list_constructs = _db_mod.list_constructs
 _db_update_construct = _db_mod.update_construct
 _db_get_genbank = _db_mod.get_construct_genbank
 _db_get_graph = _db_mod.get_graph_data
+_db_get_by_local_path = _db_mod.get_construct_by_local_path
+_db_delete_construct = _db_mod.delete_construct
 build_parts_from_library = _db_mod.build_parts_from_library
 run_validation_structured = _db_mod.run_validation_structured
 
@@ -816,7 +818,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     color: var(--sand-500); font-size: 12px; font-weight: 600;
     cursor: pointer; display: flex; align-items: center;
     justify-content: space-between; gap: 6px;
-    text-transform: uppercase; letter-spacing: 0.05em;
     font-family: inherit; transition: background 0.15s;
   }
   .user-library-toggle:hover { background: var(--sand-100); color: var(--sand-700); }
@@ -1218,6 +1219,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
   @keyframes spin { to { transform: rotate(360deg); } }
   .spin { animation: spin 1s linear infinite; transform-origin: center; }
 
+  #global-tip {
+    position: fixed; z-index: 99999; pointer-events: none;
+    opacity: 0; transition: opacity 0.15s;
+    background: #2D2C28; color: #F5F3ED;
+    font-size: 11px; font-family: Inter, sans-serif; font-weight: 400;
+    line-height: 1.55; padding: 9px 12px; border-radius: 7px;
+    width: 230px; white-space: normal;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.22);
+  }
+
   /* ── Saved Constructs button in header ──────────────────────────────── */
   .saved-constructs-btn {
     display: inline-flex; align-items: center; gap: 6px;
@@ -1234,14 +1245,20 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   /* ── Saved Constructs full-screen overlay ───────────────────────────── */
   .library-overlay {
-    position: fixed; inset: 0; z-index: 9000;
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.45);
+  }
+  .library-card {
+    background: #FAFAF8; border-radius: 12px;
+    width: min(1200px, 96vw); height: 90vh;
     display: flex; flex-direction: column;
-    background: var(--sand-50);
+    box-shadow: 0 8px 40px rgba(0,0,0,0.22); overflow: hidden;
   }
   .library-panel-header {
     display: flex; align-items: center; gap: 12px;
-    padding: 11px 20px; border-bottom: 1px solid var(--sand-200);
-    background: white; flex-shrink: 0;
+    padding: 14px 20px; border-bottom: 1px solid var(--sand-200);
+    background: #FAFAF8; flex-shrink: 0;
     justify-content: space-between;
   }
   .library-panel-header > div > span {
@@ -1261,9 +1278,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
     flex-shrink: 0;
   }
   .lib-close:hover { background: var(--sand-200); color: var(--text-primary); }
-  .lib-tab-bar { display: flex; gap: 6px; align-items: center; }
-  #lib-table-pane { flex: 1; overflow: auto; padding: 0; }
-  #lib-graph-pane { flex: 1; overflow: hidden; position: relative; }
+  .lib-tab-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  #lib-table-pane { flex: 1; overflow: auto; padding: 0; min-height: 0; }
+  #lib-graph-pane { flex: 1; overflow: hidden; position: relative; min-height: 0; }
   #constructs-graph { width: 100%; height: 100%; min-height: 400px; }
   .save-btn {
     display: inline-flex; align-items: center; gap: 5px;
@@ -1317,7 +1334,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
-    <button class="saved-constructs-btn" id="lib-panel-btn" onclick="toggleLibraryPanel()">
+    <button class="saved-constructs-btn" id="lib-panel-btn" onclick="toggleLibraryPanel()"
+      data-tooltip="Constructs designed here are saved to a local database on your machine — not committed to GitHub or shared with anyone.">
       <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
         <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
       </svg>
@@ -1351,7 +1369,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <p class="no-sessions">No conversations yet</p>
     </div>
     <div class="user-library-panel" id="user-library-panel" style="display:none">
-      <button class="user-library-toggle" id="user-library-toggle" onclick="toggleUserLibrary()">
+      <button class="user-library-toggle" id="user-library-toggle" onclick="toggleUserLibrary()"
+        data-tooltip="Your local collection of backbones and inserts loaded from a folder on this machine. These are available to the designer but live separately from the saved constructs database.">
         <span>Your Library</span>
         <em class="chevron">&#8964;</em>
       </button>
@@ -1438,40 +1457,127 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
 <!-- Saved Constructs full-screen overlay -->
 <div class="library-overlay" id="library-panel" style="display:none">
-  <div class="library-panel-header">
-    <div style="display:flex;align-items:center;gap:10px">
-      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
-      </svg>
-      <span>Saved Constructs</span>
+  <div class="library-card">
+    <div class="library-panel-header">
+      <div style="display:flex;align-items:center;gap:10px">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+        </svg>
+        <span>Library</span>
+      </div>
+      <div class="lib-tab-bar">
+        <button class="lib-tab active" id="lib-tab-table" onclick="showLibraryTab('table')">&#9776; Table</button>
+        <button class="lib-tab" id="lib-tab-graph" onclick="showLibraryTab('graph')">&#9672; Graph</button>
+        <button class="lib-tab" onclick="refreshLibraryData()">&#8635; Refresh</button>
+        <button class="lib-tab" id="import-lib-btn" style="display:none" onclick="importUserLibrary()">&#8679; Import from Library</button>
+      </div>
+      <button id="lib-remove-btn" onclick="_removeSelected()" style="display:none;
+        padding:5px 14px;border:none;border-radius:6px;cursor:pointer;font-size:12px;
+        font-family:Inter,sans-serif;font-weight:500;background:#E86235;color:#fff;
+        white-space:nowrap;flex-shrink:0">
+        Remove <span id="lib-remove-count">0</span> selected
+      </button>
+      <button class="lib-close" onclick="toggleLibraryPanel()" title="Close">
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
     </div>
-    <div class="lib-tab-bar">
-      <button class="lib-tab active" id="lib-tab-table" onclick="showLibraryTab('table')">&#9776; Table</button>
-      <button class="lib-tab" id="lib-tab-graph" onclick="showLibraryTab('graph')">&#9672; Graph</button>
-      <button class="lib-tab" onclick="refreshLibraryData()">&#8635; Refresh</button>
+    <div id="lib-table-pane" style="flex:1;overflow:auto;min-height:0">
+      <div id="constructs-table"></div>
     </div>
-    <button class="lib-close" onclick="toggleLibraryPanel()" title="Close">
-      <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
-    </button>
+    <div id="lib-graph-pane" style="display:none;flex:1;overflow:hidden;min-height:0;position:relative">
+      <div id="constructs-graph" style="width:100%;height:100%"></div>
+      <div id="cy-tooltip" style="display:none;position:absolute;z-index:100;pointer-events:none;
+        background:white;border:1px solid var(--sand-200);border-radius:8px;
+        padding:10px 13px;font-size:12px;font-family:Inter,sans-serif;
+        box-shadow:0 4px 16px rgba(0,0,0,0.12);max-width:240px;line-height:1.5"></div>
+    </div>
   </div>
-  <div id="lib-table-pane" style="flex:1;overflow:auto;min-height:0">
-    <div id="constructs-table"></div>
-  </div>
-  <div id="lib-graph-pane" style="display:none;flex:1;overflow:hidden;min-height:0;position:relative">
-    <div id="constructs-graph" style="width:100%;height:100%"></div>
-    <div id="cy-tooltip" style="display:none;position:absolute;z-index:100;pointer-events:none;
-      background:white;border:1px solid var(--sand-200);border-radius:8px;
-      padding:10px 13px;font-size:12px;font-family:Inter,sans-serif;
-      box-shadow:0 4px 16px rgba(0,0,0,0.12);max-width:240px;line-height:1.5"></div>
+</div>
+
+<!-- Import library modal -->
+<div id="import-modal" style="display:none;position:fixed;inset:0;z-index:2000;
+  background:rgba(0,0,0,0.35);align-items:center;justify-content:center">
+  <div style="background:#FAFAF8;border-radius:12px;width:min(760px,88vw);max-height:78vh;
+    display:flex;flex-direction:column;box-shadow:0 12px 48px rgba(0,0,0,0.28);overflow:hidden">
+    <div style="padding:16px 20px;border-bottom:1px solid var(--sand-200);display:flex;align-items:center;justify-content:space-between">
+      <strong style="font-size:14px;font-family:Inter,sans-serif">Import from Your Library</strong>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="toggleImportSelectAll()" id="import-select-all-btn"
+          style="font-size:12px;padding:4px 10px;border:1px solid var(--sand-300);border-radius:6px;
+          background:var(--sand-100);cursor:pointer;font-family:Inter,sans-serif">Select all</button>
+        <button onclick="closeImportModal()"
+          style="background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:18px;line-height:1">&#10005;</button>
+      </div>
+    </div>
+    <div style="overflow-y:auto;flex:1">
+      <table id="import-preview-table" style="width:100%;border-collapse:collapse;font-size:12px;font-family:Inter,sans-serif">
+        <thead style="position:sticky;top:0;background:#F5F3ED;z-index:1">
+          <tr>
+            <th style="width:32px;padding:8px 10px;text-align:center;border-bottom:1px solid var(--sand-200)">
+              <input type="checkbox" id="import-check-all" onchange="onCheckAllChange(this)"></th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Name</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Type</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Size</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Category / Enzyme</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Resistance</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Status</th>
+          </tr>
+        </thead>
+        <tbody id="import-preview-body"></tbody>
+      </table>
+    </div>
+    <div style="padding:12px 20px;border-top:1px solid var(--sand-200);display:flex;align-items:center;gap:10px;justify-content:flex-end">
+      <span id="import-selected-count" style="font-size:12px;color:var(--text-secondary);font-family:Inter,sans-serif;margin-right:auto">0 selected</span>
+      <button onclick="closeImportModal()"
+        style="padding:7px 16px;border:1px solid var(--sand-300);border-radius:8px;background:var(--sand-100);
+        cursor:pointer;font-size:13px;font-family:Inter,sans-serif">Cancel</button>
+      <button id="import-confirm-btn" onclick="confirmImport()"
+        style="padding:7px 16px;border:none;border-radius:8px;background:var(--brand-fig);color:#fff;
+        cursor:pointer;font-size:13px;font-family:Inter,sans-serif;font-weight:500">Import Selected</button>
+    </div>
   </div>
 </div>
 
 <script>
+// ── Global tooltip ──
+(function() {
+  const tip = document.createElement('div');
+  tip.id = 'global-tip';
+  document.body.appendChild(tip);
+  document.addEventListener('mouseover', function(e) {
+    const el = e.target.closest('[data-tooltip]');
+    if (!el) return;
+    tip.textContent = el.getAttribute('data-tooltip');
+    const r = el.getBoundingClientRect();
+    let left = r.right - 230;
+    let top = r.bottom + 8;
+    left = Math.max(8, Math.min(left, window.innerWidth - 238));
+    top  = Math.max(8, Math.min(top,  window.innerHeight - 120));
+    tip.style.left = left + 'px';
+    tip.style.top  = top  + 'px';
+    tip.style.opacity = '1';
+  });
+  document.addEventListener('mouseout', function(e) {
+    if (e.target.closest('[data-tooltip]')) tip.style.opacity = '0';
+  });
+})();
+
 // ── State ──
 let currentSessionId = localStorage.getItem('plasmid_session_id') || null;
 let sessions = [];
 let isStreaming = false;
 let abortController = null;
+let _userLibraryAvailable = false;
+
+async function _checkUserLibrary() {
+  try {
+    const r = await fetch('/api/config/user-library');
+    const d = await r.json();
+    _userLibraryAvailable = d.available || false;
+    const btn = document.getElementById('import-lib-btn');
+    if (btn) btn.style.display = _userLibraryAvailable ? '' : 'none';
+  } catch(e) { _userLibraryAvailable = false; }
+}
 
 // ── Token indicator ──
 function updateTokenIndicator(inputTokens, contextWindow) {
@@ -2973,12 +3079,17 @@ function toggleLibraryPanel() {
   const btn = document.getElementById('lib-panel-btn');
   if (btn) btn.classList.toggle('active', _libraryPanelOpen);
   if (_libraryPanelOpen) {
-    if (!_constructsTable) {
-      _initTabulator();
-    } else {
-      _constructsTable.setData('/api/db/constructs');
-    }
-    if (!_cy) _initCytoscape();
+    _checkUserLibrary();
+    // Defer init until after the browser has painted the panel so Tabulator
+    // measures the real container width, not 0.
+    requestAnimationFrame(function() {
+      if (!_constructsTable) {
+        _initTabulator();
+      } else {
+        _constructsTable.setData('/api/db/constructs');
+      }
+      if (!_cy) _initCytoscape();
+    });
   }
 }
 
@@ -3006,9 +3117,12 @@ function _initTabulator() {
   _constructsTable = new Tabulator('#constructs-table', {
     ajaxURL: '/api/db/constructs',
     layout: 'fitColumns',
-    height: 'calc(100vh - 100px)',
+    height: 'calc(90vh - 58px)',
     placeholder: 'No constructs saved yet. Export a construct as GenBank and click "Save Construct".',
     columns: [
+      {formatter: 'rowSelection', titleFormatter: 'rowSelection', width: 42,
+       hozAlign: 'center', headerSort: false, frozen: true,
+       cellClick: function(e) { e.stopPropagation(); }},
       {title: 'ID', field: 'accession', frozen: true, width: 100,
        sorter: 'string', hozAlign: 'center',
        formatter: function(cell) {
@@ -3016,6 +3130,23 @@ function _initTabulator() {
        }},
       {title: 'Construct Name', field: 'construct_name', frozen: true, width: 190,
        sorter: 'string', tooltip: true},
+      {title: 'Source', field: 'origin', width: 110, headerSort: false,
+       formatter: function(cell) {
+         const v = cell.getValue() || 'designer';
+         const cfg = {
+           'designer':     {bg:'#3B82F6', label:'Designed'},
+           'user_library': {bg:'#10B981', label:'Your Library'},
+           'annotation':   {bg:'#8B5CF6', label:'Annotation'},
+         };
+         const c = cfg[v] || cfg['designer'];
+         return '<span style="background:' + c.bg + ';color:#fff;padding:2px 8px;border-radius:12px;font-size:11px;font-family:Inter,sans-serif;white-space:nowrap">' + c.label + '</span>';
+       }},
+      {title: 'Type', field: 'part_type', width: 80, headerSort: false,
+       formatter: function(cell) {
+         const v = cell.getValue();
+         if (!v) return '';
+         return '<span style="font-size:11px;color:var(--text-secondary);font-family:Inter,sans-serif">' + escapeHtml(v) + '</span>';
+       }},
       {title: 'User Label', field: 'user_name', editor: 'input', width: 130,
        cellEdited: _onCellEdited, placeholder: 'Add label…'},
       {title: 'bp', field: 'total_size_bp', sorter: 'number', width: 70, hozAlign: 'right'},
@@ -3041,6 +3172,13 @@ function _initTabulator() {
       });
     },
   });
+  _constructsTable.on('rowSelectionChanged', function(data, rows) {
+    const n = rows.length;
+    const btn = document.getElementById('lib-remove-btn');
+    const cnt = document.getElementById('lib-remove-count');
+    if (btn) btn.style.display = n > 0 ? '' : 'none';
+    if (cnt) cnt.textContent = n;
+  });
 }
 
 async function _onCellEdited(cell) {
@@ -3065,8 +3203,35 @@ function _toggleRowDetail(row) {
   const wrap = document.createElement('div');
   wrap.className = 'row-detail-wrap';
 
+  // Metadata grid (for imported library items)
+  let partsHtml = '';
+  const meta = data.metadata || {};
+  const metaFields = [
+    ['Description', meta.description],
+    ['Category', meta.category],
+    ['Assembly enzyme', meta.assembly_enzyme],
+    ['Next step enzyme', meta.next_step_enzyme],
+    ['Overhang L', meta.overhang_l],
+    ['Overhang R', meta.overhang_r],
+    ['Overhang pair 1', (meta.overhang_left && meta.overhang_right) ? meta.overhang_left + ' / ' + meta.overhang_right : null],
+    ['Overhang pair 2', (meta.overhang_left_2 && meta.overhang_right_2) ? meta.overhang_left_2 + ' / ' + meta.overhang_right_2 : null],
+    ['Insert size', meta.insert_size_bp ? meta.insert_size_bp + ' bp' : null],
+    ['Bacterial resistance', meta.bacterial_resistance],
+    ['Mammalian selection', meta.mammalian_selection],
+    ['E. coli strain', meta.ecoli_strain],
+  ].filter(function(r) { return r[1]; });
+  if (metaFields.length) {
+    partsHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px 16px;padding:10px 0 6px;border-bottom:1px solid var(--sand-200);margin-bottom:8px">';
+    metaFields.forEach(function(r) {
+      partsHtml += '<div style="font-size:12px;font-family:Inter,sans-serif">' +
+        '<span style="color:var(--text-secondary)">' + escapeHtml(r[0]) + ':</span> ' +
+        '<strong>' + escapeHtml(String(r[1])) + '</strong></div>';
+    });
+    partsHtml += '</div>';
+  }
+
   // Parts table
-  let partsHtml = '<h4>Parts &amp; Provenance</h4>';
+  partsHtml += '<h4>Parts &amp; Provenance</h4>';
   if (data.parts && data.parts.length) {
     partsHtml += '<table class="parts-sub-table"><thead><tr>' +
       '<th>Part</th><th>Type</th><th>Region</th><th>Source</th><th>DOI / Accession</th>' +
@@ -3092,6 +3257,14 @@ function _toggleRowDetail(row) {
     '&#8679; Upload verified sequence</label>' +
     '<input type="file" id="' + uploadId + '" accept=".gb,.fasta,.fa,.txt" style="display:none">';
 
+  // Save to local library (only for designer constructs when user library is configured)
+  if ((data.origin || 'designer') === 'designer' && _userLibraryAvailable) {
+    partsHtml += '<button id="save-to-lib-' + data.id + '" class="upload-verified-btn" style="cursor:pointer;border:none;background:var(--sand-200)" onclick="saveToLocalLibrary(' + data.id + ', this)">&#8681; Save to Local Library</button>';
+    if (data.local_path) {
+      partsHtml += '<span style="font-size:11px;color:var(--text-secondary);margin-left:8px">Saved: ' + escapeHtml(data.local_path) + '</span>';
+    }
+  }
+
   wrap.innerHTML = partsHtml;
   el.after(wrap);
 
@@ -3113,6 +3286,150 @@ function _toggleRowDetail(row) {
     const lbl = wrap.querySelector('label.upload-verified-btn');
     if (lbl) lbl.textContent = '✓ Verified sequence uploaded';
   });
+}
+
+async function saveToLocalLibrary(constructId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/db/constructs/' + constructId + '/save-to-library', {
+      method: 'POST',
+    });
+    const data = await r.json();
+    if (data.saved_to) {
+      btn.textContent = '✓ Saved';
+      const span = document.createElement('span');
+      span.style.cssText = 'font-size:11px;color:var(--text-secondary);margin-left:8px';
+      span.textContent = data.saved_to;
+      btn.after(span);
+    } else {
+      btn.textContent = 'Save failed: ' + (data.error || 'unknown error');
+      btn.disabled = false;
+    }
+  } catch(e) {
+    btn.textContent = 'Save failed';
+    btn.disabled = false;
+  }
+}
+
+async function _removeSelected() {
+  if (!_constructsTable) return;
+  const rows = _constructsTable.getSelectedRows();
+  if (!rows.length) return;
+  const n = rows.length;
+  if (!confirm('Remove ' + n + ' item' + (n > 1 ? 's' : '') + ' from the library?\nSource files on disk are not deleted.')) return;
+  for (const row of rows) {
+    const id = row.getData().id;
+    try {
+      await fetch('/api/db/constructs/' + id, {method: 'DELETE'});
+      row.delete();
+    } catch(e) { console.warn('Failed to delete', id, e); }
+  }
+}
+
+// ── Import modal ─────────────────────────────────────────────────────────────
+
+let _importItems = [];
+
+async function importUserLibrary() {
+  const modal = document.getElementById('import-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const tbody = document.getElementById('import-preview-body');
+  tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--text-secondary);font-family:Inter,sans-serif;font-size:12px">Loading…</td></tr>';
+  _updateImportCount();
+  try {
+    const r = await fetch('/api/db/user-library-preview');
+    if (!r.ok) { tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#E86235">Failed to load library</td></tr>'; return; }
+    _importItems = await r.json();
+    _renderImportTable();
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#E86235">' + escapeHtml(String(e)) + '</td></tr>';
+  }
+}
+
+function _renderImportTable() {
+  const tbody = document.getElementById('import-preview-body');
+  if (!_importItems.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--text-secondary);font-family:Inter,sans-serif;font-size:12px">No items found in library directory.</td></tr>';
+    return;
+  }
+  const typeBadge = {'backbone':'#D97757','insert':'#24B283','annotation':'#8B5CF6'};
+  tbody.innerHTML = _importItems.map(function(item, i) {
+    const already = item.already_imported;
+    const badge = typeBadge[item.part_type] || '#888';
+    const sizeStr = item.size_bp ? item.size_bp.toLocaleString() + ' bp' : '—';
+    const catEn = [item.category, item.assembly_enzyme].filter(Boolean).join(' / ') || '—';
+    const res = item.bacterial_resistance || '—';
+    return '<tr style="border-bottom:1px solid var(--sand-200);' + (already ? 'opacity:0.55' : '') + '">' +
+      '<td style="padding:7px 10px;text-align:center">' +
+        '<input type="checkbox" class="import-item-check" data-idx="' + i + '"' +
+        (already ? ' disabled' : '') + ' onchange="_updateImportCount()"></td>' +
+      '<td style="padding:7px 10px;font-family:Inter,sans-serif;font-size:12px">' + escapeHtml(item.name) + '</td>' +
+      '<td style="padding:7px 10px"><span style="background:' + badge + ';color:#fff;padding:1px 7px;border-radius:10px;font-size:10px;font-family:Inter,sans-serif">' + escapeHtml(item.part_type) + '</span></td>' +
+      '<td style="padding:7px 10px;font-size:12px;font-family:Inter,sans-serif;color:var(--text-secondary)">' + escapeHtml(sizeStr) + '</td>' +
+      '<td style="padding:7px 10px;font-size:12px;font-family:Inter,sans-serif">' + escapeHtml(catEn) + '</td>' +
+      '<td style="padding:7px 10px;font-size:12px;font-family:Inter,sans-serif">' + escapeHtml(res) + '</td>' +
+      '<td style="padding:7px 10px;font-size:11px;color:var(--text-secondary);font-family:Inter,sans-serif">' +
+        (already ? '&#10003; already imported' : '') + '</td>' +
+      '</tr>';
+  }).join('');
+  _updateImportCount();
+}
+
+function _updateImportCount() {
+  const checks = document.querySelectorAll('.import-item-check:checked');
+  const lbl = document.getElementById('import-selected-count');
+  if (lbl) lbl.textContent = checks.length + ' selected';
+}
+
+function onCheckAllChange(master) {
+  document.querySelectorAll('.import-item-check:not(:disabled)').forEach(function(cb) {
+    cb.checked = master.checked;
+  });
+  _updateImportCount();
+}
+
+function toggleImportSelectAll() {
+  const checks = document.querySelectorAll('.import-item-check:not(:disabled)');
+  const allChecked = Array.from(checks).every(function(c) { return c.checked; });
+  checks.forEach(function(c) { c.checked = !allChecked; });
+  const master = document.getElementById('import-check-all');
+  if (master) master.checked = !allChecked;
+  _updateImportCount();
+}
+
+function closeImportModal() {
+  const modal = document.getElementById('import-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function confirmImport() {
+  const checks = document.querySelectorAll('.import-item-check:checked');
+  if (!checks.length) { alert('No items selected.'); return; }
+  const selected = Array.from(checks).map(function(cb) {
+    return _importItems[parseInt(cb.dataset.idx)].local_path;
+  }).filter(Boolean);
+  const btn = document.getElementById('import-confirm-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+  try {
+    const r = await fetch('/api/db/import-user-library', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({local_paths: selected}),
+    });
+    const data = await r.json();
+    if (data.error) {
+      alert('Import failed: ' + data.error);
+    } else {
+      closeImportModal();
+      refreshLibraryData();
+    }
+  } catch(e) {
+    alert('Import failed: ' + e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Import Selected'; }
+  }
 }
 
 // ── Cytoscape ────────────────────────────────────────────────────────────────
@@ -3137,6 +3454,8 @@ function _buildTooltipHtml(node) {
     if (d.insert_names && d.insert_names.length)
       rows += row('Inserts', escapeHtml(d.insert_names.join(', ')));
     if (d.created_at) rows += row('Created', escapeHtml(d.created_at));
+    const originLabels = {designer:'Designed', user_library:'Your Library', annotation:'Annotation'};
+    if (d.origin && d.origin !== 'designer') rows += row('Source', escapeHtml(originLabels[d.origin] || d.origin));
     if (d.sequence_verified)
       rows += row('', '<span style="color:#24B283;font-weight:600">&#10003; Sequence verified</span>');
   } else if (type === 'backbone') {
@@ -3193,7 +3512,7 @@ function _initCytoscape() {
     elements: [],
     style: [
       {selector: 'node[nodeType="construct"]', style: {
-        'background-color': '#24B283',
+        'background-color': '#3B82F6',
         'label': 'data(label)',
         'font-size': '10px',
         'color': '#3D3D3A',
@@ -3203,6 +3522,12 @@ function _initCytoscape() {
         'border-width': '2px', 'border-color': '#E8E6DC',
         'font-family': 'Inter, sans-serif',
         'cursor': 'pointer',
+      }},
+      {selector: 'node[nodeType="construct"][origin="user_library"]', style: {
+        'background-color': '#10B981',
+      }},
+      {selector: 'node[nodeType="construct"][origin="annotation"]', style: {
+        'background-color': '#8B5CF6',
       }},
       {selector: 'node[nodeType="backbone"]', style: {
         'background-color': '#D97757',
@@ -3617,6 +3942,58 @@ class AgentHandler(SimpleHTTPRequestHandler):
             else:
                 self._send_json({"error": "Job not found"}, 404)
 
+        elif path == "/api/config/user-library":
+            user_lib = os.environ.get("PLASMID_USER_LIBRARY")
+            self._send_json({
+                "available": bool(user_lib and Path(user_lib).expanduser().is_dir()),
+                "path": user_lib or None,
+            })
+
+        elif path == "/api/db/user-library-preview":
+            user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+            if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
+                self._send_json({"error": "PLASMID_USER_LIBRARY not set"}, 400)
+                return
+            from src.user_library import load_user_backbones, load_user_inserts, GENBANK_EXTENSIONS
+            items = []
+            for bb in load_user_backbones():
+                lp = bb.get("local_path")
+                items.append({
+                    "local_path": lp,
+                    "name": bb.get("name") or bb.get("id", ""),
+                    "part_type": "backbone",
+                    "size_bp": bb.get("size_bp"),
+                    "description": bb.get("description", ""),
+                    "bacterial_resistance": bb.get("bacterial_resistance"),
+                    "assembly_enzyme": bb.get("assembly_enzyme"),
+                    "already_imported": bool(lp and _db_get_by_local_path(DB_PATH, lp)),
+                })
+            for ins in load_user_inserts():
+                lp = ins.get("local_path")
+                items.append({
+                    "local_path": lp,
+                    "name": ins.get("name") or ins.get("id", ""),
+                    "part_type": "insert",
+                    "size_bp": ins.get("insert_size_bp") or ins.get("size_bp"),
+                    "description": ins.get("description", ""),
+                    "category": ins.get("category"),
+                    "already_imported": bool(lp and _db_get_by_local_path(DB_PATH, lp)),
+                })
+            ann_dir = Path(user_lib_dir).expanduser() / "annotations"
+            if ann_dir.is_dir():
+                for f in sorted(ann_dir.iterdir()):
+                    if f.suffix.lower() in GENBANK_EXTENSIONS:
+                        lp = str(f)
+                        items.append({
+                            "local_path": lp,
+                            "name": f.stem,
+                            "part_type": "annotation",
+                            "size_bp": None,
+                            "description": "",
+                            "already_imported": bool(_db_get_by_local_path(DB_PATH, lp)),
+                        })
+            self._send_json(items)
+
         # ── Plasmid library DB ────────────────────────────────────────────
         elif path == "/api/db/constructs":
             self._send_json(_db_list_constructs(DB_PATH))
@@ -3840,6 +4217,112 @@ class AgentHandler(SimpleHTTPRequestHandler):
             )
             self._send_json({"id": construct_id, "status": "saved"})
 
+        elif path == "/api/db/import-user-library":
+            user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+            if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
+                self._send_json({"error": "PLASMID_USER_LIBRARY not set or not a directory"}, 400)
+                return
+
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            filter_paths = set(body.get("local_paths") or [])
+
+            from src.user_library import load_user_backbones, load_user_inserts, GENBANK_EXTENSIONS
+
+            imported = 0
+            skipped = 0
+
+            _META_KEYS = [
+                "description", "category", "assembly_enzyme", "next_step_enzyme",
+                "overhang_l", "overhang_r", "overhang_left", "overhang_right",
+                "overhang_left_2", "overhang_right_2", "insert_size_bp",
+                "bacterial_resistance", "mammalian_selection", "ecoli_strain",
+            ]
+
+            entries: list[tuple[str, dict]] = []
+            for bb in load_user_backbones():
+                entries.append(("backbone", bb))
+            for ins in load_user_inserts():
+                entries.append(("insert", ins))
+
+            ann_dir = Path(user_lib_dir).expanduser() / "annotations"
+            if ann_dir.is_dir():
+                for f in sorted(ann_dir.iterdir()):
+                    if f.suffix.lower() in GENBANK_EXTENSIONS:
+                        entries.append(("annotation", {
+                            "local_path": str(f),
+                            "name": f.stem,
+                            "size_bp": None,
+                            "id": f.stem,
+                        }))
+
+            for part_type, entry in entries:
+                local_path = entry.get("local_path")
+                if not local_path:
+                    skipped += 1
+                    continue
+                if filter_paths and local_path not in filter_paths:
+                    skipped += 1
+                    continue
+                if _db_get_by_local_path(DB_PATH, local_path):
+                    skipped += 1
+                    continue
+                try:
+                    genbank_content = Path(local_path).read_text(errors="replace")
+                except Exception:
+                    skipped += 1
+                    continue
+
+                origin = "annotation" if part_type == "annotation" else "user_library"
+                bb_name = entry.get("id", "") if part_type == "backbone" else ""
+                ins_names = [entry.get("id", "")] if part_type == "insert" else []
+                meta = {k: entry[k] for k in _META_KEYS if entry.get(k) is not None}
+                # Use insert_size_bp for size display on inserts; size_bp is the carrier vector
+                display_size = entry.get("insert_size_bp") or entry.get("size_bp")
+
+                _db_save_construct(
+                    DB_PATH,
+                    construct_name=entry.get("name", Path(local_path).stem),
+                    genbank_content=genbank_content,
+                    total_size_bp=display_size,
+                    session_id=None,
+                    backbone_name=bb_name,
+                    insert_names=ins_names,
+                    parts=[],
+                    validations=[],
+                    origin=origin,
+                    local_path=local_path,
+                    part_type=part_type,
+                    metadata=meta or None,
+                )
+                imported += 1
+
+            self._send_json({"imported": imported, "skipped": skipped})
+
+        elif path.startswith("/api/db/constructs/") and path.endswith("/save-to-library"):
+            import re as _re2
+            m2 = _re2.match(r"^/api/db/constructs/(\d+)/save-to-library$", path)
+            if not m2:
+                self.send_error(400)
+                return
+            construct_id = int(m2.group(1))
+            user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+            if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
+                self._send_json({"error": "PLASMID_USER_LIBRARY not set or not a directory"}, 400)
+                return
+            result = _db_get_genbank(DB_PATH, construct_id)
+            if result is None:
+                self.send_error(404)
+                return
+            name, content = result
+            constructs_dir = Path(user_lib_dir).expanduser() / "constructs"
+            constructs_dir.mkdir(exist_ok=True)
+            safe_name = _re2.sub(r'[^\w\-. ]', '_', name).strip().replace(' ', '_')
+            out_path = constructs_dir / f"{safe_name}.gb"
+            out_path.write_text(content)
+            _db_update_construct(DB_PATH, construct_id, {"local_path": str(out_path)})
+            self._send_json({"saved_to": str(out_path)})
+
         else:
             self.send_error(404)
 
@@ -3866,6 +4349,15 @@ class AgentHandler(SimpleHTTPRequestHandler):
             session_id = path.split("/")[3]
             deleted = delete_session_by_id(session_id)
             self._send_json({"deleted": deleted})
+        elif path.startswith("/api/db/constructs/"):
+            import re as _re_del
+            m = _re_del.match(r"^/api/db/constructs/(\d+)$", path)
+            if m:
+                construct_id = int(m.group(1))
+                deleted = _db_delete_construct(DB_PATH, construct_id)
+                self._send_json({"deleted": deleted})
+            else:
+                self.send_error(400)
         else:
             self.send_error(404)
 

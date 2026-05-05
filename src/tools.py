@@ -186,6 +186,13 @@ def _get_cached_sequence(key: str) -> Optional[str]:
     return _sequence_cache.get(key)
 
 
+def _resolve_seq(value: str) -> str:
+    """Return the cached sequence if value is a cache key, otherwise return value unchanged."""
+    if value and value in _sequence_cache:
+        return _sequence_cache[value]
+    return value
+
+
 # ── Per-run plot capture ────────────────────────────────────────────────
 # export_construct stores the Bokeh plot JSON here so the web UI can emit
 # a plot_data SSE event after the export tool result. Same pattern as
@@ -684,7 +691,7 @@ async def validate_sequence(args):
 )
 async def assemble_construct(args):
     # Resolve backbone
-    backbone_seq = args.get("backbone_sequence")
+    backbone_seq = _resolve_seq(args.get("backbone_sequence") or "") or None
     backbone_data = None
     if not backbone_seq and args.get("backbone_id"):
         backbone_data = get_backbone_by_id(args["backbone_id"])
@@ -696,7 +703,7 @@ async def assemble_construct(args):
         _record("add_backbone", backbone_data)
 
     # Resolve insert
-    insert_seq = args.get("insert_sequence")
+    insert_seq = _resolve_seq(args.get("insert_sequence") or "") or None
     insert_data = None
     if not insert_seq and args.get("insert_id"):
         insert_data = get_insert_by_id(args["insert_id"])
@@ -852,13 +859,13 @@ async def export_construct(args):
     },
 )
 async def validate_construct(args):
-    construct_seq = clean_sequence(args["construct_sequence"])
-    backbone_seq = args.get("backbone_sequence")
+    construct_seq = clean_sequence(_resolve_seq(args["construct_sequence"]))
+    backbone_seq = _resolve_seq(args.get("backbone_sequence") or "") or None
     if not backbone_seq and args.get("backbone_id"):
         bb = get_backbone_by_id(args["backbone_id"])
         if bb:
             backbone_seq = bb.get("sequence")
-    insert_seq = args.get("insert_sequence")
+    insert_seq = _resolve_seq(args.get("insert_sequence") or "") or None
     if not insert_seq and args.get("insert_id"):
         ins = get_insert_by_id(args["insert_id"])
         if ins:
@@ -1209,7 +1216,7 @@ async def fuse_inserts_tool(args):
     sequences = []
     atg_removals = []  # names of sequences whose ATG will be stripped
     for i, item in enumerate(args["inserts"]):
-        seq = item.get("sequence")
+        seq = _resolve_seq(item.get("sequence") or "") or None
         name = item.get("name", "")
         seq_type = item.get("type", "protein")
         if not seq and item.get("insert_id"):
@@ -1306,7 +1313,7 @@ async def fuse_inserts_tool(args):
 async def score_construct_confidence_tool(args):
     if not CONFIDENCE_AVAILABLE:
         return _error("Design Confidence module not available.")
-    insert_seq = clean_sequence(args["insert_sequence"])
+    insert_seq = clean_sequence(_resolve_seq(args["insert_sequence"]))
     backbone = None
     if args.get("backbone_id"):
         backbone = get_backbone_by_id(args["backbone_id"])
@@ -1430,7 +1437,7 @@ async def lookup_known_mutations_tool(args):
 async def apply_mutation_tool(args):
     if not MUTATIONS_AVAILABLE:
         return _error("Mutation Design module not available.")
-    dna = clean_sequence(args["dna_sequence"])
+    dna = clean_sequence(_resolve_seq(args["dna_sequence"]))
     method = args.get("method", "point_mutation")
 
     if method == "premature_stop":

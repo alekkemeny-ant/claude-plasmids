@@ -51,6 +51,7 @@ from src.tools import (
 )
 from src.references import ReferenceTracker
 from src.library import load_backbones, load_inserts
+from src.plasmid_intake import parse_upload, run_plannotate, build_intake_message
 _DB_MODULE_PATH = Path(__file__).parent / "database.py"
 import importlib.util as _importlib_util
 _db_spec = _importlib_util.spec_from_file_location("plasmid_database", _DB_MODULE_PATH)
@@ -825,6 +826,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .user-library-toggle:hover { background: var(--sand-100); color: var(--sand-700); }
   .user-library-toggle .chevron { transition: transform 0.2s; font-style: normal; }
   .user-library-toggle.open .chevron { transform: rotate(180deg); }
+  .user-library-refresh-btn {
+    border: none; background: none; color: var(--sand-400); cursor: pointer;
+    padding: 2px 4px; border-radius: 4px; font-size: 14px; line-height: 1;
+    flex-shrink: 0; transition: color 0.15s, background 0.15s;
+  }
+  .user-library-refresh-btn:hover { color: var(--sand-700); background: var(--sand-200); }
   .user-library-body { display: none; padding: 0 4px 4px; }
   .user-library-body.open {
     display: block; max-height: 240px; overflow-y: auto;
@@ -1145,7 +1152,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     font-size: 13px; margin-bottom: 24px;
   }
 
-  /* ── Drop overlay (shown when a CSV is dragged over the chat area) ── */
+  /* ── Drop overlay (shown when a file is dragged over the chat area) ── */
   .drop-overlay {
     display: none; position: absolute; inset: 0; z-index: 50;
     background: rgba(217,119,87,0.06); border: 3px dashed var(--brand-fig);
@@ -1154,7 +1161,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .drop-overlay.active { display: flex; }
   .drop-overlay-label { font-size: 16px; font-weight: 600; color: var(--brand-fig); }
-  .drop-overlay-sub { font-size: 13px; color: var(--brand-fig-hover); }
+  .drop-overlay-sub { font-size: 13px; color: var(--brand-fig-hover); text-align: center; }
+  /* ── Attach button (plasmid file picker) ── */
+  .attach-btn {
+    width: 34px; height: 34px; border-radius: 8px; border: none;
+    background: transparent; color: var(--sand-400); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s;
+  }
+  .attach-btn:hover { background: var(--sand-100); color: var(--sand-700); }
 
   /* ── Batch cards (rendered inline in the chat) ── */
   .batch-card {
@@ -1372,11 +1387,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <p class="no-sessions">No conversations yet</p>
     </div>
     <div class="user-library-panel" id="user-library-panel" style="display:none">
-      <button class="user-library-toggle" id="user-library-toggle" onclick="toggleUserLibrary()"
-        data-tooltip="Your local collection of backbones and inserts loaded from a folder on this machine. These are available to the designer but live separately from the saved constructs database.">
-        <span>Your Library</span>
-        <em class="chevron">&#8964;</em>
-      </button>
+      <div style="display:flex;align-items:center;gap:2px;">
+        <button class="user-library-toggle" id="user-library-toggle" onclick="toggleUserLibrary()"
+          style="flex:1;"
+          data-tooltip="Your local collection of backbones and inserts loaded from a folder on this machine. These are available to the designer but live separately from the saved constructs database.">
+          <span>Your Library</span>
+          <em class="chevron">&#8964;</em>
+        </button>
+        <button class="user-library-refresh-btn" onclick="loadUserLibrary()" title="Refresh library">&#8635;</button>
+      </div>
       <div class="user-library-body" id="user-library-body"></div>
     </div>
   </div>
@@ -1390,13 +1409,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   <!-- Chat panel -->
   <div class="chat-panel" id="chat-panel">
-    <!-- Drop overlay: shown when a CSV is dragged over the chat area -->
+    <!-- Drop overlay: shown when any file is dragged over the chat area -->
     <div class="drop-overlay" id="drop-overlay">
       <svg width="36" height="36" fill="none" stroke="var(--brand-fig)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
         <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
       </svg>
-      <div class="drop-overlay-label">Drop CSV to batch design</div>
-      <div class="drop-overlay-sub">Required column: description &nbsp;·&nbsp; Optional: name, output_format</div>
+      <div class="drop-overlay-label" id="drop-overlay-label">Drop a file</div>
+      <div class="drop-overlay-sub" id="drop-overlay-sub">.gb / .gbk / .fasta — add plasmid to library &nbsp;·&nbsp; .csv — batch design</div>
     </div>
     <div class="messages" id="messages">
       <div class="welcome" id="welcome">
@@ -1410,7 +1429,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <p>Describe what you want to build. Claude will retrieve verified sequences,<br>
           assemble your construct, validate it, and export the result.</p>
           <p style="font-size:12px;color:var(--sand-300);margin-top:4px;">
-            Drag &amp; drop a CSV file here to batch design multiple plasmids at once.
+            Drag &amp; drop a <strong>.gb</strong> / <strong>.fasta</strong> file to add a plasmid to your library &nbsp;·&nbsp; drop a <strong>.csv</strong> to batch design.
           </p>
           <div class="examples">
             <button onclick="sendExample(this)">Design an EGFP expression plasmid using pcDNA3.1(+)</button>
@@ -1438,7 +1457,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <span id="token-label"></span>
           </div>
         </div>
+        <div id="plasmid-badge" style="display:none;align-items:center;gap:6px;padding:4px 8px;background:var(--sand-100);border:1px solid var(--sand-200);border-radius:6px;font-size:12px;color:var(--sand-700);margin-bottom:4px;">
+          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+          <span id="plasmid-badge-name"></span>
+          <span id="plasmid-badge-status" style="color:var(--sand-400);">analyzing…</span>
+        </div>
         <div class="input-buttons">
+          <button class="attach-btn" id="attach-btn" title="Attach plasmid file (.gb, .gbk, .fasta)" onclick="document.getElementById('plasmid-file-input').click()">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+          </button>
           <button class="send-btn" id="send-btn" onclick="sendMessage()">
             <svg fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
               <path d="M12 19V5M5 12l7-7 7 7"/>
@@ -1455,6 +1482,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
 
   <input type="file" id="batch-csv-input" accept=".csv" style="display:none" onchange="onBatchFileChosen(this)">
+  <input type="file" id="plasmid-file-input" accept=".gb,.gbk,.genbank,.fasta,.fa,.seq" style="display:none" onchange="onPlasmidFileChosen(this)">
 
 </div>
 
@@ -1868,6 +1896,7 @@ function _ulDetailRows(entry, isInsert) {
     ['Description', entry.description],
   ] : [
     ['ID', entry.id],
+    ['Company', entry.company],
     ['Enzyme', entry.assembly_enzyme],
     ['Overhangs 1', entry.overhang_left && entry.overhang_right ? entry.overhang_left + ' / ' + entry.overhang_right : null],
     ['Overhangs 2', entry.overhang_left_2 && entry.overhang_right_2 ? entry.overhang_left_2 + ' / ' + entry.overhang_right_2 : null],
@@ -1889,7 +1918,7 @@ function _ulBuildEntries(items, isInsert) {
     _ulEntries[eid] = {entry: entry, isInsert: isInsert};
     const meta = isInsert
       ? [entry.category, entry.assembly_enzyme, entry.insert_size_bp ? entry.insert_size_bp + ' bp' : null].filter(Boolean).join(' · ')
-      : [entry.assembly_enzyme, entry.bacterial_resistance].filter(Boolean).join(' · ');
+      : [entry.company, entry.assembly_enzyme, entry.bacterial_resistance].filter(Boolean).join(' · ');
     return '<div class="user-library-entry" id="ule-' + eid + '" onclick="toggleULEntry(\'' + eid + '\')">' +
       '<div class="entry-header">' +
         '<div><div class="entry-name">' + escapeHtml(entry.name || entry.id) + '</div>' +
@@ -1906,7 +1935,8 @@ async function loadUserLibrary() {
     const r = await fetch('/api/user-library');
     const data = await r.json();
     const panel = document.getElementById('user-library-panel');
-    if (!data.configured) return;
+    const hasContent = data.configured || (data.vendor_backbones && data.vendor_backbones.length);
+    if (!hasContent) return;
     panel.style.display = '';
     const body = document.getElementById('user-library-body');
     let html = '';
@@ -1917,6 +1947,10 @@ async function loadUserLibrary() {
     if (data.inserts && data.inserts.length) {
       html += '<div class="user-library-section"><div class="user-library-section-title">Inserts</div>' +
         _ulBuildEntries(data.inserts, true) + '</div>';
+    }
+    if (data.vendor_backbones && data.vendor_backbones.length) {
+      html += '<div class="user-library-section"><div class="user-library-section-title">Vendor Backbones</div>' +
+        _ulBuildEntries(data.vendor_backbones, false) + '</div>';
     }
     if (!html) html = '<div class="user-library-empty">No entries loaded.</div>';
     body.innerHTML = html;
@@ -2662,6 +2696,8 @@ async function sendMessage() {
   // Remove any leftover streaming cursor
   const cursor = messagesEl.querySelector('.streaming-cursor');
   if (cursor) cursor.remove();
+  // Refresh library panel in case the agent saved a new backbone or construct
+  loadUserLibrary();
 }
 
 function stopGeneration() {
@@ -2702,29 +2738,36 @@ let batchPollTimer = null;
 const chatPanelEl = document.getElementById('chat-panel');
 const dropOverlayEl = document.getElementById('drop-overlay');
 
-// ── Drag & drop CSV onto the chat area ──
+// ── Drag & drop onto the chat area (CSV batch or plasmid file) ──
 var dragCounter = 0;
 
-function isCsvDrag(e) {
+var PLASMID_EXTS = ['.gb', '.gbk', '.genbank', '.fasta', '.fa', '.seq'];
+
+function isFileDrag(e) {
   var types = e.dataTransfer && e.dataTransfer.types;
-  return types && (Array.from(types).indexOf('Files') !== -1);
+  return types && Array.from(types).indexOf('Files') !== -1;
+}
+
+function isPlasmidFile(file) {
+  var name = (file.name || '').toLowerCase();
+  return PLASMID_EXTS.some(function(ext) { return name.endsWith(ext); });
 }
 
 chatPanelEl.addEventListener('dragenter', function(e) {
-  if (!isCsvDrag(e)) return;
+  if (!isFileDrag(e)) return;
   e.preventDefault();
   dragCounter++;
   dropOverlayEl.classList.add('active');
 });
 
 chatPanelEl.addEventListener('dragleave', function(e) {
-  if (!isCsvDrag(e)) return;
+  if (!isFileDrag(e)) return;
   dragCounter--;
   if (dragCounter <= 0) { dragCounter = 0; dropOverlayEl.classList.remove('active'); }
 });
 
 chatPanelEl.addEventListener('dragover', function(e) {
-  if (!isCsvDrag(e)) return;
+  if (!isFileDrag(e)) return;
   e.preventDefault();
   e.dataTransfer.dropEffect = 'copy';
 });
@@ -2735,13 +2778,16 @@ chatPanelEl.addEventListener('drop', function(e) {
   dropOverlayEl.classList.remove('active');
   var file = e.dataTransfer.files[0];
   if (!file) return;
-  if (!file.name.endsWith('.csv') && file.type !== 'text/csv') {
-    alert('Please drop a .csv file.');
-    return;
-  }
   var reader = new FileReader();
-  reader.onload = function(ev) { uploadBatchCSV(ev.target.result, file.name); };
-  reader.readAsText(file);
+  if (isPlasmidFile(file)) {
+    reader.onload = function(ev) { uploadPlasmidFile(ev.target.result, file.name); };
+    reader.readAsText(file);
+  } else if (file.name.endsWith('.csv') || file.type === 'text/csv') {
+    reader.onload = function(ev) { uploadBatchCSV(ev.target.result, file.name); };
+    reader.readAsText(file);
+  } else {
+    alert('Supported file types: .gb, .gbk, .fasta (plasmid library) or .csv (batch design).');
+  }
 });
 
 function onBatchFileChosen(input) {
@@ -2751,6 +2797,132 @@ function onBatchFileChosen(input) {
   reader.onload = function(e) { uploadBatchCSV(e.target.result, file.name); };
   reader.readAsText(file);
   input.value = '';
+}
+
+function onPlasmidFileChosen(input) {
+  var file = input.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(e) { uploadPlasmidFile(e.target.result, file.name); };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+// ── Plasmid file upload ──
+var plasmidBadgeEl = document.getElementById('plasmid-badge');
+var plasmidBadgeNameEl = document.getElementById('plasmid-badge-name');
+var plasmidBadgeStatusEl = document.getElementById('plasmid-badge-status');
+
+function uploadPlasmidFile(text, filename) {
+  // Show "analyzing" badge in the input area
+  plasmidBadgeNameEl.textContent = filename;
+  plasmidBadgeStatusEl.textContent = 'analyzing with plannotate…';
+  plasmidBadgeEl.style.display = 'flex';
+
+  var model = modelSelect.value;
+  fetch('/api/upload-plasmid', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content: text, filename: filename}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    plasmidBadgeEl.style.display = 'none';
+    if (data.error) {
+      alert('Could not process plasmid file: ' + data.error);
+      return;
+    }
+    // Auto-send the intake message as if the user typed it
+    hideWelcome();
+    sendPlasmidIntakeMessage(data.message, model, filename, data.size_bp, data.feature_count);
+  })
+  .catch(function(e) {
+    plasmidBadgeEl.style.display = 'none';
+    alert('Upload failed: ' + e);
+  });
+}
+
+async function sendPlasmidIntakeMessage(apiMessage, model, filename, sizeBp, featureCount) {
+  if (isStreaming) return;
+  isStreaming = true;
+  streamingSessionId = currentSessionId;
+  sendBtn.style.display = 'none';
+  stopBtn.style.display = 'flex';
+  inputEl.disabled = true;
+  hideWelcome();
+
+  const inner = getInner();
+  streamingInner = inner;
+
+  // Show short summary as user bubble (not the full sequence)
+  var summary = '📎 ' + filename;
+  if (sizeBp) summary += ' — ' + sizeBp.toLocaleString() + ' bp';
+  if (featureCount) summary += ', ' + featureCount + ' plannotate feature(s)';
+  const nowStr = new Date().toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'});
+  const userDiv = document.createElement('div');
+  userDiv.className = 'msg user';
+  userDiv.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(summary) + '</div><div class="msg-date">' + nowStr + '</div></div>';
+  inner.appendChild(userDiv);
+  scrollToBottom();
+  showPendingCursor();
+
+  abortController = new AbortController();
+  try {
+    const reqBody = {message: apiMessage, model: model};
+    if (currentSessionId) reqBody.session_id = currentSessionId;
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(reqBody),
+      signal: abortController.signal,
+    });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      let streamDone = false;
+      for (const part of parts) {
+        const trimmed = part.trim();
+        if (!trimmed.startsWith('data: ')) continue;
+        let event;
+        try { event = JSON.parse(trimmed.slice(6)); } catch { continue; }
+        switch (event.type) {
+          case 'session_id': saveSessionId(event.session_id); loadSessions(); break;
+          case 'thinking_start': clearPendingCursor(); startThinkingBlock(); break;
+          case 'thinking_delta': appendThinkingDelta(event.content); break;
+          case 'thinking_end': endThinkingBlock(); break;
+          case 'text_start': clearPendingCursor(); flushTextBuffer(); startTextBlock(); break;
+          case 'text_delta': bufferTextDelta(event.content); break;
+          case 'text_end': endTextBlock(); break;
+          case 'tool_use_start': clearPendingCursor(); startToolBlock(event.tool); break;
+          case 'tool_result': finishToolBlock(event.tool, event.input || {}, event.content, event.download_content, event.download_filename); break;
+          case 'plot_data': addPlasmidPlot(event.plot_json); break;
+          case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
+          case 'error': clearPendingCursor(); startTextBlock(); appendTextDelta('Error: ' + event.content); endTextBlock(); break;
+          case 'done': streamDone = true; break;
+        }
+        if (streamDone) break;
+      }
+      if (streamDone) break;
+    }
+  } catch(err) {
+    if (err.name !== 'AbortError') {
+      clearPendingCursor(); startTextBlock(); appendTextDelta('Connection error: ' + err.message); endTextBlock();
+    }
+  }
+  clearPendingCursor();
+  isStreaming = false; abortController = null; streamingInner = null; streamingSessionId = null;
+  sendBtn.style.display = 'flex'; stopBtn.style.display = 'none';
+  inputEl.disabled = false; inputEl.focus();
+  const cursor = messagesEl.querySelector('.streaming-cursor');
+  if (cursor) cursor.remove();
+  // Refresh library panel — agent may have saved a new backbone during this conversation turn
+  loadUserLibrary();
 }
 
 function uploadBatchCSV(csvText, filename) {
@@ -3861,10 +4033,23 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self._send_json([], 404)
 
         elif path == "/api/user-library":
-            bb = [b for b in load_backbones()["backbones"] if b.get("source") == "user_library"]
+            all_bb = load_backbones()["backbones"]
+            bb = [b for b in all_bb if b.get("source") == "user_library"]
+            vendor_bb = [b for b in all_bb if b.get("source") == "vendor"]
             ins = [i for i in load_inserts()["inserts"] if i.get("source") == "user_library"]
             self._send_json({
                 "configured": bool(os.environ.get("PLASMID_USER_LIBRARY")),
+                "vendor_backbones": [
+                    {k: v for k, v in {
+                        "id": b["id"],
+                        "name": b.get("name"),
+                        "description": b.get("description"),
+                        "company": b.get("company"),
+                        "assembly_enzyme": b.get("assembly_enzyme"),
+                        "size_bp": b.get("size_bp"),
+                    }.items() if v is not None}
+                    for b in vendor_bb
+                ],
                 "backbones": [
                     {k: v for k, v in {
                         "id": b["id"],
@@ -4180,6 +4365,30 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 daemon=True,
             ).start()
             self._send_json({"status": "ok"})
+
+        elif path == "/api/upload-plasmid":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            file_content = body.get("content", "")
+            filename = body.get("filename", "plasmid.gb")
+            if not file_content.strip():
+                self._send_json({"error": "Empty file content"}, 400)
+                return
+            try:
+                parsed = parse_upload(file_content, filename)
+                features = run_plannotate(parsed["sequence"])
+                message = build_intake_message(filename, parsed, features)
+                self._send_json({
+                    "message": message,
+                    "size_bp": parsed["size_bp"],
+                    "topology": parsed["topology"],
+                    "feature_count": len(features),
+                })
+            except ValueError as e:
+                self._send_json({"error": str(e)}, 400)
+            except Exception as e:
+                logger.exception("Error processing uploaded plasmid")
+                self._send_json({"error": f"Failed to process file: {e}"}, 500)
 
         elif path == "/api/batch":
             content_length = int(self.headers.get("Content-Length", 0))

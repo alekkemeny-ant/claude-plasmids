@@ -213,6 +213,9 @@ class FragmentDesign:
     # gBlock synthesis
     synthesis_seq: str = ""
     synthesis_size_bp: int = 0
+    # Insert cassette (for Ansa/Twist-style synthesis — no carrier backbone needed)
+    insert_seq: str = ""
+    insert_size_bp: int = 0
     # Full part-in-vector plasmid
     plasmid_seq: str = ""
     plasmid_size_bp: int = 0
@@ -343,6 +346,33 @@ def _design_gblock(
     return prefix + oh_left + fragment_seq + reverse_complement(oh_right) + suffix
 
 
+# ── Insert cassette (synthesis-only, no carrier backbone) ─────────────────────
+
+def _design_insert_cassette(
+    fragment_seq: str,
+    oh_left: str,
+    oh_right: str,
+    enzyme_name: str,
+) -> str:
+    """
+    Fully-defined insert cassette for direct synthesis ordering (e.g. Ansa, Twist).
+
+    Structure: [rec][A×cut_top][oh_left][fragment][RC(oh_right)][A×cut_top][RC(rec)]
+
+    The synthesis company provides the backbone; the user hands them only this sequence.
+    After digestion with the Type IIS enzyme, the fragment is released with the correct
+    4-nt sticky ends for Golden Gate ligation.
+
+    Uses 'A' for spacer nucleotides (unlike gblocks which uses 'N') so the sequence
+    is fully concrete and compatible with any synthesis vendor.
+    """
+    enzyme = GG_ENZYMES[enzyme_name]
+    rec = enzyme["recognition"]
+    cut_top = enzyme["cut_top"]
+    spacer = "A" * cut_top
+    return rec + spacer + oh_left + fragment_seq + reverse_complement(oh_right) + spacer + reverse_complement(rec)
+
+
 # ── Part-in-vector plasmid design ─────────────────────────────────────────────
 
 def _design_part_in_vector(
@@ -353,15 +383,17 @@ def _design_part_in_vector(
     carrier_backbone: dict,
 ) -> str:
     """
-    Build a full circular plasmid sequence by inserting the fragment (with flanking
-    Type IIS sites and overhangs) into a carrier backbone at its MCS.
+    Build a full circular plasmid sequence by placing the fragment (with flanking
+    Type IIS sites and overhangs) into a carrier backbone.
 
-    The resulting plasmid is equivalent to the 'part_in_vector' format used by the
-    Allen Institute modular system — it can be ordered as a whole-plasmid synthesis
-    and later used directly in Golden Gate assembly to excise the insert.
+    Insertion strategy (in priority order):
+      1. placeholder_region — replaces an N-run, gap annotation, or 'insert here'
+         region entirely. The placeholder is excised and the cassette takes its place.
+      2. mcs_position — inserts the cassette at a specific coordinate without
+         removing any backbone sequence.
 
     Spacer 'N' characters in the enzyme prefix/suffix are replaced with 'A' so the
-    sequence is fully defined.
+    sequence is fully defined and suitable for whole-plasmid synthesis ordering.
     """
     carrier_seq = clean_sequence(carrier_backbone.get("sequence", ""))
     if not carrier_seq:
@@ -369,21 +401,31 @@ def _design_part_in_vector(
             f"Carrier backbone {carrier_backbone.get('id', '?')!r} has no sequence."
         )
 
-    insertion_point = find_mcs_insertion_point(carrier_backbone)
-
-    # Build the insert cassette: enzyme_site + overhang + fragment + RC(overhang) + RC(enzyme_site)
-    # Replace 'N' spacers with 'A' for a fully defined plasmid sequence
+    # Build the insert cassette
     enzyme = GG_ENZYMES[enzyme_name]
     rec = enzyme["recognition"]
     cut_top = enzyme["cut_top"]
     spacer = "A" * cut_top  # concrete base instead of N
-
     cassette = (
         rec + spacer + oh_left
         + fragment_seq
         + reverse_complement(oh_right) + spacer + reverse_complement(rec)
     )
 
+    # Strategy 1: replace a placeholder region (N-run / gap / "insert here" annotation)
+    placeholder = carrier_backbone.get("placeholder_region")
+    if placeholder and placeholder.get("end", 0) > placeholder.get("start", 0):
+        p_start = placeholder["start"]
+        p_end = placeholder["end"]
+        return carrier_seq[:p_start] + cassette + carrier_seq[p_end:]
+
+    # Strategy 2: insert at MCS position
+    insertion_point = find_mcs_insertion_point(carrier_backbone)
+    if insertion_point is None:
+        raise ValueError(
+            f"Carrier backbone {carrier_backbone.get('id', '?')!r} has no insertion point defined. "
+            "Ask the user for the insertion position before proceeding."
+        )
     return carrier_seq[:insertion_point] + cassette + carrier_seq[insertion_point:]
 
 
@@ -468,7 +510,7 @@ def design_golden_gate_oligos(
             errors=[f"Unknown enzyme {enzyme_name!r}. Supported: {list(GG_ENZYMES)}"],
         )
 
-    valid_formats = {"primers", "oligos", "gblocks", "part_in_vector", "both"}
+    valid_formats = {"primers", "oligos", "gblocks", "insert_only", "part_in_vector", "both"}
     if output_format not in valid_formats:
         return GoldenGateDeNovoResult(
             success=False,
@@ -550,6 +592,7 @@ def design_golden_gate_oligos(
 
     # Validate carrier backbone for part_in_vector output
     want_part_in_vector = output_format in ("part_in_vector", "both")
+    want_insert_only = output_format in ("insert_only", "both")
     if want_part_in_vector and not carrier_backbone:
         return GoldenGateDeNovoResult(
             success=False,
@@ -609,6 +652,11 @@ def design_golden_gate_oligos(
             gb_seq = _design_gblock(seq, oh_l, oh_r, enzyme_name)
             fd.synthesis_seq = gb_seq
             fd.synthesis_size_bp = len(gb_seq)
+
+        if want_insert_only:
+            ins_seq = _design_insert_cassette(seq, oh_l, oh_r, enzyme_name)
+            fd.insert_seq = ins_seq
+            fd.insert_size_bp = len(ins_seq)
 
         if want_part_in_vector:
             try:

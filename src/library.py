@@ -67,6 +67,17 @@ except ImportError:
     except ImportError:
         USER_LIBRARY_AVAILABLE = False
 
+# Vendor backbone library (Ansa, Twist, etc. — saved via save_vendor_backbone tool)
+try:
+    from .vendor_backbone import load_vendor_backbones
+    VENDOR_BACKBONE_AVAILABLE = True
+except ImportError:
+    try:
+        from vendor_backbone import load_vendor_backbones
+        VENDOR_BACKBONE_AVAILABLE = True
+    except ImportError:
+        VENDOR_BACKBONE_AVAILABLE = False
+
 # Optional custom annotation DB (BYOA — bring your own annotations)
 try:
     from .custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
@@ -156,10 +167,11 @@ def _load_builtin_inserts() -> dict:
 
 
 def load_backbones() -> dict:
-    """Load backbone library: built-in + test fixtures + user library.
+    """Load backbone library: built-in + test fixtures + user library + vendor backbones.
 
     User entries (from $PLASMID_USER_LIBRARY/backbones/) are appended with
-    `user:` ID prefix. Callers that persist to disk must use
+    `user:` ID prefix. Vendor entries (saved via save_vendor_backbone tool) are
+    appended with `vendor:` ID prefix. Callers that persist to disk must use
     _load_builtin_backbones instead to avoid writing runtime-only entries.
     """
     data = _load_builtin_backbones()
@@ -169,6 +181,10 @@ def load_backbones() -> dict:
         user_entries = load_user_backbones()
         if user_entries:
             data["backbones"] = data["backbones"] + user_entries
+    if VENDOR_BACKBONE_AVAILABLE:
+        vendor_entries = load_vendor_backbones()
+        if vendor_entries:
+            data["backbones"] = data["backbones"] + vendor_entries
     return data
 
 

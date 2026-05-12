@@ -427,9 +427,12 @@ I'll default to BsaI if you don't have a preference."
 "How would you like to receive the sequences for each fragment?
 - **PCR primers** — a forward and reverse primer to amplify the fragment from an existing template. The overhangs and enzyme sites are in the primer tails.
 - **Annealing oligos** — complementary top and bottom strand oligos that you mix, heat, and cool to anneal into a ready-to-use double-stranded fragment with sticky ends (no template needed; works best for ≤~500 bp).
-- **gBlocks (synthesis sequences)** — complete annotated sequences with flanking enzyme sites and overhangs, ready to order from IDT/Twist.
-- **Part-in-vector plasmids** — a full circular plasmid sequence for each fragment (the fragment inserted into a carrier backbone with flanking Type IIS sites), ready to order as whole-plasmid synthesis from Azenta/Genewiz. Equivalent to the Allen Institute 'part_in_vector' format — can be used directly in Golden Gate assembly later.
+- **gBlocks (synthesis sequences)** — complete annotated sequences with flanking enzyme sites and overhangs, ready to order from IDT or Twist as linear fragments.
+- **Insert cassette (synthesis vendor backbone)** — a fully-defined insert sequence (no ambiguous bases) that you send directly to a synthesis company like Ansa or Twist. The company provides the backbone; you send only the insert cassette. This is the right choice when you're ordering a part-in-vector from a vendor that supplies their own backbone (e.g. Ansa vector library, Twist vectors).
+- **Part-in-vector plasmids** — a full circular plasmid sequence for each fragment (the fragment inserted into a carrier backbone with flanking Type IIS sites), ready to order as whole-plasmid synthesis from Azenta/Genewiz. Equivalent to the Allen Institute 'part_in_vector' format — can be used directly in Golden Gate assembly later. Use this when you want to specify your own carrier backbone.
 - **All of the above** — if you'd like all options."
+
+If the user chooses **insert cassette**, note: "No backbone is required from the library — you'll provide this sequence to the vendor and they'll insert it into their backbone of choice. If you have the backbone sequence from the vendor's catalog (or once they deliver the vector), you can paste it here and I'll save it to your local library, then construct the full plasmid and export it as a GenBank file."
 
 If the user chooses **part-in-vector**, also ask: "Which carrier backbone would you like to use? I'll default to pUC19 (small, high-copy, AmpR — standard for part storage). Any backbone in the library with a sequence works."
 
@@ -453,7 +456,153 @@ Show only the output type the user requested:
 - **PCR primers**: show fwd + rev primers per fragment, amplicon sizes, junction overhangs. Note that `"N"` in the enzyme prefix can be any nucleotide (typically synthesized as `"A"`).
 - **Annealing oligos**: show each top/bottom oligo per fragment. Note that no restriction enzyme digestion step is needed — the overhangs are already the 5' termini of the oligos. Include the annealing protocol note from the tool output.
 - **gBlocks**: show synthesis sequence per fragment and size.
+- **Insert cassette**: show the insert cassette sequence per fragment and size. Tell the user to provide this to their synthesis vendor (Ansa, Twist, etc.) — the vendor supplies the backbone. Mention that if they receive the backbone sequence from the vendor later, they can upload it to construct the full plasmid.
 - **Part-in-vector plasmids**: show the full plasmid sequence per fragment, plasmid size, and carrier backbone used. Remind the user that this plasmid can be ordered as whole-plasmid synthesis and used directly in Golden Gate assembly (with the same enzyme) when ready.
+
+---
+
+## Plasmid File Upload Intake
+
+When a user drops a `.gb`, `.gbk`, or `.fasta` file into the chat, the message will contain:
+- plannotate feature annotations
+- An inferred plasmid type (backbone / part_in_vector / expression_plasmid / unknown)
+- The full DNA sequence
+
+Your job is to classify the plasmid precisely and collect enough metadata to save it to the correct part of the library. Work through the questions below in order, skipping any that are already obvious from the file content.
+
+### Question sequence
+
+**Q1 — Confirm the inferred type**
+"Based on the features I found, this looks like a **[inferred type]**. Does that sound right, or is it something else?
+- A backbone vector (chassis for cloning inserts into)
+- An insert / part-in-vector (ready for Golden Gate excision)
+- A complete expression plasmid (finished construct)
+- Something else"
+
+**Q2 — Vendor origin**
+"Was this plasmid provided by a synthesis company (e.g. Ansa, Twist, Azenta, Addgene)? If so, which one, and what is the product name?"
+
+**Q3 — Assembly system (if backbone or part-in-vector)**
+"Is this designed for Golden Gate assembly? If so, which enzyme?
+- BsaI (GGTCTC) — most common
+- BbsI (GAAGAC)
+- PaqCI (CACCTGC)
+- Esp3I / BsmBI (CGTCTC)
+- Other / not sure"
+
+**Q4 — Insertion point (if backbone intended for cloning)**
+Skip this question if an insertion site was already auto-detected (N-run, gap annotation, or "insert here" label) — the insert will replace that region automatically and no position is needed.
+
+If no site was detected: "Where in this backbone should inserts be placed? Vendor backbones often contain a run of Ns, a 'gap' annotation, or a label like 'your gene here' marking the cloning site. If you can see this in the vector map, tell me the position or the surrounding sequence and I'll locate it. Otherwise I can search online for the backbone's documentation."
+
+**Q5 — Name and description**
+"What would you like to name this entry in your library? I'll pre-fill based on the file, but you can change it." *(Pre-fill from the LOCUS name or filename.)*
+
+**Q6 — Metadata confirmation**
+Before saving, present a summary table of all collected metadata:
+
+```
+Name        : [name]
+Type        : [backbone / part_in_vector / expression_plasmid]
+Source      : [vendor name or "user-provided"]
+Enzyme      : [enzyme or "n/a"]
+Insertion pt: [position or "not set"]
+Size        : [N bp, circular/linear]
+Features    : [top plannotate features]
+```
+
+"Does all of this look correct before I save it?"
+
+### Saving
+Based on confirmed metadata:
+- **Vendor backbone** → `save_vendor_backbone` (then set insertion point if provided)
+- **User backbone** → save to `$PLASMID_USER_LIBRARY/backbones/` and instruct user to place the `.gb` file there, or save directly to `backbones.json`
+- **Part-in-vector** → note the overhangs and enzyme; can be registered as an insert with `category: part_in_vector`
+- **Expression plasmid** → save to user library or constructs DB
+
+After saving, offer to export a GenBank file (`export_genbank`) or proceed with design if this is a backbone the user wants to clone into.
+
+---
+
+## Vendor Backbone + GenBank Export
+
+### When to use
+- After `insert_only` output, when the user wants to see the full plasmid (not just the insert cassette)
+- Standalone: user says "I have a backbone from Ansa/Twist, here's the sequence"
+- Any time the user wants a `.gb` file of a completed design
+
+### Follow-up after insert_only
+
+After presenting insert cassettes, proactively ask:
+
+"Would you like to provide the backbone sequence from your synthesis vendor? If so, I can:
+1. Save the backbone to your local library for future use
+2. Construct the complete part-in-vector plasmid for each fragment
+3. Export it as an annotated GenBank (.gb) file you can open in Benchling, SnapGene, or ApE"
+
+If the user provides a backbone sequence:
+
+**Step A — Save the backbone**
+```
+save_vendor_backbone(
+    name="pTwist-Amp-High-Copy",
+    sequence="<vendor sequence>",
+    company="Twist Biosciences",
+    description="...",       # optional
+    enzyme_name="BsaI",      # optional
+)
+```
+Returns the backbone ID (e.g. `vendor:twist-biosciences-ptwist-amp-high-copy`).
+
+**Step B — Determine the insertion point**
+
+Check the `save_vendor_backbone` result first. If it reports "Insertion site auto-detected" (N-run, gap annotation, or "insert here" label), **skip this step entirely** — the insert will replace that region automatically and no further action is needed.
+
+If no insertion site was detected, resolve it in this order:
+
+1. **Ask the user first:**
+   "At what position in the backbone should the insert be placed? This is the 0-based nucleotide index where the insert cassette will be inserted. Check the vendor's datasheet or vector map."
+
+2. **If the user can't provide a position, try a landmark sequence:**
+   Ask: "Is there a short sequence near the cloning site I can search for?" Then use `find_sequence` to locate it in the backbone and derive the insertion point.
+
+3. **If no landmark is available, use web search:**
+   Search for the backbone by name + company (e.g. "pTwist-Amp-High-Copy GenBank" or "Twist Biosciences pTwist vector datasheet MCS"). Look for a GenBank accession, datasheet PDF, or vector map that identifies the MCS or cloning site position.
+
+4. **Once a position is found, confirm it with the user** before saving:
+   "I found that the MCS / insertion site is at position [N] in the backbone [from source]. Does that look right?"
+
+5. **Save it:**
+   ```
+   set_backbone_insertion_point(
+       backbone_id="vendor:twist-biosciences-ptwist-amp-high-copy",
+       insertion_point=1850,
+       source="web_search",  # or "user_provided" or "landmark_sequence"
+   )
+   ```
+   This persists the position to the local library so it is available in future sessions.
+
+**Step C — Build part-in-vector plasmids**
+Call `design_golden_gate_oligos` with `output_format="part_in_vector"` and `carrier_backbone_id` set to the vendor backbone ID.
+
+**Step D — Export as GenBank**
+```
+export_genbank(
+    plasmid_sequence="<full plasmid seq from step C>",
+    name="EGFP_in_pTwist",
+    enzyme_name="BsaI",
+    fragments=[{"name": "EGFP", "sequence": "<frag_seq>"}],
+    backbone_name="pTwist-Amp-High-Copy",
+)
+```
+Tell the user where the .gb file was saved.
+
+### Standalone use
+
+If the user says "I have a backbone from [company]" unprompted:
+1. Collect: backbone name, sequence, company (ask if missing)
+2. Call `save_vendor_backbone` — confirm the saved ID
+3. Ask if they want to use it in a new de novo design or just save it for later
 
 ### Key differences from `assemble_golden_gate`
 

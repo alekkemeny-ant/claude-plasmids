@@ -55,6 +55,11 @@ from .assembler import (
     GG_ENZYMES,
 )
 from .gg_denovo import design_golden_gate_oligos as _design_gg_denovo
+from .vendor_backbone import (
+    save_vendor_backbone as _save_vendor_backbone,
+    update_vendor_backbone_mcs as _update_vendor_backbone_mcs,
+)
+from .genbank_export import export_plasmid_genbank as _export_genbank, BIOPYTHON_AVAILABLE as _BIOPYTHON_AVAILABLE
 
 # NCBI integration (optional)
 try:
@@ -1689,12 +1694,15 @@ async def assemble_golden_gate_tool(args):
             },
             "output_format": {
                 "type": "string",
-                "enum": ["primers", "oligos", "gblocks", "part_in_vector", "both"],
+                "enum": ["primers", "oligos", "gblocks", "insert_only", "part_in_vector", "both"],
                 "description": (
                     "What to output for each fragment: "
                     "'primers' = PCR forward + reverse primers (requires existing template DNA); "
                     "'oligos' = tiled annealing oligos (top + bottom strands that anneal into the ds fragment, no template needed); "
-                    "'gblocks' = complete synthesis sequences to order from IDT/Twist; "
+                    "'gblocks' = complete synthesis sequences to order from IDT/Twist (uses 'N' for spacers); "
+                    "'insert_only' = fully-defined insert cassette sequence (concrete 'A' spacers, no carrier backbone needed) "
+                    "— the user provides this sequence to a synthesis company such as Ansa or Twist, "
+                    "and the company supplies their own backbone vector; "
                     "'part_in_vector' = full circular plasmid sequence (fragment in a carrier backbone with flanking enzyme sites) for whole-plasmid synthesis ordering — requires carrier_backbone_id; "
                     "'both' = all of the above."
                 ),
@@ -1777,6 +1785,22 @@ async def design_golden_gate_oligos_tool(args):
                 f"Carrier backbone {carrier_backbone_id!r} not found in library. "
                 "Try 'pUC19' or another backbone with a known sequence."
             )
+        # Gate on insertion point — either an explicit mcs_position or an auto-detected placeholder
+        has_placeholder = bool(
+            carrier_backbone.get("placeholder_region") and
+            carrier_backbone["placeholder_region"].get("end", 0) > carrier_backbone["placeholder_region"].get("start", 0)
+        )
+        if not carrier_backbone.get("mcs_position") and not has_placeholder:
+            return _error(
+                f"Carrier backbone {carrier_backbone_id!r} has no insertion point defined.\n"
+                "To proceed, I need to know where in the backbone sequence the insert should be placed.\n"
+                "Options:\n"
+                "  1. Tell me the 0-based nucleotide position (e.g. 'insert at position 1850').\n"
+                "  2. Tell me a landmark sequence near the cloning site and I will locate it.\n"
+                "  3. I can search online for this backbone's documentation to find the insertion site.\n"
+                f"Once confirmed, call set_backbone_insertion_point(backbone_id='{carrier_backbone_id}', insertion_point=<N>) "
+                "and then retry this design."
+            )
 
     result = _design_gg_denovo(
         fragments=fragments,
@@ -1797,6 +1821,7 @@ async def design_golden_gate_oligos_tool(args):
     want_primers = output_format in ("primers", "both")
     want_oligos = output_format in ("oligos", "both")
     want_gblocks = output_format in ("gblocks", "both")
+    want_insert = output_format in ("insert_only", "both")
     want_piv = output_format in ("part_in_vector", "both")
 
     lines = [
@@ -1848,6 +1873,12 @@ async def design_golden_gate_oligos_tool(args):
                 f"    5'-{fd.synthesis_seq}-3'",
             ]
 
+        if want_insert:
+            lines += [
+                f"  Insert cassette ({fd.insert_size_bp} bp — provide to synthesis vendor, no backbone needed):",
+                f"    5'-{fd.insert_seq}-3'",
+            ]
+
         if want_piv:
             lines += [
                 f"  Part-in-vector plasmid ({fd.plasmid_size_bp} bp, carrier: {fd.carrier_backbone_id}):",
@@ -1860,6 +1891,14 @@ async def design_golden_gate_oligos_tool(args):
         lines.append(
             "Note (primers): 'N' in the enzyme prefix can be any nucleotide — "
             "vendors typically synthesize as 'A'."
+        )
+    if want_insert:
+        lines.append(
+            f"Note (insert cassette): Provide this sequence to your synthesis vendor (e.g. Ansa, Twist). "
+            f"The vendor supplies the backbone; you send only the insert cassette. "
+            f"The cassette is flanked by two {result.enzyme_name} sites — "
+            f"digest with {result.enzyme_name} to release the insert with the correct 4-nt sticky ends "
+            "for Golden Gate ligation. All spacer nucleotides are 'A' (fully defined, no ambiguous bases)."
         )
     if want_piv:
         lines.append(
@@ -1883,6 +1922,263 @@ async def design_golden_gate_oligos_tool(args):
             lines.append(f"  - {w}")
 
     return _text("\n".join(lines))
+
+
+# ── Save Vendor Backbone Tool ────────────────────────────────────────────────
+
+@tool(
+    "save_vendor_backbone",
+    (
+        "Save a backbone sequence provided by a synthesis company (e.g. Ansa, Twist) to the "
+        "local library so it can be used as a carrier vector for part-in-vector designs. "
+        "Once saved, the backbone is available to design_golden_gate_oligos via its "
+        "'vendor:<company>-<name>' ID and persists across sessions in library/vendor_backbones.json. "
+        "Use this as a follow-up after insert_only output when the user has the vendor's backbone "
+        "sequence, or as a standalone step to register a backbone before design begins."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Human-readable backbone name (e.g. 'pTwist-Amp-High-Copy', 'pANSA-Kan').",
+            },
+            "sequence": {
+                "type": "string",
+                "description": "Full backbone DNA sequence. Paste directly from the vendor's website or catalog.",
+            },
+            "company": {
+                "type": "string",
+                "description": "Synthesis company name (e.g. 'Twist Biosciences', 'Ansa Biotechnologies'). Used in the backbone ID.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional free-text description (resistance marker, copy number, intended use, etc.).",
+            },
+            "enzyme_name": {
+                "type": "string",
+                "enum": list(GG_ENZYMES.keys()),
+                "description": "Optional: Type IIS enzyme this backbone is designed for (if known).",
+            },
+        },
+        "required": ["name", "sequence"],
+    },
+)
+async def save_vendor_backbone_tool(args):
+    name = args["name"]
+    sequence = args["sequence"]
+    company = args.get("company")
+    description = args.get("description")
+    enzyme_name = args.get("enzyme_name")
+
+    try:
+        entry = _save_vendor_backbone(
+            name=name,
+            sequence=sequence,
+            company=company,
+            description=description,
+            enzyme_name=enzyme_name,
+        )
+    except ValueError as e:
+        return _error(f"Failed to save vendor backbone: {e}")
+
+    lines = [
+        f"Vendor backbone saved.",
+        f"  ID      : {entry['id']}",
+        f"  Name    : {entry['name']}",
+        f"  Company : {entry['company']}",
+        f"  Size    : {entry['size_bp']} bp",
+    ]
+    if enzyme_name:
+        lines.append(f"  Enzyme  : {enzyme_name}")
+
+    placeholder = entry.get("placeholder_region")
+    if placeholder:
+        lines += [
+            "",
+            f"Insertion site auto-detected: {placeholder['description']} "
+            f"(pos {placeholder['start']}–{placeholder['end']}, type: {placeholder['type']}). "
+            "The insert cassette will replace this region — no manual insertion point needed.",
+        ]
+    else:
+        lines += [
+            "",
+            "No insertion site detected automatically (no N-run or gap annotation found).",
+            "An insertion point is required before part-in-vector design.",
+            "Ask the user for the position, search online if needed, then call set_backbone_insertion_point.",
+        ]
+
+    lines += [
+        "",
+        f"Use carrier_backbone_id='{entry['id']}' in design_golden_gate_oligos to build part-in-vector plasmids.",
+    ]
+    return _text("\n".join(lines))
+
+
+# ── Set Backbone Insertion Point Tool ────────────────────────────────────────
+
+@tool(
+    "set_backbone_insertion_point",
+    (
+        "Record the MCS (multiple cloning site) insertion point for a vendor backbone so that "
+        "design_golden_gate_oligos can build part-in-vector plasmids with it. "
+        "Call this after save_vendor_backbone and before design_golden_gate_oligos when the "
+        "carrier backbone is a vendor backbone without a pre-defined insertion point. "
+        "The insertion_point is a 0-based nucleotide position in the backbone sequence — "
+        "the insert cassette will be placed immediately before this position. "
+        "Persists to library/vendor_backbones.json so the value is available in future sessions."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "backbone_id": {
+                "type": "string",
+                "description": (
+                    "The vendor backbone ID returned by save_vendor_backbone "
+                    "(e.g. 'vendor:twist-biosciences-ptwist-amp-high-copy')."
+                ),
+            },
+            "insertion_point": {
+                "type": "integer",
+                "description": (
+                    "0-based nucleotide position in the backbone where the insert cassette will be placed. "
+                    "Obtain this from: (1) the user directly, (2) the vendor's documentation, "
+                    "or (3) a web search for the backbone's GenBank record or datasheet."
+                ),
+            },
+            "source": {
+                "type": "string",
+                "description": (
+                    "How the insertion point was determined: 'user_provided', 'web_search', or 'landmark_sequence'. "
+                    "Recorded for traceability."
+                ),
+            },
+        },
+        "required": ["backbone_id", "insertion_point"],
+    },
+)
+async def set_backbone_insertion_point_tool(args):
+    backbone_id = args["backbone_id"]
+    insertion_point = args["insertion_point"]
+    source = args.get("source", "user_provided")
+
+    if insertion_point < 0:
+        return _error("insertion_point must be a non-negative integer (0-based position).")
+
+    try:
+        entry = _update_vendor_backbone_mcs(backbone_id, insertion_point)
+    except ValueError as e:
+        return _error(str(e))
+
+    seq = entry.get("sequence", "")
+    if seq and insertion_point > len(seq):
+        return _error(
+            f"insertion_point {insertion_point} exceeds backbone length ({len(seq)} bp). "
+            "Check the position and try again."
+        )
+
+    return _text(
+        f"Insertion point set for {entry['name']}.\n"
+        f"  Backbone ID      : {entry['id']}\n"
+        f"  Insertion point  : {insertion_point} (0-based)\n"
+        f"  Determined by    : {source}\n"
+        f"\nYou can now call design_golden_gate_oligos with carrier_backbone_id='{entry['id']}' "
+        "to build part-in-vector plasmids."
+    )
+
+
+# ── Export GenBank Tool ──────────────────────────────────────────────────────
+
+@tool(
+    "export_genbank",
+    (
+        "Export a plasmid sequence as an annotated GenBank (.gb) file. "
+        "Annotates insert fragments, Type IIS enzyme recognition sites, and the carrier backbone. "
+        "Use this after design_golden_gate_oligos (part_in_vector output) or after save_vendor_backbone "
+        "to produce a downloadable .gb file the user can import into Benchling, SnapGene, or ApE. "
+        "Can also be used standalone to annotate and export any plasmid sequence."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "plasmid_sequence": {
+                "type": "string",
+                "description": "Full circular plasmid DNA sequence to export.",
+            },
+            "name": {
+                "type": "string",
+                "description": "Plasmid name — used as the LOCUS name and the .gb filename (e.g. 'EGFP_in_pTwist').",
+            },
+            "output_path": {
+                "type": "string",
+                "description": (
+                    "Directory or full file path to write the .gb file. "
+                    "Defaults to the current working directory. "
+                    "If a directory is given, the filename is derived from 'name'."
+                ),
+            },
+            "description": {
+                "type": "string",
+                "description": "One-line description for the GenBank DEFINITION field.",
+            },
+            "enzyme_name": {
+                "type": "string",
+                "enum": list(GG_ENZYMES.keys()),
+                "description": "Type IIS enzyme — recognition sites are annotated as features in the GenBank file.",
+            },
+            "fragments": {
+                "type": "array",
+                "description": "Insert fragments to annotate. Each entry needs 'name' and 'sequence'.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "sequence": {"type": "string"},
+                    },
+                    "required": ["name", "sequence"],
+                },
+            },
+            "backbone_name": {
+                "type": "string",
+                "description": "Carrier backbone name — annotated as a feature spanning the whole plasmid.",
+            },
+        },
+        "required": ["plasmid_sequence", "name"],
+    },
+)
+async def export_genbank_tool(args):
+    if not _BIOPYTHON_AVAILABLE:
+        return _error("biopython is required for GenBank export. Install it with: pip install biopython")
+
+    plasmid_sequence = args["plasmid_sequence"]
+    name = args["name"]
+    output_path = args.get("output_path")
+    description = args.get("description")
+    enzyme_name = args.get("enzyme_name")
+    fragments = args.get("fragments")
+    backbone_name = args.get("backbone_name")
+
+    try:
+        path = _export_genbank(
+            plasmid_seq=plasmid_sequence,
+            name=name,
+            output_path=output_path,
+            description=description,
+            enzyme_name=enzyme_name,
+            fragments=fragments,
+            backbone_name=backbone_name,
+        )
+    except Exception as e:
+        return _error(f"GenBank export failed: {e}")
+
+    return _text(
+        f"GenBank file written: {path}\n"
+        f"  Plasmid : {name}\n"
+        f"  Size    : {len(plasmid_sequence)} bp (circular)\n"
+        + (f"  Enzyme  : {enzyme_name} sites annotated\n" if enzyme_name else "")
+        + (f"  Inserts : {len(fragments)} fragment(s) annotated\n" if fragments else "")
+        + "\nImport this .gb file into Benchling, SnapGene, or ApE to visualize the construct."
+    )
 
 
 # ── Server factory ─────────────────────────────────────────────────────
@@ -2029,6 +2325,9 @@ ALL_TOOLS = [
     # Golden Gate assembly
     assemble_golden_gate_tool,
     design_golden_gate_oligos_tool,
+    save_vendor_backbone_tool,
+    set_backbone_insertion_point_tool,
+    export_genbank_tool,
     # Literature
     fetch_oa_fulltext_tool,
     # FPbase fluorescent protein search

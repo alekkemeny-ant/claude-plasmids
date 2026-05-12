@@ -11,6 +11,7 @@ from src.gg_denovo import (
     _design_pcr_primers,
     _design_annealing_oligos,
     _design_gblock,
+    _design_insert_cassette,
     _design_part_in_vector,
     select_overhangs,
     design_golden_gate_oligos,
@@ -235,6 +236,41 @@ class TestDesignAnnealingOligos:
             assert o.strand in ("top", "bottom")
 
 
+# ── TestDesignInsertCassette ───────────────────────────────────────────────────
+
+class TestDesignInsertCassette:
+    def test_contains_fragment(self):
+        ins = _design_insert_cassette(MEDIUM_FRAG, "AACC", "TTGG", "BsaI")
+        assert MEDIUM_FRAG in ins
+
+    def test_starts_with_enzyme_recognition(self):
+        ins = _design_insert_cassette(MEDIUM_FRAG, "AACC", "TTGG", "BsaI")
+        assert ins.startswith("GGTCTC")
+
+    def test_ends_with_rc_recognition(self):
+        ins = _design_insert_cassette(MEDIUM_FRAG, "AACC", "TTGG", "BsaI")
+        assert ins.endswith(reverse_complement("GGTCTC"))
+
+    def test_no_ambiguous_bases(self):
+        ins = _design_insert_cassette(MEDIUM_FRAG, "AACC", "TTGG", "BsaI")
+        assert "N" not in ins
+
+    def test_concrete_spacers_differ_from_gblock(self):
+        ins = _design_insert_cassette(MEDIUM_FRAG, "AACC", "TTGG", "BsaI")
+        gb = _design_gblock(MEDIUM_FRAG, "AACC", "TTGG", "BsaI")
+        assert ins != gb
+        assert "N" in gb
+        assert "N" not in ins
+
+    def test_contains_oh_left(self):
+        ins = _design_insert_cassette(MEDIUM_FRAG, "AACC", "TTGG", "BsaI")
+        assert "AACC" in ins
+
+    def test_contains_rc_oh_right(self):
+        ins = _design_insert_cassette(MEDIUM_FRAG, "AACC", "TTGG", "BsaI")
+        assert reverse_complement("TTGG") in ins
+
+
 # ── TestDesignGBlock ───────────────────────────────────────────────────────────
 
 class TestDesignGBlock:
@@ -313,6 +349,23 @@ class TestDesignGoldenGateOligos:
             assert fd.synthesis_seq != ""
             assert fd.fwd_primer == ""
             assert fd.annealing_oligos == []
+
+    def test_output_insert_only(self):
+        result = self._two_frags(output_format="insert_only")
+        assert result.success
+        for fd in result.fragments:
+            assert fd.insert_seq != ""
+            assert "N" not in fd.insert_seq
+            assert fd.insert_size_bp == len(fd.insert_seq)
+            assert fd.fragment_seq in fd.insert_seq
+            assert fd.fwd_primer == ""
+            assert fd.annealing_oligos == []
+            assert fd.synthesis_seq == ""
+            assert fd.plasmid_seq == ""
+
+    def test_insert_only_no_carrier_needed(self):
+        result = self._two_frags(output_format="insert_only")
+        assert result.success
 
     def test_output_both(self):
         carrier = get_backbone_by_id("pUC19")

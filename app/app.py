@@ -122,6 +122,7 @@ def _dispatch_tool(name: str, args: dict) -> str:
 
 _sessions: dict[str, dict] = {}
 _cancelled_sessions: set[str] = set()
+_active_turns: set[str] = set()   # sessions with a turn currently in flight
 _sessions_lock = threading.Lock()
 
 # ── Batch job state ─────────────────────────────────────────────────────
@@ -421,6 +422,22 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         write_event({"type": "error", "content": "Session not found"})
         return
 
+    # Guard against concurrent turns on the same session. ThreadingMixIn means
+    # two HTTP requests can race: the old turn's history.append(assistant+tool_use)
+    # and the new turn's history.append(user_message) interleave, leaving an
+    # orphaned tool_use block that causes API 400 errors on the next request.
+    if session_id in _active_turns:
+        write_event({
+            "type": "error",
+            "content": (
+                "A previous response is still being generated for this session. "
+                "Please wait for it to finish or click Stop first."
+            ),
+        })
+        write_event({"type": "done"})
+        return
+    _active_turns.add(session_id)
+
     tracker = ReferenceTracker()
     set_tracker(tracker)
     clear_last_plot_json()
@@ -620,6 +637,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             if stop_reason == "end_turn":
                 break
     finally:
+        _active_turns.discard(session_id)
         set_tracker(None)
 
     # Flush any in-progress block that was interrupted mid-stream

@@ -799,7 +799,9 @@ def format_backbone_summary(backbone: dict) -> str:
     
     if backbone.get('mcs_position'):
         mcs = backbone['mcs_position']
-        lines.append(f"\n**MCS Position:** {mcs['start']}-{mcs['end']} ({mcs.get('description', '')})")
+        end = mcs.get('end')
+        pos_str = f"{mcs['start']}-{end}" if end is not None else str(mcs['start'])
+        lines.append(f"\n**MCS Position:** {pos_str} ({mcs.get('description', '')})")
     
     if backbone.get('addgene_id'):
         lines.append(f"\n**Addgene ID:** {backbone['addgene_id']}")
@@ -1384,8 +1386,8 @@ def extract_insert_from_plasmid(
     if not dna_is_valid:
         raise ValueError(
             f"plasmid_sequence does not look like a DNA sequence "
-            f"(length={len(plasmid_sequence)}, unexpected chars: {sorted(e)}). "
-            f"If you passed a cache key, resolve it to a sequence first."
+            f"(length={len(plasmid_sequence)}, unexpected chars: {sorted(errors)}). "
+            f"If you passed a cache key or backbone ID, resolve it to a sequence first."
         )
 
     # ── Explicit coordinates: slice directly ──────────────────────────────

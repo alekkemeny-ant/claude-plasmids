@@ -193,9 +193,22 @@ def _get_cached_sequence(key: str) -> Optional[str]:
 
 
 def _resolve_seq(value: str) -> str:
-    """Return the cached sequence if value is a cache key, otherwise return value unchanged."""
-    if value and value in _sequence_cache:
+    """Resolve a plasmid_sequence argument to a DNA string.
+
+    Accepts three forms:
+      - A raw DNA sequence (returned as-is)
+      - A sequence_cache_key (resolved from _sequence_cache)
+      - A backbone library ID such as 'vendor:...' or 'addgene:...' (looked up via get_backbone_by_id)
+    """
+    if not value:
+        return value
+    if value in _sequence_cache:
         return _sequence_cache[value]
+    # Looks like a library ID rather than a DNA string — resolve via backbone lookup
+    if not value[0].upper() in "ACGTN":
+        bb = get_backbone_by_id(value)
+        if bb and bb.get("sequence"):
+            return bb["sequence"]
     return value
 
 
@@ -377,9 +390,7 @@ async def get_insert(args):
 )
 async def find_sequence_tool(args):
     import re as _re
-    plasmid_seq = args["plasmid_sequence"]
-    if plasmid_seq in _sequence_cache:
-        plasmid_seq = _sequence_cache[plasmid_seq]
+    plasmid_seq = _resolve_seq(args["plasmid_sequence"])
     plasmid_seq = _re.sub(r'\s', '', plasmid_seq.upper())
     query = _re.sub(r'\s', '', args["query"].upper())
 
@@ -421,9 +432,7 @@ async def find_sequence_tool(args):
     },
 )
 async def annotate_plasmid_tool(args):
-    plasmid_seq = args["plasmid_sequence"]
-    if plasmid_seq in _sequence_cache:
-        plasmid_seq = _sequence_cache[plasmid_seq]
+    plasmid_seq = _resolve_seq(args["plasmid_sequence"])
     features = _annotate_plasmid(plasmid_seq)
     if not features:
         return _text("pLannotate found no features in the provided plasmid sequence.")
@@ -460,9 +469,7 @@ async def annotate_plasmid_tool(args):
     },
 )
 async def check_duplicate_features_tool(args):
-    plasmid_seq = args["plasmid_sequence"]
-    if plasmid_seq in _sequence_cache:
-        plasmid_seq = _sequence_cache[plasmid_seq]
+    plasmid_seq = _resolve_seq(args["plasmid_sequence"])
 
     features = _annotate_plasmid(plasmid_seq)
     if not features:
@@ -521,9 +528,7 @@ async def check_duplicate_features_tool(args):
     },
 )
 async def swap_feature_tool(args):
-    plasmid_seq = args["plasmid_sequence"]
-    if plasmid_seq in _sequence_cache:
-        plasmid_seq = _sequence_cache[plasmid_seq]
+    plasmid_seq = _resolve_seq(args["plasmid_sequence"])
     result = _swap_feature(
         plasmid_sequence=plasmid_seq,
         feature_name=args["feature_name"],
@@ -559,9 +564,7 @@ async def swap_feature_tool(args):
     },
 )
 async def extract_insert_from_plasmid_tool(args):
-    plasmid_seq = args["plasmid_sequence"]
-    if plasmid_seq in _sequence_cache:
-        plasmid_seq = _sequence_cache[plasmid_seq]
+    plasmid_seq = _resolve_seq(args["plasmid_sequence"])
     result = _extract_insert_from_plasmid(
         plasmid_sequence=plasmid_seq,
         insert_name=args["insert_name"],
@@ -596,9 +599,7 @@ async def extract_insert_from_plasmid_tool(args):
     },
 )
 async def extract_inserts_from_plasmid_tool(args):
-    plasmid_seq = args["plasmid_sequence"]
-    if plasmid_seq in _sequence_cache:
-        plasmid_seq = _sequence_cache[plasmid_seq]
+    plasmid_seq = _resolve_seq(args["plasmid_sequence"])
     result = _extract_inserts_from_plasmid(
         plasmid_sequence=plasmid_seq,
         insert_names=args["insert_names"],

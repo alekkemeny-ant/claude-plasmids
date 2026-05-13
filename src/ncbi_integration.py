@@ -224,6 +224,22 @@ def fetch_gene_sequence(
                         nm_accessions = [acc]
 
         if not nm_accessions:
+            # Prokaryotic / discontinued genes have no NM_ — fall back to
+            # genomic coordinates embedded in the gene_table:
+            #   location: NC_005085.1 (3561961..3564957, complement)
+            loc_match = re.search(
+                r'location:\s*(N[CZ]_\S+)\s+\((\d+)\.\.(\d+)(?:,\s*(complement))?\)',
+                gene_text,
+            )
+            if loc_match:
+                return _fetch_from_genomic_coords(
+                    chrom_accession=loc_match.group(1).rstrip(")"),
+                    start=int(loc_match.group(2)),
+                    end=int(loc_match.group(3)),
+                    complement=bool(loc_match.group(4)),
+                    gene_text=gene_text,
+                    gene_id=gene_id,
+                )
             logger.warning(f"No RefSeq mRNA found for gene ID {gene_id}")
             return None
 
@@ -232,6 +248,56 @@ def fetch_gene_sequence(
 
     except Exception as e:
         logger.error(f"NCBI gene fetch error for gene_id={gene_id}: {e}")
+        return None
+
+
+def _fetch_from_genomic_coords(
+    chrom_accession: str,
+    start: int,
+    end: int,
+    complement: bool,
+    gene_text: str,
+    gene_id: str,
+) -> Optional[dict]:
+    """Fetch a CDS directly from a chromosomal accession + coordinate range.
+    Used for prokaryotic genes that have no NM_ mRNA record."""
+    try:
+        _rate_limit()
+        handle = Entrez.efetch(
+            db="nucleotide",
+            id=chrom_accession,
+            rettype="fasta",
+            retmode="text",
+            seq_start=start,
+            seq_stop=end,
+        )
+        from Bio import SeqIO as _SeqIO
+        record = _SeqIO.read(handle, "fasta")
+        handle.close()
+
+        seq = str(record.seq).upper()
+        if complement:
+            from Bio.Seq import Seq as _Seq
+            seq = str(_Seq(seq).reverse_complement())
+
+        # Extract symbol / product from gene_table text
+        symbol_m = re.search(r'^(\S+)\s', gene_text)
+        symbol = symbol_m.group(1) if symbol_m else f"GeneID_{gene_id}"
+        product_m = re.search(r'^(\S+)\s+(.+?)\[', gene_text)
+        full_name = product_m.group(2).strip() if product_m else ""
+        org_m = re.search(r'\[(.+?)\]', gene_text)
+        organism = org_m.group(1) if org_m else ""
+
+        return {
+            "sequence": seq,
+            "symbol": symbol,
+            "organism": organism,
+            "accession": chrom_accession,
+            "length": len(seq),
+            "full_name": full_name,
+        }
+    except Exception as e:
+        logger.error(f"NCBI genomic coord fetch error ({chrom_accession} {start}..{end}): {e}")
         return None
 
 

@@ -67,6 +67,17 @@ except ImportError:
     except ImportError:
         USER_LIBRARY_AVAILABLE = False
 
+# Vendor backbone library (Ansa, Twist, etc. — saved via save_vendor_backbone tool)
+try:
+    from .vendor_backbone import load_vendor_backbones
+    VENDOR_BACKBONE_AVAILABLE = True
+except ImportError:
+    try:
+        from vendor_backbone import load_vendor_backbones
+        VENDOR_BACKBONE_AVAILABLE = True
+    except ImportError:
+        VENDOR_BACKBONE_AVAILABLE = False
+
 # Optional custom annotation DB (BYOA — bring your own annotations)
 try:
     from .custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
@@ -156,10 +167,11 @@ def _load_builtin_inserts() -> dict:
 
 
 def load_backbones() -> dict:
-    """Load backbone library: built-in + test fixtures + user library.
+    """Load backbone library: built-in + test fixtures + user library + vendor backbones.
 
     User entries (from $PLASMID_USER_LIBRARY/backbones/) are appended with
-    `user:` ID prefix. Callers that persist to disk must use
+    `user:` ID prefix. Vendor entries (saved via save_vendor_backbone tool) are
+    appended with `vendor:` ID prefix. Callers that persist to disk must use
     _load_builtin_backbones instead to avoid writing runtime-only entries.
     """
     data = _load_builtin_backbones()
@@ -169,6 +181,10 @@ def load_backbones() -> dict:
         user_entries = load_user_backbones()
         if user_entries:
             data["backbones"] = data["backbones"] + user_entries
+    if VENDOR_BACKBONE_AVAILABLE:
+        vendor_entries = load_vendor_backbones()
+        if vendor_entries:
+            data["backbones"] = data["backbones"] + vendor_entries
     return data
 
 
@@ -783,7 +799,9 @@ def format_backbone_summary(backbone: dict) -> str:
     
     if backbone.get('mcs_position'):
         mcs = backbone['mcs_position']
-        lines.append(f"\n**MCS Position:** {mcs['start']}-{mcs['end']} ({mcs.get('description', '')})")
+        end = mcs.get('end')
+        pos_str = f"{mcs['start']}-{end}" if end is not None else str(mcs['start'])
+        lines.append(f"\n**MCS Position:** {pos_str} ({mcs.get('description', '')})")
     
     if backbone.get('addgene_id'):
         lines.append(f"\n**Addgene ID:** {backbone['addgene_id']}")
@@ -1368,8 +1386,8 @@ def extract_insert_from_plasmid(
     if not dna_is_valid:
         raise ValueError(
             f"plasmid_sequence does not look like a DNA sequence "
-            f"(length={len(plasmid_sequence)}, unexpected chars: {sorted(e)}). "
-            f"If you passed a cache key, resolve it to a sequence first."
+            f"(length={len(plasmid_sequence)}, unexpected chars: {sorted(errors)}). "
+            f"If you passed a cache key or backbone ID, resolve it to a sequence first."
         )
 
     # ── Explicit coordinates: slice directly ──────────────────────────────

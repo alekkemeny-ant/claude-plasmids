@@ -1100,6 +1100,40 @@ def format_as_fasta(sequence: str, name: str, description: str = "") -> str:
     return "\n".join(lines) + "\n"
 
 
+def _format_provenance_comment(provenance: list[dict]) -> str:
+    """Format a list of part provenance dicts into a GenBank COMMENT string."""
+    lines = ["Assembly provenance:"]
+    insert_idx = 0
+    for p in provenance:
+        part_type = p.get("part_type", "insert")
+        name = p.get("part_name", "unknown")
+        if part_type == "backbone":
+            label = f"  backbone: {name}"
+        else:
+            insert_idx += 1
+            label = f"  insert {insert_idx}: {name}"
+
+        src = p.get("source_system") or "local"
+        fields = [label, src]
+
+        addgene_id = p.get("addgene_id")
+        accession = p.get("genbank_accession")
+        doi = p.get("source_doi")
+        url = p.get("source_url")
+
+        if addgene_id and "Addgene" in src:
+            fields.append(f"catalog: #{addgene_id}")
+        if accession and "NCBI" in src:
+            fields.append(f"accession: {accession}")
+        if doi:
+            fields.append(f"DOI: {doi}")
+        if url:
+            fields.append(url)
+
+        lines.append(" | ".join(fields))
+    return "\n".join(lines)
+
+
 def _build_annotated_record(
     sequence: str,
     df,
@@ -1110,6 +1144,7 @@ def _build_annotated_record(
     insert_length: int,
     reverse_complement_insert: bool,
     linear: bool = False,
+    provenance: Optional[list[dict]] = None,
 ):
     """Build a BioPython SeqRecord from a pLannotate df, adding the insert feature if needed."""
     if not _PLANNOTATE_AVAILABLE:
@@ -1122,6 +1157,9 @@ def _build_annotated_record(
     record.name = locus_name
     record.id = locus_name
     record.description = f"{insert_name} in {backbone_name}" if backbone_name else name
+
+    if provenance:
+        record.annotations["comment"] = _format_provenance_comment(provenance)
 
     if insert_length > 0:
         insert_start = insert_position
@@ -1154,6 +1192,7 @@ def format_as_genbank(
     reverse_complement_insert: bool = False,
     features: Optional[list[dict]] = None,
     linear: bool = False,
+    provenance: Optional[list[dict]] = None,
 ) -> str:
     """Format an assembled construct as a GenBank flat file.
 
@@ -1166,8 +1205,9 @@ def format_as_genbank(
             sequence=sequence, name=name, backbone_name=backbone_name,
             insert_name=insert_name, insert_position=insert_position,
             insert_length=insert_length, features=features, linear=linear,
+            provenance=provenance,
         )
-    
+
     df = annotate(sequence, linear=linear)
     if _CUSTOM_ANNOTATIONS_AVAILABLE:
         custom_df = query_custom_db(sequence)
@@ -1176,6 +1216,7 @@ def format_as_genbank(
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,
         insert_position, insert_length, reverse_complement_insert, linear=linear,
+        provenance=provenance,
     )
     handle = io.StringIO()
     SeqIO.write(record, handle, "genbank")
@@ -1191,6 +1232,7 @@ def _format_as_genbank_fallback(
     insert_length: int = 0,
     features: Optional[list[dict]] = None,
     linear: bool = False,
+    provenance: Optional[list[dict]] = None,
 ) -> str:
     """Minimal GenBank writer for environments without pLannotate.
 
@@ -1210,6 +1252,14 @@ def _format_as_genbank_fallback(
 
     # DEFINITION
     lines.append(f"DEFINITION  Expression construct: {insert_name} in {backbone_name}.")
+
+    # COMMENT — provenance block (GenBank spec: 12-space indent for continuation lines)
+    if provenance:
+        comment_text = _format_provenance_comment(provenance)
+        comment_lines = comment_text.splitlines()
+        lines.append(f"COMMENT     {comment_lines[0]}")
+        for cl in comment_lines[1:]:
+            lines.append(f"            {cl}")
 
     # FEATURES
     lines.append("FEATURES             Location/Qualifiers")
@@ -1300,6 +1350,7 @@ def export_genbank_with_plot(
     insert_length: int = 0,
     reverse_complement_insert: bool = False,
     linear: bool = False,
+    provenance: Optional[list[dict]] = None,
 ) -> tuple[str, str]:
     """Annotate a sequence, returning both a GenBank string and a Bokeh plot JSON.
 
@@ -1315,9 +1366,11 @@ def export_genbank_with_plot(
         custom_df = query_custom_db(sequence)
         if custom_df is not None:
             df = merge_annotation_results(df, custom_df)
+
     record = _build_annotated_record(
         sequence, df, name, backbone_name, insert_name,
         insert_position, insert_length, reverse_complement_insert, linear=linear,
+        provenance=provenance,
     )
     handle = io.StringIO()
     SeqIO.write(record, handle, "genbank")

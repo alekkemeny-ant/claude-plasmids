@@ -1162,6 +1162,27 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .download-btn:hover { background: var(--brand-aqua-20); border-color: var(--brand-aqua); }
   .download-btn svg { flex-shrink: 0; }
+  /* ── Download split button ── */
+  .dl-split-wrap { position: relative; display: inline-flex; }
+  .dl-split-wrap .download-btn { border-radius: 8px 0 0 8px; border-right: none; }
+  .dl-chevron-btn {
+    display: inline-flex; align-items: center; justify-content: center; padding: 0 9px;
+    border: 1px solid var(--brand-aqua-20); border-left: 1px solid var(--brand-aqua-30, rgba(62,169,159,0.3));
+    background: var(--brand-aqua-10); border-radius: 0 8px 8px 0;
+    color: var(--brand-aqua-dark); cursor: pointer; transition: all 0.15s;
+  }
+  .dl-chevron-btn:hover { background: var(--brand-aqua-20); border-color: var(--brand-aqua); }
+  .dl-menu {
+    position: absolute; top: calc(100% + 4px); left: 0; z-index: 300;
+    background: #FAFAF8; border: 1px solid var(--sand-200); border-radius: 8px;
+    padding: 4px; min-width: 200px; box-shadow: 0 4px 14px rgba(0,0,0,0.10);
+  }
+  .dl-menu-item {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    padding: 7px 10px; border: none; background: none; cursor: pointer;
+    font-size: 12px; font-family: inherit; border-radius: 5px; color: var(--sand-700);
+  }
+  .dl-menu-item:hover { background: var(--sand-100); }
 
   /* ── Error ── */
   .error-banner {
@@ -1790,10 +1811,12 @@ function renderStoredBlock(block, container) {
     '</div>';
     container.appendChild(div);
     if (block.download_content && block.download_filename) {
-      addDownloadButton(container, block.download_content, block.download_filename);
-      if (block.name === 'export_construct' &&
-          ['genbank', 'gb'].includes((block.input && block.input.output_format || '').toLowerCase())) {
-        addSaveToLibraryButton(container, block.input || {}, block.download_content);
+      const isGb = block.name === 'export_construct' &&
+          ['genbank', 'gb'].includes((block.input && block.input.output_format || '').toLowerCase());
+      if (isGb) {
+        addExportButtons(container, block.input || {}, block.download_content, block.download_filename);
+      } else {
+        addDownloadButton(container, block.download_content, block.download_filename);
       }
     }
   } else if (block.type === 'text') {
@@ -2592,13 +2615,14 @@ function finishToolBlock(toolName, toolInput, toolResult, downloadContent, downl
       body.innerHTML = html;
     }
   }
-  // Surface download button in the main chat (not just inside the collapsed tool block)
+  // Surface action buttons in the main chat (not just inside the collapsed tool block)
   if (downloadContent && downloadFilename) {
-    addDownloadButton(getInner(), downloadContent, downloadFilename);
-    // Add "Save to Library" button for GenBank exports
-    if (toolName === 'export_construct' &&
-        ['genbank', 'gb'].includes((toolInput.output_format || '').toLowerCase())) {
-      addSaveToLibraryButton(getInner(), toolInput, downloadContent);
+    const isGenbank = toolName === 'export_construct' &&
+        ['genbank', 'gb'].includes((toolInput.output_format || '').toLowerCase());
+    if (isGenbank) {
+      addExportButtons(getInner(), toolInput, downloadContent, downloadFilename);
+    } else {
+      addDownloadButton(getInner(), downloadContent, downloadFilename);
     }
   }
   currentToolId = null;
@@ -2743,6 +2767,7 @@ checkHealth();
 setInterval(checkHealth, 5000);
 loadSessions();
 loadUserLibrary();
+_checkUserLibrary();
 setInterval(loadSessions, 5000);
 // Restore active session on page load
 if (currentSessionId) {
@@ -3221,49 +3246,113 @@ function downloadAllBatch(jobId) {
 
 // ── Saved Constructs ─────────────────────────────────────────────────────────
 
-function addSaveToLibraryButton(container, toolInput, genbankContent) {
-  const div = document.createElement('div');
-  div.style.marginTop = '4px';
-  const btn = document.createElement('button');
-  btn.className = 'save-btn';
-  btn.innerHTML = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> Save Construct';
-  div.appendChild(btn);
-  container.appendChild(div);
-  btn.addEventListener('click', function() {
-    btn.disabled = true;
-    btn.textContent = 'Saving…';
-    saveConstructToLibrary(toolInput, genbankContent, btn);
-  });
+const _SVG_CHECK = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>';
+const _SVG_DL = '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>';
+const _SVG_FOLDER = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+
+function _triggerDownload(content, filename) {
+  const blob = new Blob([content], {type: 'application/octet-stream'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
-async function saveConstructToLibrary(toolInput, genbankContent, btn) {
-  const body = {
-    construct_name: toolInput.construct_name || 'construct',
-    genbank_content: genbankContent,
-    total_size_bp: null,
-    session_id: currentSessionId,
-    backbone_name: toolInput.backbone_name || '',
-    insert_name: toolInput.insert_name || '',
-    sequence_cache_key: toolInput.sequence_cache_key || '',
-  };
-  try {
-    const r = await fetch('/api/db/constructs', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
+function addExportButtons(container, toolInput, genbankContent, filename) {
+  const outer = document.createElement('div');
+  outer.className = 'msg assistant';
+
+  const splitMenu = _userLibraryAvailable
+    ? '<div class="dl-menu" style="display:none">' +
+        '<button class="dl-menu-item" data-role="dl-computer">' + _SVG_DL + ' Download to computer</button>' +
+        '<button class="dl-menu-item" data-role="dl-library">' + _SVG_FOLDER + ' Save to Local Library</button>' +
+      '</div>'
+    : '';
+  const chevron = _userLibraryAvailable
+    ? '<button class="dl-chevron-btn" data-role="dl-chevron" aria-label="More save options">' +
+        '<svg width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>' +
+      '</button>'
+    : '';
+
+  outer.innerHTML =
+    '<div class="msg-bubble-assistant" style="margin-top:8px">' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">' +
+        '<div class="' + (_userLibraryAvailable ? 'dl-split-wrap' : '') + '">' +
+          '<button class="download-btn" data-role="dl" data-tooltip="Download this file to your computer">' + _SVG_DL + ' Download</button>' +
+          chevron +
+          splitMenu +
+        '</div>' +
+        '<button class="save-btn" data-role="save" data-tooltip="Save to local database">' +
+          '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>' +
+          ' Save Construct' +
+        '</button>' +
+      '</div>' +
+    '</div>';
+  container.appendChild(outer);
+
+  // Download main button — direct download (or fallthrough when no local lib)
+  outer.querySelector('[data-role="dl"]').addEventListener('click', function() {
+    _triggerDownload(genbankContent, filename);
+  });
+
+  // Chevron toggles dropdown
+  const chevronBtn = outer.querySelector('[data-role="dl-chevron"]');
+  const menu = outer.querySelector('.dl-menu');
+  if (chevronBtn && menu) {
+    chevronBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      const open = menu.style.display !== 'none';
+      menu.style.display = open ? 'none' : '';
     });
-    const data = await r.json();
-    if (data.id) {
-      btn.innerHTML = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> Saved';
-      btn.style.opacity = '0.75';
-    } else {
-      btn.textContent = 'Save failed';
-      btn.disabled = false;
-    }
-  } catch(e) {
-    btn.textContent = 'Save failed';
-    btn.disabled = false;
+    document.addEventListener('click', function() { menu.style.display = 'none'; });
+
+    outer.querySelector('[data-role="dl-computer"]').addEventListener('click', function() {
+      menu.style.display = 'none';
+      _triggerDownload(genbankContent, filename);
+    });
+    outer.querySelector('[data-role="dl-library"]').addEventListener('click', async function() {
+      menu.style.display = 'none';
+      const btn = chevronBtn;  // give feedback on the chevron button
+      const dlBtn = outer.querySelector('[data-role="dl"]');
+      const origHtml = dlBtn.innerHTML;
+      dlBtn.disabled = true; dlBtn.textContent = 'Saving…';
+      try {
+        const r = await fetch('/api/local-library/save', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: toolInput.construct_name || 'construct', content: genbankContent}),
+        });
+        const data = await r.json();
+        if (data.saved_to) {
+          dlBtn.innerHTML = _SVG_CHECK + ' Saved: ' + escapeHtml(data.saved_to.split('/').pop());
+          dlBtn.style.opacity = '0.75';
+        } else { dlBtn.innerHTML = origHtml; dlBtn.disabled = false; }
+      } catch(e) { dlBtn.innerHTML = origHtml; dlBtn.disabled = false; }
+    });
   }
+
+  // Save Construct → DB
+  outer.querySelector('[data-role="save"]').addEventListener('click', async function() {
+    const btn = this;
+    btn.disabled = true; btn.textContent = 'Saving…';
+    const body = {
+      construct_name: toolInput.construct_name || 'construct',
+      genbank_content: genbankContent,
+      total_size_bp: null,
+      session_id: currentSessionId,
+      backbone_name: toolInput.backbone_name || '',
+      insert_name: toolInput.insert_name || '',
+      sequence_cache_key: toolInput.sequence_cache_key || '',
+    };
+    try {
+      const r = await fetch('/api/db/constructs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+      const data = await r.json();
+      if (data.id) { btn.innerHTML = _SVG_CHECK + ' Saved'; btn.style.opacity = '0.75'; }
+      else { btn.textContent = 'Save failed'; btn.disabled = false; }
+    } catch(e) { btn.textContent = 'Save failed'; btn.disabled = false; }
+  });
 }
 
 // ── Library panel toggle ─────────────────────────────────────────────────────
@@ -4575,6 +4664,26 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 imported += 1
 
             self._send_json({"imported": imported, "skipped": skipped})
+
+        elif path == "/api/local-library/save":
+            user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+            if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
+                self._send_json({"error": "PLASMID_USER_LIBRARY not set or not a directory"}, 400)
+                return
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            name = body.get("name", "construct")
+            content = body.get("content", "")
+            if not content:
+                self._send_json({"error": "No content provided"}, 400)
+                return
+            import re as _re_ll
+            constructs_dir = Path(user_lib_dir).expanduser() / "constructs"
+            constructs_dir.mkdir(exist_ok=True)
+            safe_name = _re_ll.sub(r'[^\w\-. ]', '_', name).strip().replace(' ', '_')
+            out_path = constructs_dir / f"{safe_name}.gb"
+            out_path.write_text(content)
+            self._send_json({"saved_to": str(out_path)})
 
         elif path.startswith("/api/db/constructs/") and path.endswith("/save-to-library"):
             import re as _re2

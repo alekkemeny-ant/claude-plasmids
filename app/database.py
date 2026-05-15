@@ -408,6 +408,25 @@ def run_validation_structured(
 
 # ── Provenance helpers ───────────────────────────────────────────────────────
 
+def _classify_source_system(entry: dict, extra_addgene_id=None) -> str:
+    """Normalize a raw library entry's source field into a canonical source_system label.
+
+    Returns one of: "local_user", "Addgene", "NCBI",
+    "local_vendor: <name>", or "local".
+    """
+    src = (entry.get("source") or "").strip()
+    if src == "user_library":
+        return "local_user"
+    addgene_id = entry.get("addgene_id") or extra_addgene_id
+    if addgene_id or src.lower() == "addgene":
+        return "Addgene"
+    if entry.get("genbank_accession"):
+        return "NCBI"
+    if src:
+        return f"local_vendor: {src}"
+    return "local"
+
+
 def build_parts_from_library(
     backbone_name: str,
     insert_names: list[str],
@@ -436,7 +455,7 @@ def build_parts_from_library(
             "part_type": "backbone",
             "part_name": bb.get("name") or backbone_name,
             "part_region": "Vector backbone",
-            "source_system": bb.get("source") or bb.get("sequence_source"),
+            "source_system": _classify_source_system(bb, extra_addgene_id=addgene_id),
             "source_url": url,
             "source_doi": bb.get("article_doi"),
             "source_pubmed_id": bb.get("article_pubmed_id") or bb.get("pubmed_id"),
@@ -444,13 +463,13 @@ def build_parts_from_library(
             "addgene_id": str(addgene_id) if addgene_id is not None else None,
         })
     elif backbone_name:
-        # Backbone not found in local library or Addgene — use provided addgene_id if available
+        # Backbone not found in local library — use provided addgene_id if available
         url = f"https://www.addgene.org/{backbone_addgene_id}/" if backbone_addgene_id else None
         parts.append({
             "part_type": "backbone",
             "part_name": backbone_name,
             "part_region": "Vector backbone",
-            "source_system": "Addgene" if backbone_addgene_id else None,
+            "source_system": "Addgene" if backbone_addgene_id else "local",
             "source_url": url,
             "source_doi": None,
             "source_pubmed_id": None,
@@ -468,23 +487,29 @@ def build_parts_from_library(
                 ins = None
 
         if ins and not ins.get("needs_disambiguation"):
+            accession = ins.get("genbank_accession")
+            addgene_id = ins.get("addgene_id")
+            url = (
+                f"https://www.addgene.org/{addgene_id}/" if addgene_id
+                else _ncbi_url(accession)
+            )
             parts.append({
                 "part_type": "insert",
                 "part_name": ins.get("name") or name,
                 "part_region": region,
-                "source_system": ins.get("source"),
-                "source_url": _ncbi_url(ins.get("genbank_accession")),
-                "source_doi": None,
-                "source_pubmed_id": None,
-                "genbank_accession": ins.get("genbank_accession"),
-                "addgene_id": None,
+                "source_system": _classify_source_system(ins),
+                "source_url": url,
+                "source_doi": ins.get("article_doi"),
+                "source_pubmed_id": ins.get("article_pubmed_id") or ins.get("pubmed_id"),
+                "genbank_accession": accession,
+                "addgene_id": str(addgene_id) if addgene_id is not None else None,
             })
         else:
             parts.append({
                 "part_type": "insert",
                 "part_name": name,
                 "part_region": region,
-                "source_system": None,
+                "source_system": "local",
                 "source_url": None,
                 "source_doi": None,
                 "source_pubmed_id": None,

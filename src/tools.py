@@ -770,6 +770,83 @@ async def assemble_construct(args):
     return _text(out)
 
 
+def _classify_source_system(entry: dict, extra_addgene_id=None) -> str:
+    src = (entry.get("source") or "").strip()
+    if src == "user_library":
+        return "local_user"
+    addgene_id = entry.get("addgene_id") or extra_addgene_id
+    if addgene_id or src.lower() == "addgene":
+        return "Addgene"
+    if entry.get("genbank_accession"):
+        return "NCBI"
+    if src:
+        return f"local_vendor: {src}"
+    return "local"
+
+
+def _build_export_provenance(backbone_name: str, insert_names: list[str]) -> list[dict]:
+    """Build provenance dicts for GenBank COMMENT using already-imported library functions."""
+    parts = []
+
+    if backbone_name:
+        try:
+            bb = get_backbone_by_id(backbone_name)
+        except Exception:
+            bb = None
+        if bb and not bb.get("needs_disambiguation"):
+            addgene_id = bb.get("addgene_id")
+            url = bb.get("url") or (f"https://www.addgene.org/{addgene_id}/" if addgene_id else None)
+            parts.append({
+                "part_type": "backbone",
+                "part_name": bb.get("name") or backbone_name,
+                "source_system": _classify_source_system(bb, extra_addgene_id=addgene_id),
+                "source_url": url,
+                "source_doi": bb.get("article_doi"),
+                "genbank_accession": bb.get("genbank_accession"),
+                "addgene_id": str(addgene_id) if addgene_id else None,
+            })
+        else:
+            parts.append({
+                "part_type": "backbone",
+                "part_name": backbone_name,
+                "source_system": "local",
+                "source_url": None, "source_doi": None,
+                "genbank_accession": None, "addgene_id": None,
+            })
+
+    for ins_name in insert_names:
+        if not ins_name:
+            continue
+        try:
+            ins = get_insert_by_id(ins_name)
+        except Exception:
+            ins = None
+        if ins and not ins.get("needs_disambiguation"):
+            accession = ins.get("genbank_accession")
+            addgene_id = ins.get("addgene_id")
+            url = (f"https://www.addgene.org/{addgene_id}/" if addgene_id
+                   else (f"https://www.ncbi.nlm.nih.gov/nuccore/{accession}" if accession else None))
+            parts.append({
+                "part_type": "insert",
+                "part_name": ins.get("name") or ins_name,
+                "source_system": _classify_source_system(ins),
+                "source_url": url,
+                "source_doi": ins.get("article_doi"),
+                "genbank_accession": accession,
+                "addgene_id": str(addgene_id) if addgene_id else None,
+            })
+        else:
+            parts.append({
+                "part_type": "insert",
+                "part_name": ins_name,
+                "source_system": "local",
+                "source_url": None, "source_doi": None,
+                "genbank_accession": None, "addgene_id": None,
+            })
+
+    return parts
+
+
 @tool(
     "export_construct",
     "Export an assembled construct sequence in raw, FASTA, or GenBank format.",
@@ -809,6 +886,20 @@ async def export_construct(args):
     ilen = args.get("insert_length", 0)
     rc_insert = args.get("reverse_complement_insert", False)
 
+    # Build provenance for GenBank COMMENT (best-effort; never blocks export).
+    # When the agent omits backbone_name/insert_name, try to recover them from
+    # the cache key (format: "assembly:{backbone}:{insert}").
+    _prov_bname = bname
+    _prov_iname = iname
+    if not _prov_bname and not _prov_iname and cache_key:
+        _key_parts = cache_key.split(":", 2)
+        if len(_key_parts) == 3 and _key_parts[0] == "assembly":
+            _prov_bname = _key_parts[1]
+            _prov_iname = _key_parts[2]
+
+    _prov_parts = _build_export_provenance(_prov_bname, [_prov_iname] if _prov_iname else [])
+    _provenance = _prov_parts or None
+
     try:
         if fmt == "raw":
             return _text(seq)
@@ -827,7 +918,7 @@ async def export_construct(args):
                         _export_genbank_with_plot,
                         sequence=seq, name=cname, backbone_name=bname,
                         insert_name=iname, insert_position=ipos,
-                        insert_length=ilen, linear=linear,
+                        insert_length=ilen, linear=linear, provenance=_provenance,
                     )
                     _last_plot_json = plot_json
                     return _text(gbk)
@@ -840,7 +931,7 @@ async def export_construct(args):
                 format_as_genbank,
                 sequence=seq, name=cname, backbone_name=bname,
                 insert_name=iname, insert_position=ipos, insert_length=ilen,
-                reverse_complement_insert=rc_insert,
+                reverse_complement_insert=rc_insert, provenance=_provenance,
             )
             return _text(result)
         else:

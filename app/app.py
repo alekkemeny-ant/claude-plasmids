@@ -1183,6 +1183,23 @@ HTML_PAGE = r"""<!DOCTYPE html>
     font-size: 12px; font-family: inherit; border-radius: 5px; color: var(--sand-700);
   }
   .dl-menu-item:hover { background: var(--sand-100); }
+  .dl-rename-row {
+    display: flex; align-items: center; gap: 6px; margin-top: 6px; flex-wrap: wrap;
+  }
+  .dl-rename-row input {
+    flex: 1; min-width: 120px; padding: 4px 8px; border: 1px solid var(--sand-300);
+    border-radius: 6px; font-size: 12px; font-family: inherit; background: #fff;
+    color: var(--sand-800);
+  }
+  .dl-rename-row input:focus { outline: none; border-color: var(--brand-aqua); }
+  .dl-rename-confirm { padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500;
+    font-family: inherit; cursor: pointer; border: none;
+    background: var(--brand-aqua, #3ea99f); color: #fff; }
+  .dl-rename-confirm:hover { opacity: 0.85; }
+  .dl-rename-cancel { padding: 4px 8px; border-radius: 6px; font-size: 12px;
+    font-family: inherit; cursor: pointer; border: 1px solid var(--sand-200);
+    background: none; color: var(--sand-600); }
+  .dl-rename-cancel:hover { background: var(--sand-100); }
 
   /* ── Error ── */
   .error-banner {
@@ -1429,7 +1446,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <div style="display:flex;align-items:center;gap:2px;">
         <button class="user-library-toggle" id="user-library-toggle" onclick="toggleUserLibrary()"
           style="flex:1;"
-          data-tooltip="Your local collection of backbones and inserts loaded from a folder on this machine. These are available to the designer but live separately from the saved constructs database.">
+          data-tooltip="Parts available for design — backbones, inserts, and designed constructs loaded from your local library folder.">
           <span>Your Library</span>
           <em class="chevron">&#8964;</em>
         </button>
@@ -1992,6 +2009,10 @@ async function loadUserLibrary() {
     if (data.vendor_backbones && data.vendor_backbones.length) {
       html += '<div class="user-library-section"><div class="user-library-section-title">Vendor Backbones</div>' +
         _ulBuildEntries(data.vendor_backbones, false) + '</div>';
+    }
+    if (data.designed_constructs && data.designed_constructs.length) {
+      html += '<div class="user-library-section"><div class="user-library-section-title">Designed Constructs</div>' +
+        _ulBuildEntries(data.designed_constructs, false) + '</div>';
     }
     if (!html) html = '<div class="user-library-empty">No entries loaded.</div>';
     body.innerHTML = html;
@@ -3264,25 +3285,24 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
   const outer = document.createElement('div');
   outer.className = 'msg assistant';
 
-  const splitMenu = _userLibraryAvailable
-    ? '<div class="dl-menu" style="display:none">' +
-        '<button class="dl-menu-item" data-role="dl-computer">' + _SVG_DL + ' Download to computer</button>' +
-        '<button class="dl-menu-item" data-role="dl-library">' + _SVG_FOLDER + ' Save to Local Library</button>' +
-      '</div>'
-    : '';
-  const chevron = _userLibraryAvailable
-    ? '<button class="dl-chevron-btn" data-role="dl-chevron" aria-label="More save options">' +
-        '<svg width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>' +
-      '</button>'
+  const _SVG_CHOOSE = '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
+  const localLibItem = _userLibraryAvailable
+    ? '<button class="dl-menu-item" data-role="dl-library">' + _SVG_FOLDER + ' Save to Local Library</button>'
     : '';
 
   outer.innerHTML =
     '<div class="msg-bubble-assistant" style="margin-top:8px">' +
       '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">' +
-        '<div class="' + (_userLibraryAvailable ? 'dl-split-wrap' : '') + '">' +
+        '<div class="dl-split-wrap">' +
           '<button class="download-btn" data-role="dl" data-tooltip="Download this file to your computer">' + _SVG_DL + ' Download</button>' +
-          chevron +
-          splitMenu +
+          '<button class="dl-chevron-btn" data-role="dl-chevron" aria-label="More save options">' +
+            '<svg width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>' +
+          '</button>' +
+          '<div class="dl-menu" style="display:none">' +
+            '<button class="dl-menu-item" data-role="dl-computer">' + _SVG_DL + ' Download to computer</button>' +
+            '<button class="dl-menu-item" data-role="dl-choosepath">' + _SVG_CHOOSE + ' Save to…</button>' +
+            localLibItem +
+          '</div>' +
         '</div>' +
         '<button class="save-btn" data-role="save" data-tooltip="Save to local database">' +
           '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>' +
@@ -3292,7 +3312,7 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
     '</div>';
   container.appendChild(outer);
 
-  // Download main button — direct download (or fallthrough when no local lib)
+  // Download main button — direct download to computer
   outer.querySelector('[data-role="dl"]').addEventListener('click', function() {
     _triggerDownload(genbankContent, filename);
   });
@@ -3300,21 +3320,39 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
   // Chevron toggles dropdown
   const chevronBtn = outer.querySelector('[data-role="dl-chevron"]');
   const menu = outer.querySelector('.dl-menu');
-  if (chevronBtn && menu) {
-    chevronBtn.addEventListener('click', function(e) {
-      e.stopPropagation();
-      const open = menu.style.display !== 'none';
-      menu.style.display = open ? 'none' : '';
-    });
-    document.addEventListener('click', function() { menu.style.display = 'none'; });
+  chevronBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    menu.style.display = menu.style.display === 'none' ? '' : 'none';
+  });
+  document.addEventListener('click', function() { menu.style.display = 'none'; });
 
-    outer.querySelector('[data-role="dl-computer"]').addEventListener('click', function() {
-      menu.style.display = 'none';
+  outer.querySelector('[data-role="dl-computer"]').addEventListener('click', function() {
+    menu.style.display = 'none';
+    _triggerDownload(genbankContent, filename);
+  });
+
+  outer.querySelector('[data-role="dl-choosepath"]').addEventListener('click', async function() {
+    menu.style.display = 'none';
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: filename,
+          types: [{ description: 'GenBank file', accept: {'text/plain': ['.gb', '.gbk']} }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(genbankContent);
+        await writable.close();
+      } catch(e) {
+        if (e.name !== 'AbortError') _triggerDownload(genbankContent, filename);
+      }
+    } else {
       _triggerDownload(genbankContent, filename);
-    });
-    outer.querySelector('[data-role="dl-library"]').addEventListener('click', async function() {
-      menu.style.display = 'none';
-      const btn = chevronBtn;  // give feedback on the chevron button
+    }
+  });
+
+  const libItem = outer.querySelector('[data-role="dl-library"]');
+  if (libItem) {
+    async function _saveToLib(name, overwrite) {
       const dlBtn = outer.querySelector('[data-role="dl"]');
       const origHtml = dlBtn.innerHTML;
       dlBtn.disabled = true; dlBtn.textContent = 'Saving…';
@@ -3322,14 +3360,45 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
         const r = await fetch('/api/local-library/save', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({name: toolInput.construct_name || 'construct', content: genbankContent}),
+          body: JSON.stringify({name, content: genbankContent, overwrite}),
         });
         const data = await r.json();
         if (data.saved_to) {
           dlBtn.innerHTML = _SVG_CHECK + ' Saved: ' + escapeHtml(data.saved_to.split('/').pop());
           dlBtn.style.opacity = '0.75';
+          // Remove any rename row
+          const rr = outer.querySelector('.dl-rename-row');
+          if (rr) rr.remove();
+        } else if (data.exists) {
+          dlBtn.innerHTML = origHtml; dlBtn.disabled = false;
+          // Show inline rename form
+          let rr = outer.querySelector('.dl-rename-row');
+          if (!rr) {
+            rr = document.createElement('div');
+            rr.className = 'dl-rename-row';
+            outer.querySelector('.msg-bubble-assistant > div').after(rr);
+          }
+          rr.innerHTML =
+            '<span style="font-size:11px;color:var(--sand-500)">A file with that name already exists. Save as:</span>' +
+            '<input type="text" value="' + escapeHtml(data.suggested_name) + '">.gb' +
+            '<button class="dl-rename-confirm">Save</button>' +
+            '<button class="dl-rename-cancel">Cancel</button>';
+          const inp = rr.querySelector('input');
+          inp.focus(); inp.select();
+          rr.querySelector('.dl-rename-confirm').addEventListener('click', function() {
+            _saveToLib(inp.value.trim() || data.suggested_name, true);
+          });
+          inp.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') _saveToLib(inp.value.trim() || data.suggested_name, true);
+            if (e.key === 'Escape') rr.remove();
+          });
+          rr.querySelector('.dl-rename-cancel').addEventListener('click', function() { rr.remove(); });
         } else { dlBtn.innerHTML = origHtml; dlBtn.disabled = false; }
       } catch(e) { dlBtn.innerHTML = origHtml; dlBtn.disabled = false; }
+    }
+    libItem.addEventListener('click', function() {
+      menu.style.display = 'none';
+      _saveToLib(toolInput.construct_name || 'construct', false);
     });
   }
 
@@ -3576,20 +3645,60 @@ function _toggleRowDetail(row) {
   });
 }
 
-async function saveToLocalLibrary(constructId, btn) {
+async function saveToLocalLibrary(constructId, btn, name, overwrite) {
+  const origText = btn.dataset.origText || btn.textContent;
+  btn.dataset.origText = origText;
   btn.disabled = true;
   btn.textContent = 'Saving…';
   try {
+    const body = {};
+    if (name) body.name = name;
+    if (overwrite) body.overwrite = true;
     const r = await fetch('/api/db/constructs/' + constructId + '/save-to-library', {
       method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
     });
     const data = await r.json();
     if (data.saved_to) {
       btn.textContent = '✓ Saved';
+      // Remove any rename row that may be present
+      const existing = btn.parentElement && btn.parentElement.querySelector('.lib-rename-row');
+      if (existing) existing.remove();
       const span = document.createElement('span');
       span.style.cssText = 'font-size:11px;color:var(--text-secondary);margin-left:8px';
       span.textContent = data.saved_to;
       btn.after(span);
+    } else if (data.exists) {
+      btn.textContent = origText;
+      btn.disabled = false;
+      // Remove any stale rename row first
+      const stale = btn.parentElement && btn.parentElement.querySelector('.lib-rename-row');
+      if (stale) stale.remove();
+      // Inline rename form
+      const row = document.createElement('div');
+      row.className = 'dl-rename-row lib-rename-row';
+      row.style.marginTop = '6px';
+      row.innerHTML =
+        '<span style="font-size:11px;color:var(--sand-500)">File exists. Save as:</span>' +
+        '<input type="text" value="' + escapeHtml(data.suggested_name) + '">.gb' +
+        '<button class="dl-rename-confirm">Save</button>' +
+        '<button class="dl-rename-cancel">Cancel</button>';
+      btn.after(row);
+      const inp = row.querySelector('input');
+      inp.focus(); inp.select();
+      row.querySelector('.dl-rename-confirm').addEventListener('click', function() {
+        row.remove();
+        saveToLocalLibrary(constructId, btn, inp.value.trim() || data.suggested_name, true);
+      });
+      inp.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          row.remove();
+          saveToLocalLibrary(constructId, btn, inp.value.trim() || data.suggested_name, true);
+        }
+        if (e.key === 'Escape') row.remove();
+      });
+      row.querySelector('.dl-rename-cancel').addEventListener('click', function() { row.remove(); });
     } else {
       btn.textContent = 'Save failed: ' + (data.error || 'unknown error');
       btn.disabled = false;
@@ -4140,10 +4249,12 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 self._send_json([], 404)
 
         elif path == "/api/user-library":
+            from src.user_library import load_user_designed_constructs
             all_bb = load_backbones()["backbones"]
             bb = [b for b in all_bb if b.get("source") == "user_library"]
             vendor_bb = [b for b in all_bb if b.get("source") == "vendor"]
             ins = [i for i in load_inserts()["inserts"] if i.get("source") == "user_library"]
+            designed = load_user_designed_constructs()
             self._send_json({
                 "configured": bool(os.environ.get("PLASMID_USER_LIBRARY")),
                 "vendor_backbones": [
@@ -4189,6 +4300,15 @@ class AgentHandler(SimpleHTTPRequestHandler):
                         "bacterial_resistance": i.get("bacterial_resistance"),
                     }.items() if v is not None}
                     for i in ins
+                ],
+                "designed_constructs": [
+                    {k: v for k, v in {
+                        "id": c["id"],
+                        "name": c.get("name"),
+                        "size_bp": c.get("size_bp"),
+                        "description": c.get("description"),
+                    }.items() if v is not None}
+                    for c in designed
                 ],
             })
 
@@ -4674,14 +4794,22 @@ class AgentHandler(SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(content_length)) if content_length else {}
             name = body.get("name", "construct")
             content = body.get("content", "")
+            overwrite = bool(body.get("overwrite", False))
             if not content:
                 self._send_json({"error": "No content provided"}, 400)
                 return
             import re as _re_ll
-            constructs_dir = Path(user_lib_dir).expanduser() / "constructs"
+            constructs_dir = Path(user_lib_dir).expanduser() / "designed_constructs"
             constructs_dir.mkdir(exist_ok=True)
             safe_name = _re_ll.sub(r'[^\w\-. ]', '_', name).strip().replace(' ', '_')
             out_path = constructs_dir / f"{safe_name}.gb"
+            if out_path.exists() and not overwrite:
+                # Find the next free numbered suffix
+                n = 1
+                while (constructs_dir / f"{safe_name}_{n}.gb").exists():
+                    n += 1
+                self._send_json({"exists": True, "suggested_name": f"{safe_name}_{n}"})
+                return
             out_path.write_text(content)
             self._send_json({"saved_to": str(out_path)})
 
@@ -4700,11 +4828,21 @@ class AgentHandler(SimpleHTTPRequestHandler):
             if result is None:
                 self.send_error(404)
                 return
-            name, content = result
-            constructs_dir = Path(user_lib_dir).expanduser() / "constructs"
+            db_name, content = result
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            name = body.get("name") or db_name
+            overwrite = bool(body.get("overwrite", False))
+            constructs_dir = Path(user_lib_dir).expanduser() / "designed_constructs"
             constructs_dir.mkdir(exist_ok=True)
             safe_name = _re2.sub(r'[^\w\-. ]', '_', name).strip().replace(' ', '_')
             out_path = constructs_dir / f"{safe_name}.gb"
+            if out_path.exists() and not overwrite:
+                n = 1
+                while (constructs_dir / f"{safe_name}_{n}.gb").exists():
+                    n += 1
+                self._send_json({"exists": True, "suggested_name": f"{safe_name}_{n}"})
+                return
             out_path.write_text(content)
             _db_update_construct(DB_PATH, construct_id, {"local_path": str(out_path)})
             self._send_json({"saved_to": str(out_path)})

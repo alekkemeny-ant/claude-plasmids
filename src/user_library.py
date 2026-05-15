@@ -334,3 +334,24 @@ def load_user_backbones() -> list[dict[str, Any]]:
 def load_user_inserts() -> list[dict[str, Any]]:
     """Load all user inserts from $PLASMID_USER_LIBRARY/inserts/."""
     return _scan_subdir("inserts")
+
+
+def load_user_designed_constructs() -> list[dict[str, Any]]:
+    """Load all designed constructs from $PLASMID_USER_LIBRARY/designed_constructs/."""
+    root = _user_library_dir()
+    if not root:
+        return []
+    subdir = root / "designed_constructs"
+    if not subdir.is_dir():
+        return []
+    entries: list[dict[str, Any]] = []
+    for path in sorted(subdir.iterdir()):
+        if path.suffix.lower() not in GENBANK_EXTENSIONS:
+            continue
+        entry = _parse_file_to_entry(path, is_insert=False)
+        if entry:
+            entry["source"] = "designed_construct"
+            entries.append(entry)
+    if entries:
+        logger.info(f"Loaded {len(entries)} designed constructs from {subdir}")
+    return entries

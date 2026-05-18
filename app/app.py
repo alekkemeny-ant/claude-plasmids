@@ -783,8 +783,12 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                 "content": assistant_text,
                 "blocks": assistant_blocks,
             })
-        elif is_cancelled():
-            # Remove dangling user message if the run was explicitly cancelled
+        else:
+            # Remove dangling user message — covers both explicit cancel and error cases.
+            # When a turn produces no response (cancelled or API error), the user message
+            # appended at turn-start has no matching assistant response in history. Leaving
+            # it causes the next follow-up to produce two consecutive user messages, which
+            # triggers a 400 on the next API call and silently swallows that turn too.
             if history and history[-1]["role"] == "user" and isinstance(history[-1].get("content"), str):
                 history.pop()
                 if session["display_messages"] and session["display_messages"][-1]["role"] == "user":
@@ -793,6 +797,15 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         _save_sessions()
 
         if not disconnected:
+            # If an exception is propagating (e.g. re-raised BadRequestError from a
+            # consecutive-user-message 400), emit an error event before done so the
+            # client shows feedback instead of a silent empty turn.
+            exc = sys.exc_info()[1]
+            if exc is not None and not is_cancelled():
+                try:
+                    write_event({"type": "error", "content": f"Request failed: {exc}"})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
             try:
                 write_event({"type": "done"})
             except (BrokenPipeError, ConnectionResetError):
@@ -3957,7 +3970,7 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
           '<button class="dl-chevron-btn" data-role="dl-chevron" aria-label="More save options">' +
             '<svg width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>' +
           '</button>' +
-          '<div class="dl-menu" style="display:none">' +
+          '<div class="dl-menu">' +
             '<button class="dl-menu-item" data-role="dl-computer">' + _SVG_DL + ' Download to computer</button>' +
             '<button class="dl-menu-item" data-role="dl-choosepath">' + _SVG_CHOOSE + ' Save to…</button>' +
             localLibItem +
@@ -3981,17 +3994,28 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
   const menu = outer.querySelector('.dl-menu');
   chevronBtn.addEventListener('click', function(e) {
     e.stopPropagation();
-    menu.style.display = menu.style.display === 'none' ? '' : 'none';
+    var isOpen = menu.classList.toggle('open');
+    if (isOpen) {
+      document.querySelectorAll('.dl-menu.open').forEach(function(m) {
+        if (m !== menu) m.classList.remove('open');
+      });
+      function closeMenu(e) {
+        if (!menu.contains(e.target)) {
+          menu.classList.remove('open');
+          document.removeEventListener('click', closeMenu, true);
+        }
+      }
+      document.addEventListener('click', closeMenu, true);
+    }
   });
-  document.addEventListener('click', function() { menu.style.display = 'none'; });
 
   outer.querySelector('[data-role="dl-computer"]').addEventListener('click', function() {
-    menu.style.display = 'none';
+    menu.classList.remove('open');
     _triggerDownload(genbankContent, filename);
   });
 
   outer.querySelector('[data-role="dl-choosepath"]').addEventListener('click', async function() {
-    menu.style.display = 'none';
+    menu.classList.remove('open');
     if (window.showSaveFilePicker) {
       try {
         const handle = await window.showSaveFilePicker({
@@ -4054,7 +4078,7 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
       } catch(e) { dlBtn.innerHTML = origHtml; dlBtn.disabled = false; }
     }
     libItem.addEventListener('click', function() {
-      menu.style.display = 'none';
+      menu.classList.remove('open');
       _saveToLib(toolInput.construct_name || 'construct', false);
     });
   }

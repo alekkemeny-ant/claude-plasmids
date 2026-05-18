@@ -125,9 +125,24 @@ _cancelled_sessions: set[str] = set()
 _active_turns: set[str] = set()   # sessions with a turn currently in flight
 _sessions_lock = threading.Lock()
 
+# Live event log for reconnect streaming: session_id → (event_list, Condition)
+_session_live_streams: dict = {}
+_session_live_streams_lock = threading.Lock()
+
 # ── Batch job state ─────────────────────────────────────────────────────
 _batch_jobs: dict[str, dict] = {}
+_batch_pause_events: dict[str, threading.Event] = {}
+
+def _get_pause_event(job_id: str, row_idx: int) -> threading.Event:
+    key = f"{job_id}:{row_idx}"
+    if key not in _batch_pause_events:
+        ev = threading.Event()
+        ev.set()  # starts unpaused (set = allowed to run)
+        _batch_pause_events[key] = ev
+    return _batch_pause_events[key]
 SESSIONS_FILE = Path(__file__).parent / ".sessions.json"
+BATCH_JOBS_FILE = Path(__file__).parent / ".batch_jobs.json"
+_batch_jobs_lock = threading.Lock()
 
 MODEL = "claude-opus-4-7"
 
@@ -211,6 +226,11 @@ def _save_sessions():
                     # to empty for sessions created before these were added.
                     "project_name": data.get("project_name"),
                     "experimental_outcomes": data.get("experimental_outcomes", []),
+                    # Batch session fields (None for regular chats)
+                    "batch_job_id": data.get("batch_job_id"),
+                    "batch_filename": data.get("batch_filename"),
+                    "batch_model": data.get("batch_model"),
+                    "batch_row_count": data.get("batch_row_count"),
                 }
                 try:
                     s = {"display_messages": data.get("display_messages", []), **base_fields}
@@ -264,6 +284,75 @@ def _load_sessions():
 
 # Load persisted sessions at import time
 _load_sessions()
+
+
+def _save_batch_jobs():
+    """Persist completed batch job data to disk so it survives server restarts."""
+    import shutil as _shutil
+    with _batch_jobs_lock:
+        try:
+            serializable = {}
+            for job_id, job in _batch_jobs.items():
+                rows = []
+                for row in job.get("rows", []):
+                    rows.append({
+                        "description": row.get("description", ""),
+                        "name": row.get("name", ""),
+                        "output_format": row.get("output_format", "genbank"),
+                        "status": row.get("status", "pending"),
+                        "paused": False,
+                        "exports": [
+                            {"filename": e.get("filename", ""), "content": e.get("content", ""),
+                             "plot_json": e.get("plot_json")}
+                            for e in row.get("exports", [])
+                        ],
+                        "error": row.get("error"),
+                        "log": row.get("log", []),
+                    })
+                serializable[job_id] = {
+                    "status": job.get("status", "done"),
+                    "model": job.get("model", ""),
+                    "rows": rows,
+                }
+            tmp = BATCH_JOBS_FILE.with_suffix(".json.tmp")
+            with open(tmp, "w") as f:
+                json.dump(serializable, f)
+            if BATCH_JOBS_FILE.exists():
+                bak = BATCH_JOBS_FILE.with_suffix(".json.bak")
+                try:
+                    _shutil.copy2(str(BATCH_JOBS_FILE), str(bak))
+                except OSError:
+                    pass
+            os.replace(str(tmp), str(BATCH_JOBS_FILE))
+        except Exception as e:
+            logger.debug(f"Failed to save batch jobs: {e}")
+
+
+def _load_batch_jobs():
+    """Load batch jobs from disk on startup, marking any mid-run rows as interrupted."""
+    global _batch_jobs
+    for filepath in [BATCH_JOBS_FILE, BATCH_JOBS_FILE.with_suffix(".json.bak")]:
+        try:
+            if filepath.exists():
+                with open(filepath) as f:
+                    data = json.load(f)
+                # Fix up any rows that were still running when the server stopped
+                for job in data.values():
+                    for row in job.get("rows", []):
+                        if row.get("status") in ("running", "pending"):
+                            row["status"] = "error"
+                            row["error"] = "Interrupted: server was restarted."
+                    # Mark the whole job done so it doesn't appear stuck
+                    job["status"] = "done"
+                _batch_jobs = data
+                if _batch_jobs:
+                    return
+        except Exception as e:
+            logger.debug(f"Failed to load batch jobs from {filepath}: {e}")
+    _batch_jobs = {}
+
+
+_load_batch_jobs()
 
 # ── Database ─────────────────────────────────────────────────────────────────
 DB_PATH = Path(__file__).parent / "constructs.db"
@@ -336,6 +425,7 @@ def list_sessions() -> list[dict]:
             "created_at": data["created_at"],
             "project_name": data.get("project_name"),
             "outcomes_count": len(data.get("experimental_outcomes") or []),
+            "batch_job_id": data.get("batch_job_id"),
         })
     return result
 
@@ -385,19 +475,28 @@ def _emit_tool_result(
             "timestamp": time.time(),
         })
         _save_sessions()
-    display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
-    event_data = {
-        "type": "tool_result",
-        "tool": tool_name,
-        "input": tool_input,
-        "content": display_result,
-    }
     if tool_name == "export_construct":
-        event_data["download_content"] = result_str
         fmt = tool_input.get("output_format", "raw")
         cname = tool_input.get("construct_name", "construct")
         ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
-        event_data["download_filename"] = cname + ext
+        filename = cname + ext
+        display_result = f"Exported: {filename}"
+        event_data = {
+            "type": "tool_result",
+            "tool": tool_name,
+            "input": tool_input,
+            "content": display_result,
+            "download_content": result_str,
+            "download_filename": filename,
+        }
+    else:
+        display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
+        event_data = {
+            "type": "tool_result",
+            "tool": tool_name,
+            "input": tool_input,
+            "content": display_result,
+        }
     safe_write(event_data)
     plot = get_last_plot_json()
     if tool_name == "export_construct" and plot:
@@ -438,6 +537,19 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         return
     _active_turns.add(session_id)
 
+    # Per-turn live event log so clients can reconnect and replay the stream
+    _live_log: list = []
+    _live_cond = threading.Condition()
+    with _session_live_streams_lock:
+        _session_live_streams[session_id] = (_live_log, _live_cond)
+
+    _orig_write_event = write_event
+    def write_event(data):  # type: ignore[assignment]
+        _orig_write_event(data)
+        with _live_cond:
+            _live_log.append(data)
+            _live_cond.notify_all()
+
     tracker = ReferenceTracker()
     set_tracker(tracker)
     clear_last_plot_json()
@@ -474,7 +586,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
 
     try:
         for _ in range(max_iterations):
-            if is_cancelled() or disconnected:
+            if is_cancelled():
                 break
 
             stop_reason = None
@@ -507,7 +619,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                         thinking=thinking_config,
                     ) as stream:
                         for event in stream:
-                            if is_cancelled() or disconnected:
+                            if is_cancelled():
                                 stream.close()
                                 break
 
@@ -552,7 +664,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                                     assistant_blocks.append({"type": "text", "content": current_text_content})
                                     safe_write({"type": "text_end"})
                                 elif current_block_type == "tool_use":
-                                    if is_cancelled() or disconnected:
+                                    if is_cancelled():
                                         break
                                     tool_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
                                     result_str = _dispatch_tool(current_tool_name, tool_input)
@@ -573,7 +685,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                             elif event.type == "message_delta":
                                 stop_reason = event.delta.stop_reason
 
-                        if is_cancelled() or disconnected:
+                        if is_cancelled():
                             break
 
                         final_message = stream.get_final_message()
@@ -595,11 +707,11 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                     safe_write({"type": "error", "content": f"{type(e).__name__} after retries. Please try again."})
                     break
                 except Exception:
-                    if is_cancelled() or disconnected:
+                    if is_cancelled():
                         break
                     raise
 
-            if is_cancelled() or disconnected or final_message is None:
+            if is_cancelled() or final_message is None:
                 break
 
             # Convert content blocks to plain dicts to strip extra SDK fields
@@ -637,54 +749,64 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             if stop_reason == "end_turn":
                 break
     finally:
-        _active_turns.discard(session_id)
+        # All post-loop work is here so it runs whether the loop exited normally
+        # or via an exception, and _active_turns.discard happens last — after the
+        # session is saved — so the polling indicator sees a consistent state.
+
+        # Flush any in-progress block that was interrupted mid-stream
+        if current_text_content and not any(
+            b.get("type") == "text" and b.get("content") == current_text_content
+            for b in assistant_blocks
+        ):
+            assistant_blocks.append({"type": "text", "content": current_text_content})
+        if current_thinking_text and not any(
+            b.get("type") == "thinking" and b.get("content") == current_thinking_text
+            for b in assistant_blocks
+        ):
+            assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
+
+        # Append formatted references only when a sequence file was exported this turn
+        if export_called and not is_cancelled():
+            refs_text = tracker.format_references()
+            if refs_text:
+                ref_block = f"\n\n{refs_text}"
+                assistant_text += ref_block
+                assistant_blocks.append({"type": "text", "content": ref_block})
+                safe_write({"type": "text_start"})
+                safe_write({"type": "text_delta", "content": ref_block})
+                safe_write({"type": "text_end"})
+            session["last_export_references"] = tracker.to_list()
+
+        if assistant_text or assistant_blocks:
+            session["display_messages"].append({
+                "role": "assistant",
+                "content": assistant_text,
+                "blocks": assistant_blocks,
+            })
+        elif is_cancelled():
+            # Remove dangling user message if the run was explicitly cancelled
+            if history and history[-1]["role"] == "user" and isinstance(history[-1].get("content"), str):
+                history.pop()
+                if session["display_messages"] and session["display_messages"][-1]["role"] == "user":
+                    session["display_messages"].pop()
+
+        _save_sessions()
+
+        if not disconnected:
+            try:
+                write_event({"type": "done"})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
         set_tracker(None)
+        _active_turns.discard(session_id)  # Last: poll / status endpoint now sees saved state
 
-    # Flush any in-progress block that was interrupted mid-stream
-    if current_text_content and not any(
-        b.get("type") == "text" and b.get("content") == current_text_content
-        for b in assistant_blocks
-    ):
-        assistant_blocks.append({"type": "text", "content": current_text_content})
-    if current_thinking_text and not any(
-        b.get("type") == "thinking" and b.get("content") == current_thinking_text
-        for b in assistant_blocks
-    ):
-        assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
-
-    # Append formatted references only when a sequence file was exported this turn
-    if export_called and not (is_cancelled() or disconnected):
-        refs_text = tracker.format_references()
-        if refs_text:
-            ref_block = f"\n\n{refs_text}"
-            assistant_text += ref_block
-            assistant_blocks.append({"type": "text", "content": ref_block})
-            safe_write({"type": "text_start"})
-            safe_write({"type": "text_delta", "content": ref_block})
-            safe_write({"type": "text_end"})
-        # Persist structured references so the save handler can use them
-        session["last_export_references"] = tracker.to_list()
-
-    if assistant_text or assistant_blocks:
-        session["display_messages"].append({
-            "role": "assistant",
-            "content": assistant_text,
-            "blocks": assistant_blocks,
-        })
-    elif is_cancelled() or disconnected:
-        # Remove dangling user message if no response was generated
-        if history and history[-1]["role"] == "user" and isinstance(history[-1].get("content"), str):
-            history.pop()
-            if session["display_messages"] and session["display_messages"][-1]["role"] == "user":
-                session["display_messages"].pop()
-
-    _save_sessions()
-
-    if not disconnected:
-        try:
-            write_event({"type": "done"})
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        # Signal the sentinel so reconnect-stream consumers know we're done
+        with _live_cond:
+            _live_log.append(None)
+            _live_cond.notify_all()
+        with _session_live_streams_lock:
+            _session_live_streams.pop(session_id, None)
 
 
 # ── HTML UI ─────────────────────────────────────────────────────────────
@@ -1163,20 +1285,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .download-btn:hover { background: var(--brand-aqua-20); border-color: var(--brand-aqua); }
   .download-btn svg { flex-shrink: 0; }
   /* ── Download split button ── */
-  .dl-split-wrap { position: relative; display: inline-flex; }
+  .dl-split-wrap { position: relative; display: inline-flex; align-items: stretch; }
   .dl-split-wrap .download-btn { border-radius: 8px 0 0 8px; border-right: none; }
   .dl-chevron-btn {
     display: inline-flex; align-items: center; justify-content: center; padding: 0 9px;
     border: 1px solid var(--brand-aqua-20); border-left: 1px solid var(--brand-aqua-30, rgba(62,169,159,0.3));
     background: var(--brand-aqua-10); border-radius: 0 8px 8px 0;
-    color: var(--brand-aqua-dark); cursor: pointer; transition: all 0.15s;
+    color: var(--brand-aqua-dark); cursor: pointer; transition: all 0.15s; font-family: inherit;
   }
   .dl-chevron-btn:hover { background: var(--brand-aqua-20); border-color: var(--brand-aqua); }
   .dl-menu {
-    position: absolute; top: calc(100% + 4px); left: 0; z-index: 300;
+    display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 300;
     background: #FAFAF8; border: 1px solid var(--sand-200); border-radius: 8px;
     padding: 4px; min-width: 200px; box-shadow: 0 4px 14px rgba(0,0,0,0.10);
   }
+  .dl-menu.open { display: block; }
   .dl-menu-item {
     display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
     padding: 7px 10px; border: none; background: none; cursor: pointer;
@@ -1200,6 +1323,47 @@ HTML_PAGE = r"""<!DOCTYPE html>
     font-family: inherit; cursor: pointer; border: 1px solid var(--sand-200);
     background: none; color: var(--sand-600); }
   .dl-rename-cancel:hover { background: var(--sand-100); }
+  /* ── Batch confirmation card ── */
+  .batch-confirm-card {
+    background: white; border: 1px solid var(--sand-200); border-radius: 10px;
+    padding: 16px 20px; max-width: 480px;
+  }
+  .batch-confirm-rows {
+    max-height: 180px; overflow-y: auto; border: 1px solid var(--sand-200);
+    border-radius: 6px; margin-bottom: 12px;
+  }
+  .batch-confirm-row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border-bottom: 1px solid var(--sand-100); cursor: pointer; transition: background 0.1s;
+  }
+  .batch-confirm-row:last-child { border-bottom: none; }
+  .batch-confirm-row:hover { background: var(--sand-50); }
+  .batch-confirm-row input[type=checkbox] { flex-shrink: 0; accent-color: var(--brand-fig); cursor: pointer; }
+  .batch-confirm-row-num { font-size: 11px; color: var(--sand-400); flex-shrink: 0; width: 20px; text-align: right; }
+  .batch-confirm-row-desc { font-size: 12px; color: var(--sand-700); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .batch-confirm-row-name { font-size: 11px; color: var(--sand-400); flex-shrink: 0; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .batch-confirm-select-all {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    background: var(--sand-50); border: 1px solid var(--sand-200); border-radius: 6px;
+    margin-bottom: 6px; font-size: 12px; color: var(--sand-600); cursor: pointer;
+  }
+  .batch-confirm-select-all input[type=checkbox] { accent-color: var(--brand-fig); cursor: pointer; }
+  .batch-advisory {
+    background: var(--brand-orange-100, #fff4ee); border: 1px solid rgba(232,98,53,0.18);
+    border-radius: 7px; padding: 10px 13px; margin-bottom: 12px; font-size: 12px;
+    color: var(--sand-700); line-height: 1.55;
+  }
+  .batch-advisory strong { color: var(--sand-800); }
+  .batch-advisory ul { margin: 6px 0 0 0; padding-left: 16px; }
+  .batch-advisory ul li { margin-bottom: 4px; }
+  /* ── Per-row pause/resume button ── */
+  .batch-row-pause-btn {
+    flex-shrink: 0; width: 22px; height: 22px; border-radius: 6px; border: none;
+    background: transparent; color: var(--sand-400); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.12s, color 0.12s; margin-top: 1px;
+  }
+  .batch-row-pause-btn:hover { background: var(--sand-100); color: var(--sand-700); }
 
   /* ── Error ── */
   .error-banner {
@@ -1752,8 +1916,11 @@ function renderSessions() {
   sessionsListEl.innerHTML = sessions.map(function(s) {
     const active = s.session_id === currentSessionId ? ' active' : '';
     const name = escapeHtml((s.first_message || 'New conversation').slice(0, 40));
+    const batchIcon = s.batch_job_id
+      ? '<svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="flex-shrink:0;opacity:0.6"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>'
+      : '';
     return '<div class="session-item' + active + '" onclick="selectSession(\'' + s.session_id + '\')">' +
-      '<span class="session-name">' + name + '</span>' +
+      '<span class="session-name" style="display:flex;align-items:center;gap:5px;">' + batchIcon + name + '</span>' +
       '<button class="delete-btn" onclick="event.stopPropagation(); deleteSessionById(\'' + s.session_id + '\')" title="Delete">' +
         '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">' +
           '<path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>' +
@@ -1764,9 +1931,9 @@ function renderSessions() {
 }
 
 async function selectSession(sessionId) {
-  // If streaming, stop the current generation before switching
+  // If streaming, detach from the SSE connection but let the backend keep running
   if (isStreaming) {
-    stopGeneration();
+    _detachStream();
     // Reset streaming UI state
     isStreaming = false;
     abortController = null;
@@ -1775,6 +1942,12 @@ async function selectSession(sessionId) {
     sendBtn.style.display = 'flex';
     stopBtn.style.display = 'none';
     inputEl.disabled = false;
+  }
+
+  // Pause DOM-update polling for the session we're leaving (batch keeps running backend)
+  if (currentSessionId && _batchPollTimers[currentSessionId]) {
+    clearInterval(_batchPollTimers[currentSessionId]);
+    delete _batchPollTimers[currentSessionId];
   }
 
   saveSessionId(sessionId);
@@ -1786,9 +1959,121 @@ async function selectSession(sessionId) {
     // Guard: if user switched to another session while fetch was in flight, discard
     if (currentSessionId !== sessionId) return;
     renderStoredMessages(msgs);
+    // If the agent is still running in the background, reconnect to the live
+    // stream so the user sees the response streaming in real time.
+    _reconnectToStream(sessionId);
   } catch {
     // Don't clear messages on fetch failure (e.g., during server reload)
     // — leave the current display intact rather than showing empty state
+  }
+}
+
+async function _reconnectToStream(sessionId) {
+  if (isStreaming) return;
+
+  // Try to open the live replay stream. Returns 404 if the run already ended.
+  abortController = new AbortController();
+  let resp;
+  try {
+    resp = await fetch('/api/sessions/' + sessionId + '/stream', { signal: abortController.signal });
+  } catch (err) {
+    abortController = null;
+    if (err.name !== 'AbortError') {
+      // Network error — fall back to a one-shot message reload
+      try {
+        const msgs = await fetch('/api/sessions/' + sessionId + '/messages').then(function(r) { return r.json(); });
+        if (currentSessionId === sessionId) renderStoredMessages(msgs);
+      } catch {}
+    }
+    return;
+  }
+
+  if (!resp.ok) {
+    abortController = null;
+    // Run already finished — just reload stored messages
+    try {
+      const msgs = await fetch('/api/sessions/' + sessionId + '/messages').then(function(r) { return r.json(); });
+      if (currentSessionId === sessionId) renderStoredMessages(msgs);
+    } catch {}
+    return;
+  }
+
+  // Run is in progress — set up streaming UI and replay/continue the event stream
+  isStreaming = true;
+  streamingSessionId = sessionId;
+  streamingInner = messagesEl.querySelector('.messages-inner');
+  if (!streamingInner) {
+    streamingInner = document.createElement('div');
+    streamingInner.className = 'messages-inner';
+    messagesEl.innerHTML = '';
+    messagesEl.appendChild(streamingInner);
+  }
+  sendBtn.style.display = 'none';
+  stopBtn.style.display = 'flex';
+  inputEl.disabled = true;
+  showPendingCursor();
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      let streamDone = false;
+      for (const part of parts) {
+        const trimmed = part.trim();
+        if (!trimmed.startsWith('data: ')) continue;
+        const jsonStr = trimmed.slice(6);
+        if (!jsonStr) continue;
+        let event;
+        try { event = JSON.parse(jsonStr); } catch { continue; }
+        switch (event.type) {
+          case 'thinking_start': clearPendingCursor(); startThinkingBlock(); break;
+          case 'thinking_delta': appendThinkingDelta(event.content); break;
+          case 'thinking_end': endThinkingBlock(); break;
+          case 'text_start': clearPendingCursor(); flushTextBuffer(); startTextBlock(); break;
+          case 'text_delta': bufferTextDelta(event.content); break;
+          case 'text_end': endTextBlock(); break;
+          case 'tool_use_start': clearPendingCursor(); startToolBlock(event.tool); break;
+          case 'tool_result': finishToolBlock(event.tool, event.input || {}, event.content, event.download_content, event.download_filename); break;
+          case 'plot_data': addPlasmidPlot(event.plot_json); break;
+          case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
+          case 'error': clearPendingCursor(); startTextBlock(); appendTextDelta('Error: ' + event.content); endTextBlock(); break;
+          case 'done': streamDone = true; break;
+        }
+        if (streamDone) break;
+      }
+      if (streamDone) break;
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      clearPendingCursor(); startTextBlock(); appendTextDelta('Connection error: ' + err.message); endTextBlock();
+    }
+  }
+
+  clearPendingCursor();
+  isStreaming = false;
+  abortController = null;
+  streamingInner = null;
+  streamingSessionId = null;
+  sendBtn.style.display = 'flex';
+  stopBtn.style.display = 'none';
+  inputEl.disabled = false;
+  const cursor = messagesEl.querySelector('.streaming-cursor');
+  if (cursor) cursor.remove();
+  loadUserLibrary();
+
+  // Reload stored messages so the view is stable (not dependent on DOM built during streaming)
+  if (currentSessionId === sessionId) {
+    try {
+      const msgs = await fetch('/api/sessions/' + sessionId + '/messages').then(function(r) { return r.json(); });
+      if (currentSessionId === sessionId) renderStoredMessages(msgs);
+    } catch {}
   }
 }
 
@@ -1850,6 +2135,10 @@ function renderStoredMessages(msgs) {
     showWelcome();
     return;
   }
+  if (msgs.length === 1 && msgs[0].type === 'batch_session') {
+    restoreBatchSession(msgs[0]);
+    return;
+  }
   hideWelcome();
   const inner = document.createElement('div');
   inner.className = 'messages-inner';
@@ -1875,6 +2164,70 @@ function renderStoredMessages(msgs) {
   scrollToBottom();
 }
 
+async function restoreBatchSession(meta) {
+  var jobId = meta.batch_job_id;
+  var filename = meta.batch_filename || '';
+  var model = meta.batch_model || '';
+  var rowCount = meta.batch_row_count || 0;
+  var sessionId = currentSessionId;
+
+  // Clear stale content and set up a fresh container
+  messagesEl.innerHTML = '';
+
+  try {
+    const r = await fetch('/api/batch/' + jobId);
+    const data = await r.json();
+    if (currentSessionId !== sessionId) return;
+    if (data.error) {
+      messagesEl.innerHTML = '<div class="messages-inner"><div class="msg assistant"><div class="msg-bubble-assistant" style="color:var(--sand-400);font-size:13px;">Could not load batch results.</div></div></div>';
+      return;
+    }
+
+    // Render the batch label + placeholder cards, then immediately update with real state
+    initBatchCards(jobId, rowCount, filename, model);
+    updateBatchCards(jobId, data.rows);
+
+    var anyRunning = data.rows && data.rows.some(function(r) {
+      return r.status === 'running' || r.status === 'pending';
+    });
+
+    _batchSessions[sessionId] = jobId;
+
+    if (data.status !== 'done' || anyRunning) {
+      // Batch is still in progress — resume polling
+      if (_batchPollTimers[sessionId]) clearInterval(_batchPollTimers[sessionId]);
+      _batchPollTimers[sessionId] = setInterval(function() { pollBatchForSession(sessionId); }, 2000);
+    } else {
+      // Batch finished — show the download-all button if not already there
+      var ctrlEl = document.getElementById('batch-ctrl-' + jobId);
+      if (ctrlEl) ctrlEl.style.display = 'none';
+      var labelEl = document.getElementById('batch-label-' + jobId);
+      if (labelEl && !labelEl.querySelector('.batch-dl-all-btn')) {
+        var bubble = labelEl.querySelector('.msg-bubble-assistant');
+        if (bubble) {
+          var wrap = document.createElement('div');
+          wrap.className = 'dl-split-wrap batch-dl-all-btn';
+          wrap.style.cssText = 'margin-top:10px;';
+          var allMenuId = 'dlmenu-all-' + jobId;
+          wrap.innerHTML =
+            '<button class="download-btn" onclick="downloadAllBatch(\'' + jobId + '\')">' + _DL_SVG + ' Download All (.zip)</button>' +
+            '<button class="dl-chevron-btn" onclick="toggleDlMenu(event,\'' + allMenuId + '\')" title="More options">' + _CHEV_DOWN_SVG + '</button>' +
+            '<div class="dl-menu" id="' + allMenuId + '">' +
+              '<button class="dl-menu-item" onclick="downloadAllBatch(\'' + jobId + '\')">' + _DL_SVG + ' Download All (.zip)</button>' +
+              (_userLibraryAvailable ? '<button class="dl-menu-item" id="savall-local-' + jobId + '" onclick="event.stopPropagation();saveAllBatchToLocal(\'' + jobId + '\',document.getElementById(\'savall-local-' + jobId + '\'))">' +
+                '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M3 15v4c0 1.1.9 2 2 2h14a2 2 0 002-2v-4M17 8l-5-5-5 5M12 3v12"/></svg> Save All to Local Library</button>' : '') +
+              '<button class="dl-menu-item" id="savall-con-' + jobId + '" onclick="event.stopPropagation();saveAllBatchConstructs(\'' + jobId + '\',document.getElementById(\'savall-con-' + jobId + '\'))">' + _SAVE_SVG + ' Save All Constructs</button>' +
+            '</div>';
+          bubble.appendChild(document.createElement('br'));
+          bubble.appendChild(wrap);
+        }
+      }
+    }
+  } catch(e) {
+    messagesEl.innerHTML = '<div class="messages-inner"><div class="msg assistant"><div class="msg-bubble-assistant" style="color:var(--sand-400);font-size:13px;">Could not reach the server to load batch status.</div></div></div>';
+  }
+}
+
 async function deleteSessionById(sessionId) {
   try {
     await fetch('/api/sessions/' + sessionId, { method: 'DELETE' });
@@ -1888,7 +2241,7 @@ async function deleteSessionById(sessionId) {
 
 function newChat() {
   if (isStreaming) {
-    stopGeneration();
+    _detachStream();
     isStreaming = false;
     abortController = null;
     streamingInner = null;
@@ -1896,6 +2249,11 @@ function newChat() {
     sendBtn.style.display = 'flex';
     stopBtn.style.display = 'none';
     inputEl.disabled = false;
+  }
+  // Pause DOM polling for the session being left
+  if (currentSessionId && _batchPollTimers[currentSessionId]) {
+    clearInterval(_batchPollTimers[currentSessionId]);
+    delete _batchPollTimers[currentSessionId];
   }
   saveSessionId(null);
   renderSessions();
@@ -2763,7 +3121,14 @@ async function sendMessage() {
   loadUserLibrary();
 }
 
+function _detachStream() {
+  // Drop the SSE connection without cancelling the server-side run.
+  // Use this when navigating away — the agent keeps going in the background.
+  if (abortController) abortController.abort();
+}
+
 function stopGeneration() {
+  // Explicitly cancel the run (Stop button). Aborts client AND tells server to stop.
   if (abortController) abortController.abort();
   if (currentSessionId) {
     fetch('/api/sessions/' + currentSessionId + '/cancel', { method: 'POST' }).catch(function(){});
@@ -2783,6 +3148,13 @@ inputEl.addEventListener('keydown', function(e) {
   }
 });
 
+// ── Batch state (must be declared before init so selectSession can reference them) ──
+var _batchSessions = {};    // sessionId → jobId
+var _batchPollTimers = {};  // sessionId → interval timer
+var _batchConfirmData = {};
+const chatPanelEl = document.getElementById('chat-panel');
+const dropOverlayEl = document.getElementById('drop-overlay');
+
 // ── Init ──
 checkHealth();
 setInterval(checkHealth, 5000);
@@ -2795,12 +3167,6 @@ if (currentSessionId) {
   selectSession(currentSessionId);
 }
 inputEl.focus();
-
-// ── Batch ──
-let batchJobId = null;
-let batchPollTimer = null;
-const chatPanelEl = document.getElementById('chat-panel');
-const dropOverlayEl = document.getElementById('drop-overlay');
 
 // ── Drag & drop onto the chat area (CSV batch or plasmid file) ──
 var dragCounter = 0;
@@ -2847,7 +3213,7 @@ chatPanelEl.addEventListener('drop', function(e) {
     reader.onload = function(ev) { uploadPlasmidFile(ev.target.result, file.name); };
     reader.readAsText(file);
   } else if (file.name.endsWith('.csv') || file.type === 'text/csv') {
-    reader.onload = function(ev) { uploadBatchCSV(ev.target.result, file.name); };
+    reader.onload = function(ev) { showBatchConfirm(ev.target.result, file.name); };
     reader.readAsText(file);
   } else {
     alert('Supported file types: .gb, .gbk, .fasta (plasmid library) or .csv (batch design).');
@@ -2858,7 +3224,7 @@ function onBatchFileChosen(input) {
   var file = input.files[0];
   if (!file) return;
   var reader = new FileReader();
-  reader.onload = function(e) { uploadBatchCSV(e.target.result, file.name); };
+  reader.onload = function(e) { showBatchConfirm(e.target.result, file.name); };
   reader.readAsText(file);
   input.value = '';
 }
@@ -2989,35 +3355,216 @@ async function sendPlasmidIntakeMessage(apiMessage, model, filename, sizeBp, fea
   loadUserLibrary();
 }
 
-function uploadBatchCSV(csvText, filename) {
-  var model = modelSelect.value;
+function _splitCSVLine(line) {
+  var result = [], field = '', inQuote = false;
+  for (var i = 0; i < line.length; i++) {
+    var c = line[i];
+    if (c === '"') { inQuote = !inQuote; }
+    else if (c === ',' && !inQuote) { result.push(field.trim()); field = ''; }
+    else { field += c; }
+  }
+  result.push(field.trim());
+  return result;
+}
+
+function _parseCSVRows(csvText) {
+  var rawLines = csvText.split('\n');
+  var headerLine = '';
+  var headerFields = [];
+  for (var i = 0; i < rawLines.length; i++) {
+    if (rawLines[i].trim()) { headerLine = rawLines[i]; headerFields = _splitCSVLine(headerLine); break; }
+  }
+  var descIdx = headerFields.findIndex(function(h) { return h.trim().toLowerCase() === 'description'; });
+  var nameIdx = headerFields.findIndex(function(h) { return h.trim().toLowerCase() === 'name'; });
+  if (descIdx < 0) return {header: headerLine, rows: []};
+  var rows = [];
+  for (var j = i + 1; j < rawLines.length; j++) {
+    var line = rawLines[j];
+    if (!line.trim()) continue;
+    var fields = _splitCSVLine(line);
+    var desc = fields[descIdx] || '';
+    if (!desc.trim()) continue;
+    rows.push({
+      description: desc,
+      name: nameIdx >= 0 ? (fields[nameIdx] || '') : '',
+      originalLine: line,
+    });
+  }
+  return {header: headerLine, rows: rows};
+}
+
+function showBatchConfirm(csvText, filename) {
+  var parsed = _parseCSVRows(csvText);
+  var rows = parsed.rows;
+  var confirmId = 'batch-confirm-' + Date.now();
+  _batchConfirmData[confirmId] = {csvText: csvText, filename: filename, header: parsed.header, rows: rows};
+  hideWelcome();
+  var inner = getInner();
+  var card = document.createElement('div');
+  card.className = 'msg assistant';
+  card.id = confirmId;
+  var curModel = 'claude-sonnet-4-6';
+  var modelOpts = [
+    ['claude-opus-4-7', 'Opus 4.7 — most capable'],
+    ['claude-opus-4-6', 'Opus 4.6'],
+    ['claude-sonnet-4-6', 'Sonnet 4.6 — recommended for bulk assembly'],
+    ['claude-haiku-4-5-20251001', 'Haiku 4.5 — fastest'],
+  ].map(function(o) {
+    return '<option value="' + o[0] + '"' + (curModel === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+  }).join('');
+
+  var rowsHtml = rows.map(function(r, i) {
+    var nameHtml = r.name ? '<span class="batch-confirm-row-name">' + escapeHtml(r.name) + '</span>' : '';
+    return '<label class="batch-confirm-row">' +
+      '<input type="checkbox" id="' + confirmId + '-row-' + i + '" checked onchange="updateBatchConfirmCount(\'' + confirmId + '\')">' +
+      '<span class="batch-confirm-row-num">' + (i + 1) + '</span>' +
+      '<span class="batch-confirm-row-desc">' + escapeHtml(r.description) + '</span>' +
+      nameHtml +
+    '</label>';
+  }).join('');
+
+  card.innerHTML = '<div class="msg-bubble-assistant"><div class="batch-confirm-card">' +
+    '<div style="font-size:14px;font-weight:600;color:var(--sand-800);margin-bottom:10px">' +
+      escapeHtml(filename) +
+    '</div>' +
+    '<div class="batch-advisory">' +
+      '<strong>Before you run a bulk design</strong>' +
+      '<ul>' +
+        '<li><strong>Test first.</strong> Run a few representative prompts as individual chats and confirm they succeed before scaling up. Failures in bulk are harder to debug and still cost tokens.</li>' +
+        '<li><strong>Design by parts works best.</strong> Bulk mode is optimized for assembly-style designs (backbone + insert combinations). Bespoke or highly custom designs often need back-and-forth that bulk mode can\'t do.</li>' +
+        '<li><strong>Use a cheaper model.</strong> Sonnet 4.6 handles most bulk assembly tasks well at a fraction of the cost of Opus. Switch the model below before starting.</li>' +
+      '</ul>' +
+    '</div>' +
+    '<label class="batch-confirm-select-all">' +
+      '<input type="checkbox" id="' + confirmId + '-selectall" checked onchange="toggleBatchSelectAll(\'' + confirmId + '\',' + rows.length + ')">' +
+      '<span>Select All — <span id="' + confirmId + '-selcount">' + rows.length + '</span> of ' + rows.length + ' selected</span>' +
+    '</label>' +
+    '<div class="batch-confirm-rows">' + rowsHtml + '</div>' +
+    '<div style="margin-bottom:14px">' +
+      '<label style="font-size:12px;font-weight:500;color:var(--sand-500);display:block;margin-bottom:5px">Model</label>' +
+      '<select id="' + confirmId + '-model" class="model-select" style="font-size:12px;max-width:100%">' + modelOpts + '</select>' +
+      '<div style="font-size:11px;color:var(--sand-400);margin-top:5px">Tip: Sonnet 4.6 handles bulk assembly by parts well at lower cost than Opus.</div>' +
+    '</div>' +
+    '<div style="display:flex;gap:8px;align-items:center">' +
+      '<button id="' + confirmId + '-startbtn" class="send-btn" style="width:auto;padding:0 18px;height:32px;font-size:13px;border-radius:10px" ' +
+        'onclick="startBatchFromConfirm(\'' + confirmId + '\',' + rows.length + ')">' +
+        'Start <span id="' + confirmId + '-btncount">' + rows.length + '</span> design' + (rows.length === 1 ? '' : 's') +
+      '</button>' +
+      '<button onclick="cancelBatchConfirm(\'' + confirmId + '\')" ' +
+        'style="padding:0 14px;height:32px;font-size:13px;background:transparent;border:1px solid var(--sand-200);border-radius:10px;cursor:pointer;color:var(--sand-600);font-family:inherit">Cancel</button>' +
+    '</div>' +
+  '</div></div>';
+  inner.appendChild(card);
+  scrollToBottom();
+}
+
+function updateBatchConfirmCount(confirmId) {
+  var data = _batchConfirmData[confirmId];
+  if (!data) return;
+  var n = data.rows.length;
+  var checked = 0;
+  for (var i = 0; i < n; i++) {
+    var cb = document.getElementById(confirmId + '-row-' + i);
+    if (cb && cb.checked) checked++;
+  }
+  var selCount = document.getElementById(confirmId + '-selcount');
+  var btnCount = document.getElementById(confirmId + '-btncount');
+  var startBtn = document.getElementById(confirmId + '-startbtn');
+  var selectAll = document.getElementById(confirmId + '-selectall');
+  if (selCount) selCount.textContent = checked;
+  if (btnCount) btnCount.textContent = checked;
+  if (startBtn) startBtn.disabled = checked === 0;
+  if (selectAll) selectAll.indeterminate = (checked > 0 && checked < n);
+  if (selectAll && !selectAll.indeterminate) selectAll.checked = (checked === n);
+}
+
+function toggleBatchSelectAll(confirmId, total) {
+  var selectAllEl = document.getElementById(confirmId + '-selectall');
+  if (!selectAllEl) return;
+  var checked = selectAllEl.checked;
+  for (var i = 0; i < total; i++) {
+    var cb = document.getElementById(confirmId + '-row-' + i);
+    if (cb) cb.checked = checked;
+  }
+  updateBatchConfirmCount(confirmId);
+}
+
+function startBatchFromConfirm(confirmId, total) {
+  var data = _batchConfirmData[confirmId];
+  if (!data) return;
+  delete _batchConfirmData[confirmId];
+  var modelEl = document.getElementById(confirmId + '-model');
+  var model = modelEl ? modelEl.value : modelSelect.value;
+  // Build filtered CSV from checked rows
+  var selectedLines = [];
+  for (var i = 0; i < (data.rows || []).length; i++) {
+    var cb = document.getElementById(confirmId + '-row-' + i);
+    if (cb && cb.checked) selectedLines.push(data.rows[i].originalLine);
+  }
+  var card = document.getElementById(confirmId);
+  if (card) card.remove();
+  if (!selectedLines.length) return;
+  var filteredCSV = data.header + '\n' + selectedLines.join('\n');
+  uploadBatchCSV(filteredCSV, data.filename, model);
+}
+
+function cancelBatchConfirm(confirmId) {
+  delete _batchConfirmData[confirmId];
+  var card = document.getElementById(confirmId);
+  if (card) card.remove();
+}
+
+function uploadBatchCSV(csvText, filename, model) {
+  model = model || modelSelect.value;
   fetch('/api/batch', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({csv_content: csvText, model: model}),
+    body: JSON.stringify({csv_content: csvText, model: model, filename: filename}),
   })
   .then(function(r) { return r.json(); })
   .then(function(data) {
     if (data.error) { alert('Error: ' + data.error); return; }
-    batchJobId = data.job_id;
-    initBatchCards(data.job_id, data.row_count, filename);
-    if (batchPollTimer) clearInterval(batchPollTimer);
-    batchPollTimer = setInterval(pollBatchStatus, 2000);
-    pollBatchStatus();
+    var sid = data.session_id;
+    var jobId = data.job_id;
+    // Switch to the dedicated batch session
+    saveSessionId(sid);
+    loadSessions();
+    // Clear any stale DOM content from the previous session
+    messagesEl.innerHTML = '';
+    // Render batch cards into the new session's container
+    initBatchCards(jobId, data.row_count, filename, model);
+    // Track and start polling per-session
+    _batchSessions[sid] = jobId;
+    if (_batchPollTimers[sid]) clearInterval(_batchPollTimers[sid]);
+    _batchPollTimers[sid] = setInterval(function() { pollBatchForSession(sid); }, 2000);
+    pollBatchForSession(sid);
   })
   .catch(function(e) { alert('Upload failed: ' + e); });
 }
 
-function initBatchCards(jobId, count, filename) {
+var _MODEL_LABELS = {
+  'claude-opus-4-7': 'Opus 4.7',
+  'claude-opus-4-6': 'Opus 4.6',
+  'claude-sonnet-4-6': 'Sonnet 4.6',
+  'claude-haiku-4-5-20251001': 'Haiku 4.5',
+};
+
+function initBatchCards(jobId, count, filename, model) {
   hideWelcome();
   var inner = getInner();
-  // Label
+  var modelLabel = _MODEL_LABELS[model] || model || '';
+  // Label with Pause All / Resume All controls
   var label = document.createElement('div');
   label.className = 'msg assistant';
   label.id = 'batch-label-' + jobId;
   label.innerHTML = '<div class="msg-bubble-assistant" style="color:var(--sand-500);font-size:13px;">' +
-    'Batch designing <strong>' + count + ' plasmid' + (count === 1 ? '' : 's') + '</strong> from <em>' + escapeHtml(filename) + '</em>. ' +
-    'Click any row to expand and see what\u2019s happening, or send a follow-up once it finishes.' +
+    'Batch designing <strong>' + count + ' plasmid' + (count === 1 ? '' : 's') + '</strong> from <em>' + escapeHtml(filename) + '</em>' +
+    (modelLabel ? ' \u00b7 <span style="color:var(--sand-400)">' + escapeHtml(modelLabel) + '</span>' : '') + '. ' +
+    'Click any row to expand and see what\u2019s happening.' +
+    '<div style="display:flex;gap:8px;margin-top:10px;align-items:center" id="batch-ctrl-' + jobId + '">' +
+      '<button class="batch-row-pause-btn" id="batch-pause-all-' + jobId + '" title="Pause all" style="width:auto;padding:0 10px;height:26px;font-size:12px;border-radius:6px;border:1px solid var(--sand-200);gap:5px;color:var(--sand-600)" onclick="pauseAllBatch(\'' + jobId + '\')">' + PAUSE_SVG + ' Pause all</button>' +
+      '<button class="batch-row-pause-btn" id="batch-resume-all-' + jobId + '" title="Resume all" style="width:auto;padding:0 10px;height:26px;font-size:12px;border-radius:6px;border:1px solid var(--sand-200);gap:5px;color:var(--sand-600);display:none" onclick="resumeAllBatch(\'' + jobId + '\')">' + RESUME_SVG + ' Resume all</button>' +
+    '</div>' +
     '</div>';
   inner.appendChild(label);
   // Placeholder cards
@@ -3026,36 +3573,53 @@ function initBatchCards(jobId, count, filename) {
     card.className = 'msg assistant';
     card.id = 'batch-card-' + jobId + '-' + i;
     card.innerHTML = buildBatchCardHtml(jobId, i, {
-      status: 'pending', description: '\u2026', exports: [], error: null, log: []
+      status: 'pending', description: '\u2026', exports: [], error: null, log: [], paused: false
     }, false);
     inner.appendChild(card);
   }
   scrollToBottom();
 }
 
-function pollBatchStatus() {
-  if (!batchJobId) return;
-  fetch('/api/batch/' + batchJobId)
+function pollBatchForSession(sessionId) {
+  var jobId = _batchSessions[sessionId];
+  if (!jobId) return;
+  fetch('/api/batch/' + jobId)
   .then(function(r) { return r.json(); })
   .then(function(data) {
     if (data.error) return;
-    updateBatchCards(batchJobId, data.rows);
+    // Only update the DOM if this session is still active
+    if (currentSessionId === sessionId) {
+      updateBatchCards(jobId, data.rows);
+    }
     var anyRunning = data.rows && data.rows.some(function(r) { return r.status === 'running' || r.status === 'pending'; });
     if (data.status === 'done' && !anyRunning) {
-      clearInterval(batchPollTimer);
-      batchPollTimer = null;
-      // Add Download All button to label message
-      var labelEl = document.getElementById('batch-label-' + batchJobId);
+      clearInterval(_batchPollTimers[sessionId]);
+      delete _batchPollTimers[sessionId];
+      if (currentSessionId !== sessionId) return;
+      // Hide pause controls when batch is fully done
+      var ctrlEl = document.getElementById('batch-ctrl-' + jobId);
+      if (ctrlEl) ctrlEl.style.display = 'none';
+      // Add Download All split button to label message
+      var labelEl = document.getElementById('batch-label-' + jobId);
       if (labelEl && !labelEl.querySelector('.batch-dl-all-btn')) {
         var bubble = labelEl.querySelector('.msg-bubble-assistant');
         if (bubble) {
-          var btn = document.createElement('button');
-          btn.className = 'download-btn batch-dl-all-btn';
-          btn.style.cssText = 'margin-top:8px;display:inline-flex;';
-          btn.innerHTML = '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download All (.zip)';
-          btn.onclick = function() { downloadAllBatch(batchJobId); };
+          var wrap = document.createElement('div');
+          wrap.className = 'dl-split-wrap batch-dl-all-btn';
+          wrap.style.cssText = 'margin-top:10px;';
+          var jid = jobId;
+          var allMenuId = 'dlmenu-all-' + jid;
+          wrap.innerHTML =
+            '<button class="download-btn" onclick="downloadAllBatch(\'' + jid + '\')">' + _DL_SVG + ' Download All (.zip)</button>' +
+            '<button class="dl-chevron-btn" onclick="toggleDlMenu(event,\'' + allMenuId + '\')" title="More options">' + _CHEV_DOWN_SVG + '</button>' +
+            '<div class="dl-menu" id="' + allMenuId + '">' +
+              '<button class="dl-menu-item" onclick="downloadAllBatch(\'' + jid + '\')">' + _DL_SVG + ' Download All (.zip)</button>' +
+              (_userLibraryAvailable ? '<button class="dl-menu-item" id="savall-local-' + jid + '" onclick="event.stopPropagation();saveAllBatchToLocal(\'' + jid + '\',document.getElementById(\'savall-local-' + jid + '\'))">' +
+                '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M3 15v4c0 1.1.9 2 2 2h14a2 2 0 002-2v-4M17 8l-5-5-5 5M12 3v12"/></svg> Save All to Local Library</button>' : '') +
+              '<button class="dl-menu-item" id="savall-con-' + jid + '" onclick="event.stopPropagation();saveAllBatchConstructs(\'' + jid + '\',document.getElementById(\'savall-con-' + jid + '\'))">' + _SAVE_SVG + ' Save All Constructs</button>' +
+            '</div>';
           bubble.appendChild(document.createElement('br'));
-          bubble.appendChild(btn);
+          bubble.appendChild(wrap);
         }
       }
     }
@@ -3069,9 +3633,12 @@ var STATUS_ICONS = {
   done: '<svg width="18" height="18" fill="none" stroke="var(--brand-aqua)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
   no_export: '<svg width="18" height="18" fill="none" stroke="var(--sand-400)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>',
   error: '<svg width="18" height="18" fill="none" stroke="var(--brand-orange)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>',
+  paused: '<svg width="18" height="18" fill="none" stroke="var(--sand-400)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>',
 };
-var STATUS_LABELS = {pending: 'Pending', running: 'Running\u2026', done: 'Done', no_export: 'No export produced', error: 'Error'};
+var STATUS_LABELS = {pending: 'Pending', running: 'Running\u2026', done: 'Done', no_export: 'No export produced', error: 'Error', paused: 'Paused'};
 var CHEV_SVG = '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>';
+var PAUSE_SVG = '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+var RESUME_SVG = '<svg width="12" height="12" fill="currentColor" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
 
 function renderBatchLog(log) {
   if (!log || !log.length) return '<div style="font-size:12px;color:var(--sand-400);padding:4px 0;">No activity yet.</div>';
@@ -3095,15 +3662,56 @@ function renderBatchLog(log) {
   }).join('');
 }
 
+var _DL_SVG = '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+var _CHEV_DOWN_SVG = '<svg width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>';
+var _SAVE_SVG = '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
+
+function toggleDlMenu(event, menuId) {
+  event.stopPropagation();
+  var menu = document.getElementById(menuId);
+  if (!menu) return;
+  var isOpen = menu.classList.toggle('open');
+  if (isOpen) {
+    document.querySelectorAll('.dl-menu.open').forEach(function(m) {
+      if (m.id !== menuId) m.classList.remove('open');
+    });
+    function closeMenu(e) {
+      if (!menu.contains(e.target)) {
+        menu.classList.remove('open');
+        document.removeEventListener('click', closeMenu, true);
+      }
+    }
+    document.addEventListener('click', closeMenu, true);
+  }
+}
+
 function buildDownloadsHtml(jobId, idx, exports) {
   if (!exports || !exports.length) return '';
   var html = '<div class="batch-row-downloads">';
   exports.forEach(function(exp, eidx) {
-    html += '<button class="download-btn" onclick="event.stopPropagation();downloadBatchFile(\'' + jobId + '\',' + idx + ',' + eidx + ',\'' + escapeHtml(exp.filename) + '\')">' +
-      '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
-      escapeHtml(exp.filename) + '</button>';
+    var fname = escapeHtml(exp.filename);
+    var isGbk = /\.(gb|gbk|genbank)$/i.test(exp.filename);
+    var menuId = 'dlmenu-' + jobId + '-' + idx + '-' + eidx;
+    var dlCall = 'event.stopPropagation();downloadBatchFile(\'' + jobId + '\',' + idx + ',' + eidx + ',\'' + fname + '\')';
+    if (isGbk) {
+      // Split button: download primary + chevron dropdown
+      html += '<div class="dl-split-wrap" onclick="event.stopPropagation()">' +
+        '<button class="download-btn" onclick="' + dlCall + '">' + _DL_SVG + ' ' + fname + '</button>' +
+        '<button class="dl-chevron-btn" onclick="toggleDlMenu(event,\'' + menuId + '\')" title="More options">' + _CHEV_DOWN_SVG + '</button>' +
+        '<div class="dl-menu" id="' + menuId + '">' +
+          '<button class="dl-menu-item" onclick="event.stopPropagation();downloadBatchFile(\'' + jobId + '\',' + idx + ',' + eidx + ',\'' + fname + '\')">' + _DL_SVG + ' Download to computer</button>' +
+          (_userLibraryAvailable ? '<button class="dl-menu-item" id="savlocal-' + menuId + '" onclick="event.stopPropagation();saveBatchToLocal(\'' + jobId + '\',' + idx + ',' + eidx + ',document.getElementById(\'savlocal-' + menuId + '\'))">' +
+            '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M3 15v4c0 1.1.9 2 2 2h14a2 2 0 002-2v-4M17 8l-5-5-5 5M12 3v12"/></svg> Save to Local Library</button>' : '') +
+        '</div>' +
+      '</div>';
+      // Save Construct button (to DB)
+      html += '<button class="save-btn" id="savcon-' + menuId + '" style="margin-left:4px" onclick="event.stopPropagation();saveBatchConstruct(\'' + jobId + '\',' + idx + ',' + eidx + ',document.getElementById(\'savcon-' + menuId + '\'))">' +
+        _SAVE_SVG + ' Save Construct</button>';
+    } else {
+      html += '<button class="download-btn" onclick="' + dlCall + '">' + _DL_SVG + ' ' + fname + '</button>';
+    }
     if (exp.has_plot) {
-      html += '<button class="download-btn" style="border-color:var(--brand-fig-30);color:var(--brand-fig);background:var(--brand-fig-10);" ' +
+      html += '<button class="download-btn" style="border-color:var(--brand-fig-30);color:var(--brand-fig);background:var(--brand-fig-10);margin-left:4px" ' +
         'onclick="event.stopPropagation();openBatchPlot(\'' + jobId + '\',' + idx + ',' + eidx + ')">' +
         '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>' +
         'View Map</button>';
@@ -3127,12 +3735,21 @@ function buildFollowupHtml(jobId, idx, status) {
 }
 
 function buildBatchCardHtml(jobId, idx, row, isOpen) {
-  var icon = STATUS_ICONS[row.status] || STATUS_ICONS.pending;
-  var label = STATUS_LABELS[row.status] || row.status;
+  var isPaused = row.paused && row.status === 'running';
+  var icon = isPaused ? STATUS_ICONS.paused : (STATUS_ICONS[row.status] || STATUS_ICONS.pending);
+  var label = isPaused ? STATUS_LABELS.paused : (STATUS_LABELS[row.status] || row.status);
   var desc = escapeHtml((row.description || '').slice(0, 120) + ((row.description || '').length > 120 ? '\u2026' : ''));
   var downloads = buildDownloadsHtml(jobId, idx, row.exports);
   var logId = 'batch-log-' + jobId + '-' + idx;
   var chevId = 'batch-chev-' + jobId + '-' + idx;
+  var pauseBtn = '';
+  if (row.status === 'running') {
+    if (isPaused) {
+      pauseBtn = '<button class="batch-row-pause-btn" title="Resume" onclick="event.stopPropagation();resumeBatchRow(\'' + jobId + '\',' + idx + ')">' + RESUME_SVG + '</button>';
+    } else {
+      pauseBtn = '<button class="batch-row-pause-btn" title="Pause" onclick="event.stopPropagation();pauseBatchRow(\'' + jobId + '\',' + idx + ')">' + PAUSE_SVG + '</button>';
+    }
+  }
   return '<div class="batch-card">' +
     '<div class="batch-row-header" onclick="toggleBatchCard(\'' + jobId + '\',' + idx + ')">' +
       '<div class="batch-row-status">' + icon + '</div>' +
@@ -3141,6 +3758,7 @@ function buildBatchCardHtml(jobId, idx, row, isOpen) {
         '<div class="batch-row-meta">' + (idx + 1) + ' \xb7 ' + label + '</div>' +
         downloads +
       '</div>' +
+      pauseBtn +
       '<span id="' + chevId + '" class="batch-row-chevron' + (isOpen ? ' open' : '') + '">' + CHEV_SVG + '</span>' +
     '</div>' +
     '<div id="' + logId + '" class="batch-row-log' + (isOpen ? ' open' : '') + '">' +
@@ -3204,7 +3822,11 @@ function sendBatchFollowup(jobId, rowIdx) {
   .then(function(r) { return r.json(); })
   .then(function(data) {
     if (data.error) { alert('Error: ' + data.error); return; }
-    if (!batchPollTimer) batchPollTimer = setInterval(pollBatchStatus, 2000);
+    // Restart polling for whichever session owns this job
+    var ownerSid = Object.keys(_batchSessions).find(function(k) { return _batchSessions[k] === jobId; });
+    if (ownerSid && !_batchPollTimers[ownerSid]) {
+      _batchPollTimers[ownerSid] = setInterval(function() { pollBatchForSession(ownerSid); }, 2000);
+    }
   })
   .catch(function(e) { alert('Failed to send: ' + e); });
 }
@@ -3263,6 +3885,43 @@ function downloadAllBatch(jobId) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+}
+
+function pauseBatchRow(jobId, rowIdx) {
+  fetch('/api/batch/' + jobId + '/rows/' + rowIdx + '/pause', {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .catch(function() {});
+}
+
+function resumeBatchRow(jobId, rowIdx) {
+  fetch('/api/batch/' + jobId + '/rows/' + rowIdx + '/resume', {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .catch(function() {});
+}
+
+function pauseAllBatch(jobId) {
+  fetch('/api/batch/' + jobId + '/pause-all', {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .then(function() {
+    // Swap button visibility
+    var p = document.getElementById('batch-pause-all-' + jobId);
+    var r = document.getElementById('batch-resume-all-' + jobId);
+    if (p) p.style.display = 'none';
+    if (r) r.style.display = '';
+  })
+  .catch(function() {});
+}
+
+function resumeAllBatch(jobId) {
+  fetch('/api/batch/' + jobId + '/resume-all', {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .then(function() {
+    var p = document.getElementById('batch-pause-all-' + jobId);
+    var r = document.getElementById('batch-resume-all-' + jobId);
+    if (p) p.style.display = '';
+    if (r) r.style.display = 'none';
+  })
+  .catch(function() {});
 }
 
 // ── Saved Constructs ─────────────────────────────────────────────────────────
@@ -3345,8 +4004,6 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
       } catch(e) {
         if (e.name !== 'AbortError') _triggerDownload(genbankContent, filename);
       }
-    } else {
-      _triggerDownload(genbankContent, filename);
     }
   });
 
@@ -3418,7 +4075,7 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
     try {
       const r = await fetch('/api/db/constructs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
       const data = await r.json();
-      if (data.id) { btn.innerHTML = _SVG_CHECK + ' Saved'; btn.style.opacity = '0.75'; }
+      if (data.id) { btn.innerHTML = _SVG_CHECK + ' Saved'; btn.style.opacity = '0.75'; refreshLibraryData(); }
       else { btn.textContent = 'Save failed'; btn.disabled = false; }
     } catch(e) { btn.textContent = 'Save failed'; btn.disabled = false; }
   });
@@ -4020,6 +4677,91 @@ function downloadBatchFile(jobId, rowIdx, expIdx, filename) {
   })
   .catch(function(e) { alert('Download failed: ' + e); });
 }
+
+function saveBatchConstruct(jobId, rowIdx, expIdx, btn) {
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  btn.innerHTML = _SAVE_SVG + ' Saving…';
+  fetch('/api/batch/' + jobId + '/rows/' + rowIdx + '/save-construct/' + expIdx, {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.id) {
+      btn.innerHTML = '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> Saved';
+      btn.style.opacity = '0.7';
+    } else {
+      btn.innerHTML = _SAVE_SVG + ' Save failed';
+      btn.disabled = false;
+    }
+  })
+  .catch(function() {
+    btn.innerHTML = _SAVE_SVG + ' Save failed';
+    btn.disabled = false;
+  });
+}
+
+function saveBatchToLocal(jobId, rowIdx, expIdx, btn) {
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  var origHtml = btn.innerHTML;
+  btn.textContent = 'Saving…';
+  fetch('/api/batch/' + jobId + '/rows/' + rowIdx + '/save-local/' + expIdx, {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.saved_to) {
+      btn.textContent = '✓ Saved to library';
+    } else {
+      btn.innerHTML = origHtml;
+      btn.disabled = false;
+      alert('Save failed: ' + (data.error || 'unknown error'));
+    }
+  })
+  .catch(function() {
+    btn.innerHTML = origHtml;
+    btn.disabled = false;
+    alert('Save failed');
+  });
+}
+
+function saveAllBatchConstructs(jobId, btn) {
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  btn.innerHTML = _SAVE_SVG + ' Saving…';
+  fetch('/api/batch/' + jobId + '/save-all-constructs', {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.saved !== undefined) {
+      btn.innerHTML = '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> Saved ' + data.saved + ' construct' + (data.saved === 1 ? '' : 's');
+      btn.style.opacity = '0.7';
+    } else {
+      btn.innerHTML = _SAVE_SVG + ' Save failed';
+      btn.disabled = false;
+    }
+  })
+  .catch(function() {
+    btn.innerHTML = _SAVE_SVG + ' Save failed';
+    btn.disabled = false;
+  });
+}
+
+function saveAllBatchToLocal(jobId, btn) {
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  fetch('/api/batch/' + jobId + '/save-all-local', {method: 'POST'})
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.saved !== undefined) {
+      btn.textContent = '✓ Saved ' + data.saved + ' to library';
+    } else {
+      btn.textContent = 'Save failed';
+      btn.disabled = false;
+    }
+  })
+  .catch(function() {
+    btn.textContent = 'Save failed';
+    btn.disabled = false;
+  });
+}
 </script>
 </body>
 </html>
@@ -4030,7 +4772,8 @@ function downloadBatchFile(jobId, rowIdx, expIdx, filename) {
 
 def _run_batch_agent(prompt: str, model: str, append_log, exports: list, *,
                      history: list,
-                     row_name: Optional[str] = None) -> None:
+                     row_name: Optional[str] = None,
+                     pause_event: Optional[threading.Event] = None) -> None:
     """Shared agent runner for batch rows. Mutates ``history`` in place so
     follow-up messages (``_continue_batch_row``) replay the same context."""
     tracker = ReferenceTracker()
@@ -4040,6 +4783,9 @@ def _run_batch_agent(prompt: str, model: str, append_log, exports: list, *,
 
     try:
         for _ in range(15):
+            # Block here if this row has been paused
+            if pause_event:
+                pause_event.wait()
             response = _client().messages.create(
                 model=model,
                 max_tokens=16000,
@@ -4103,8 +4849,10 @@ def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str) -> None:
         prompt = description + "\nPlease export the final construct in GenBank format."
 
     row_state["status"] = "running"
+    row_state["paused"] = False
     row_state["log"] = []
     name = row.get("name", "").strip() or f"plasmid_{row_idx + 1:03d}"
+    pause_event = _get_pause_event(job_id, row_idx)
 
     try:
         exports: list[dict] = []
@@ -4115,14 +4863,18 @@ def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str) -> None:
             exports=exports,
             history=history,
             row_name=name,
+            pause_event=pause_event,
         )
         row_state["exports"] = exports
         row_state["history"] = history
         row_state["status"] = "done" if exports else "no_export"
+        row_state["paused"] = False
     except Exception as e:
         row_state["status"] = "error"
         row_state["error"] = str(e)
         row_state["log"].append({"type": "error", "content": str(e)})
+    finally:
+        _save_batch_jobs()
 
 
 def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
@@ -4134,8 +4886,11 @@ def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
     model = job["model"]
 
     row_state["status"] = "running"
+    row_state["paused"] = False
     row_state["log"].append({"type": "user", "content": user_message})
     name = row_state.get("name", "").strip() or f"plasmid_{row_idx + 1:03d}"
+    pause_event = _get_pause_event(job_id, row_idx)
+    pause_event.set()  # ensure unpaused for follow-up
 
     try:
         _run_batch_agent(
@@ -4144,12 +4899,16 @@ def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
             exports=row_state["exports"],
             history=row_state.setdefault("history", []),
             row_name=name,
+            pause_event=pause_event,
         )
         row_state["status"] = "done" if row_state["exports"] else "no_export"
+        row_state["paused"] = False
     except Exception as e:
         row_state["status"] = "error"
         row_state["error"] = str(e)
         row_state["log"].append({"type": "error", "content": str(e)})
+    finally:
+        _save_batch_jobs()
 
 
 def start_batch_job(rows: list, model: str) -> str:
@@ -4164,6 +4923,7 @@ def start_batch_job(rows: list, model: str) -> str:
                 "name": r.get("name", ""),
                 "output_format": r.get("output_format", "genbank"),
                 "status": "pending",
+                "paused": False,
                 "exports": [],
                 "error": None,
             }
@@ -4177,6 +4937,7 @@ def start_batch_job(rows: list, model: str) -> str:
         for idx, row in enumerate(rows):
             _run_batch_row(job_id, idx, row, model)
         job["status"] = "done"
+        _save_batch_jobs()
 
     threading.Thread(target=worker, daemon=True).start()
     return job_id
@@ -4244,9 +5005,78 @@ class AgentHandler(SimpleHTTPRequestHandler):
             session_id = path.split("/")[3]
             session = get_session(session_id)
             if session:
-                self._send_json(session["display_messages"])
+                if session.get("batch_job_id"):
+                    self._send_json([{
+                        "type": "batch_session",
+                        "batch_job_id": session["batch_job_id"],
+                        "batch_filename": session.get("batch_filename", ""),
+                        "batch_model": session.get("batch_model", ""),
+                        "batch_row_count": session.get("batch_row_count", 0),
+                    }])
+                else:
+                    self._send_json(session["display_messages"])
             else:
                 self._send_json([], 404)
+
+        elif path.startswith("/api/sessions/") and path.endswith("/status"):
+            session_id = path.split("/")[3]
+            session = get_session(session_id)
+            if session:
+                self._send_json({
+                    "session_id": session_id,
+                    "running": session_id in _active_turns,
+                })
+            else:
+                self._send_json({"error": "Session not found"}, 404)
+
+        elif path.startswith("/api/sessions/") and path.endswith("/stream"):
+            session_id = path.split("/")[3]
+            with _session_live_streams_lock:
+                entry = _session_live_streams.get(session_id)
+            if not entry:
+                self._send_json({"error": "Session not running"}, 404)
+                return
+
+            live_log, live_cond = entry
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+
+            def _write_sse(data: dict):
+                line = f"data: {json.dumps(data)}\n\n"
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+
+            offset = 0
+            stream_done = False
+            while not stream_done:
+                with live_cond:
+                    if offset >= len(live_log):
+                        live_cond.wait(timeout=30)
+                    new_events = live_log[offset:]
+                    offset += len(new_events)
+
+                if not new_events:
+                    # Keepalive on timeout
+                    try:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        return
+                    continue
+
+                for evt in new_events:
+                    if evt is None:
+                        stream_done = True
+                        break
+                    try:
+                        _write_sse(evt)
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        return
 
         elif path == "/api/user-library":
             from src.user_library import load_user_designed_constructs
@@ -4377,6 +5207,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
                         "description": r["description"],
                         "name": r["name"],
                         "status": r["status"],
+                        "paused": r.get("paused", False),
                         "error": r["error"],
                         "exports": [
                             {"filename": e["filename"], "has_plot": bool(e.get("plot_json"))}
@@ -4510,22 +5341,57 @@ class AgentHandler(SimpleHTTPRequestHandler):
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
 
-            def write_event(data: dict):
-                try:
-                    line = f"data: {json.dumps(data)}\n\n"
-                    self.wfile.write(line.encode("utf-8"))
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
+            def _write_sse(data: dict):
+                line = f"data: {json.dumps(data)}\n\n"
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
 
-            # Send session_id to client
-            write_event({"type": "session_id", "session_id": session_id})
-
+            # Send session_id synchronously before handing off to the thread
             try:
-                run_agent_turn_streaming(user_message, session_id, write_event, model=request_model)
-            except Exception as e:
-                logger.exception("Agent error")
-                write_event({"type": "error", "content": str(e)})
+                _write_sse({"type": "session_id", "session_id": session_id})
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
+            # Run the agent in a background thread so the run survives if the
+            # client navigates away. Events are queued; this handler drains the
+            # queue and forwards to the SSE client until it disconnects or the
+            # agent finishes.
+            import queue as _q
+            event_queue: _q.Queue = _q.Queue()
+
+            def _agent_thread():
+                try:
+                    run_agent_turn_streaming(
+                        user_message, session_id,
+                        write_event=event_queue.put,
+                        model=request_model,
+                    )
+                except Exception as e:
+                    logger.exception("Agent error")
+                    event_queue.put({"type": "error", "content": str(e)})
+                finally:
+                    event_queue.put(None)  # sentinel — agent done
+
+            threading.Thread(target=_agent_thread, daemon=True).start()
+
+            # Forward events to the SSE client until it disconnects or agent finishes
+            while True:
+                try:
+                    item = event_queue.get(timeout=30)
+                except _q.Empty:
+                    # Send a keepalive comment to detect dead connections
+                    try:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        break  # client gone; agent thread keeps running
+                    continue
+                if item is None:
+                    break  # sentinel — agent finished
+                try:
+                    _write_sse(item)
+                except (BrokenPipeError, ConnectionResetError):
+                    break  # client gone; agent thread keeps running
 
         elif path.startswith("/api/sessions/") and path.endswith("/cancel"):
             session_id = path.split("/")[3]
@@ -4593,6 +5459,60 @@ class AgentHandler(SimpleHTTPRequestHandler):
             ).start()
             self._send_json({"status": "ok"})
 
+        elif path.startswith("/api/batch/") and "/rows/" in path and path.endswith("/pause"):
+            # POST /api/batch/{job_id}/rows/{row_idx}/pause
+            parts_p = path.split("/")
+            try:
+                job_id = parts_p[3]; row_idx = int(parts_p[5])
+            except (IndexError, ValueError):
+                self._send_json({"error": "Bad request"}, 400); return
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404); return
+            if row_idx < len(job["rows"]) and job["rows"][row_idx]["status"] == "running":
+                _get_pause_event(job_id, row_idx).clear()
+                job["rows"][row_idx]["paused"] = True
+            self._send_json({"status": "ok"})
+
+        elif path.startswith("/api/batch/") and "/rows/" in path and path.endswith("/resume"):
+            # POST /api/batch/{job_id}/rows/{row_idx}/resume
+            parts_p = path.split("/")
+            try:
+                job_id = parts_p[3]; row_idx = int(parts_p[5])
+            except (IndexError, ValueError):
+                self._send_json({"error": "Bad request"}, 400); return
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404); return
+            if row_idx < len(job["rows"]):
+                _get_pause_event(job_id, row_idx).set()
+                job["rows"][row_idx]["paused"] = False
+            self._send_json({"status": "ok"})
+
+        elif path.startswith("/api/batch/") and path.endswith("/pause-all"):
+            # POST /api/batch/{job_id}/pause-all
+            job_id = path.split("/")[3]
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404); return
+            for idx, row in enumerate(job["rows"]):
+                if row["status"] == "running":
+                    _get_pause_event(job_id, idx).clear()
+                    row["paused"] = True
+            self._send_json({"status": "ok"})
+
+        elif path.startswith("/api/batch/") and path.endswith("/resume-all"):
+            # POST /api/batch/{job_id}/resume-all
+            job_id = path.split("/")[3]
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404); return
+            for idx, row in enumerate(job["rows"]):
+                if row.get("paused"):
+                    _get_pause_event(job_id, idx).set()
+                    row["paused"] = False
+            self._send_json({"status": "ok"})
+
         elif path == "/api/upload-plasmid":
             content_length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(content_length)) if content_length else {}
@@ -4622,6 +5542,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(content_length)) if content_length else {}
             csv_text = body.get("csv_content", "")
             request_model = body.get("model", MODEL)
+            batch_filename = body.get("filename", "batch.csv")
 
             if not csv_text.strip():
                 self._send_json({"error": "No CSV content provided"}, 400)
@@ -4640,7 +5561,167 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 return
 
             job_id = start_batch_job(rows, request_model)
-            self._send_json({"job_id": job_id, "row_count": len(rows)})
+
+            # Create a dedicated session for this batch job so it persists in the
+            # sessions pane and survives the user navigating to another chat.
+            batch_session_id = str(uuid.uuid4())
+            _sessions[batch_session_id] = {
+                "history": [],
+                "display_messages": [],
+                "created_at": time.time(),
+                "first_message": f"Bulk design: {batch_filename}",
+                "project_name": None,
+                "experimental_outcomes": [],
+                "batch_job_id": job_id,
+                "batch_filename": batch_filename,
+                "batch_model": request_model,
+                "batch_row_count": len(rows),
+            }
+            _save_sessions()
+
+            self._send_json({"job_id": job_id, "row_count": len(rows), "session_id": batch_session_id})
+
+        elif path.startswith("/api/batch/") and "/rows/" in path and "/save-construct/" in path:
+            # POST /api/batch/{job_id}/rows/{row_idx}/save-construct/{exp_idx}
+            parts_path = path.split("/")
+            try:
+                job_id = parts_path[3]
+                row_idx = int(parts_path[5])
+                exp_idx = int(parts_path[7])
+            except (IndexError, ValueError):
+                self._send_json({"error": "Bad request"}, 400)
+                return
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404)
+                return
+            try:
+                export = job["rows"][row_idx]["exports"][exp_idx]
+            except (IndexError, KeyError):
+                self._send_json({"error": "Export not found"}, 404)
+                return
+            genbank_content = export.get("content", "")
+            filename = export.get("filename", "construct.gb")
+            construct_name = Path(filename).stem.replace("_", " ")
+            total_size_bp = None
+            try:
+                from Bio import SeqIO as _sio
+                record = next(_sio.parse(io.StringIO(genbank_content), "genbank"))
+                total_size_bp = len(record.seq)
+                if record.name and record.name not in (".", "unknown"):
+                    construct_name = record.name
+            except Exception:
+                pass
+            construct_id = _db_save_construct(
+                DB_PATH,
+                construct_name=construct_name,
+                genbank_content=genbank_content,
+                total_size_bp=total_size_bp,
+                session_id=None,
+                backbone_name="",
+                insert_names=[],
+                parts=[],
+                validations=[],
+            )
+            self._send_json({"id": construct_id, "status": "saved"})
+
+        elif path.startswith("/api/batch/") and "/rows/" in path and "/save-local/" in path:
+            # POST /api/batch/{job_id}/rows/{row_idx}/save-local/{exp_idx}
+            import re as _re3
+            parts_path = path.split("/")
+            try:
+                job_id = parts_path[3]
+                row_idx = int(parts_path[5])
+                exp_idx = int(parts_path[7])
+            except (IndexError, ValueError):
+                self._send_json({"error": "Bad request"}, 400)
+                return
+            user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+            if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
+                self._send_json({"error": "PLASMID_USER_LIBRARY not set"}, 400)
+                return
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404)
+                return
+            try:
+                export = job["rows"][row_idx]["exports"][exp_idx]
+            except (IndexError, KeyError):
+                self._send_json({"error": "Export not found"}, 404)
+                return
+            filename = export.get("filename", "construct.gb")
+            content = export.get("content", "")
+            constructs_dir = Path(user_lib_dir).expanduser() / "constructs"
+            constructs_dir.mkdir(exist_ok=True)
+            safe_name = _re3.sub(r'[^\w\-. ]', '_', Path(filename).stem).strip().replace(' ', '_')
+            out_path = constructs_dir / f"{safe_name}.gb"
+            out_path.write_text(content)
+            self._send_json({"saved_to": str(out_path)})
+
+        elif path.startswith("/api/batch/") and path.endswith("/save-all-constructs"):
+            # POST /api/batch/{job_id}/save-all-constructs
+            job_id = path.split("/")[3]
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404)
+                return
+            saved = 0
+            for row in job["rows"]:
+                for export in row.get("exports", []):
+                    if not export.get("filename", "").lower().endswith((".gb", ".gbk", ".genbank")):
+                        continue
+                    genbank_content = export.get("content", "")
+                    filename = export.get("filename", "construct.gb")
+                    construct_name = Path(filename).stem.replace("_", " ")
+                    total_size_bp = None
+                    try:
+                        from Bio import SeqIO as _sio2
+                        record = next(_sio2.parse(io.StringIO(genbank_content), "genbank"))
+                        total_size_bp = len(record.seq)
+                        if record.name and record.name not in (".", "unknown"):
+                            construct_name = record.name
+                    except Exception:
+                        pass
+                    _db_save_construct(
+                        DB_PATH,
+                        construct_name=construct_name,
+                        genbank_content=genbank_content,
+                        total_size_bp=total_size_bp,
+                        session_id=None,
+                        backbone_name="",
+                        insert_names=[],
+                        parts=[],
+                        validations=[],
+                    )
+                    saved += 1
+            self._send_json({"saved": saved})
+
+        elif path.startswith("/api/batch/") and path.endswith("/save-all-local"):
+            # POST /api/batch/{job_id}/save-all-local
+            import re as _re4
+            job_id = path.split("/")[3]
+            user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+            if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
+                self._send_json({"error": "PLASMID_USER_LIBRARY not set"}, 400)
+                return
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404)
+                return
+            constructs_dir = Path(user_lib_dir).expanduser() / "constructs"
+            constructs_dir.mkdir(exist_ok=True)
+            saved = 0
+            for row in job["rows"]:
+                for export in row.get("exports", []):
+                    if not export.get("filename", "").lower().endswith((".gb", ".gbk", ".genbank")):
+                        continue
+                    filename = export.get("filename", "construct.gb")
+                    content = export.get("content", "")
+                    safe_name = _re4.sub(r'[^\w\-. ]', '_', Path(filename).stem).strip().replace(' ', '_')
+                    out_path = constructs_dir / f"{safe_name}.gb"
+                    out_path.write_text(content)
+                    saved += 1
+            self._send_json({"saved": saved})
 
         elif path == "/api/reset":
             # Legacy endpoint — clear all sessions
@@ -4702,6 +5783,24 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 validations=validations,
             )
             self._send_json({"id": construct_id, "status": "saved"})
+
+        elif path == "/api/constructs/save-local":
+            # POST /api/constructs/save-local — save GenBank content from main chat to user library dir
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            genbank_content = body.get("genbank_content", "")
+            filename = body.get("filename", "construct.gb")
+            user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
+            if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
+                self._send_json({"error": "PLASMID_USER_LIBRARY not set"}, 400)
+                return
+            import re as _re_local
+            constructs_dir = Path(user_lib_dir).expanduser() / "constructs"
+            constructs_dir.mkdir(exist_ok=True)
+            safe_name = _re_local.sub(r'[^\w\-. ]', '_', Path(filename).stem).strip().replace(' ', '_')
+            out_path = constructs_dir / f"{safe_name}.gb"
+            out_path.write_text(genbank_content)
+            self._send_json({"saved_to": str(out_path)})
 
         elif path == "/api/db/import-user-library":
             user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")

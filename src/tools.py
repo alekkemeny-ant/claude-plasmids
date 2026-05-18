@@ -148,6 +148,16 @@ try:
 except ImportError:
     PLOT_EXPORT_AVAILABLE = False
 
+# Restriction enzyme site checking and silent mutation (optional)
+try:
+    from .restriction_utils import (
+        check_re_sites as _check_re_sites,
+        design_silent_mutation as _design_silent_mutation,
+    )
+    RE_SITE_CHECK_AVAILABLE = True
+except ImportError:
+    RE_SITE_CHECK_AVAILABLE = False
+
 LIBRARY_PATH = Path(__file__).parent.parent / "library"
 
 # ── Per-run reference tracker ──────────────────────────────────────────
@@ -1635,6 +1645,209 @@ async def fetch_promoter_region_tool(args):
     )
 
 
+# ── RE Site Checking Tools ──────────────────────────────────────────────────
+
+@tool(
+    "check_re_sites",
+    (
+        "Check insert/part sequences for recognition sites of the assembly enzyme "
+        "(e.g., Esp3I for Golden Gate). The backbone's sites are intentional — pass "
+        "expected_site_count=0 for inserts so any site found is flagged as a problem. "
+        "A recognition site inside an insert's CDS will cause the enzyme to cut through "
+        "the gene during digestion, fragmenting it and preventing correct assembly. "
+        "Returns a report with positions, overlapping feature names, strand, and whether "
+        "each site can be eliminated by a synonymous codon mutation. "
+        "Call this before assemble_golden_gate whenever an enzyme is specified."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "sequences": {
+                "type": "array",
+                "description": (
+                    "List of sequences to check. Each entry must have 'name' and 'sequence'. "
+                    "Optional: 'expected_site_count' (int, default 0 — set to 2 for a GG backbone), "
+                    "'features' (list of feature dicts from get_backbone or annotate_plasmid)."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "sequence": {"type": "string"},
+                        "expected_site_count": {
+                            "type": "integer",
+                            "description": "Number of sites that are normal/expected (0 for inserts; 2 for GG backbones).",
+                        },
+                        "features": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": "Feature list from get_backbone or annotate_plasmid (enables feature-name reporting).",
+                        },
+                    },
+                    "required": ["name", "sequence"],
+                },
+                "minItems": 1,
+            },
+            "enzyme_name": {
+                "type": "string",
+                "enum": list(GG_ENZYMES.keys()),
+                "description": "Assembly enzyme whose recognition sites to check for.",
+            },
+        },
+        "required": ["sequences", "enzyme_name"],
+    },
+)
+async def check_re_sites_tool(args):
+    if not RE_SITE_CHECK_AVAILABLE:
+        return _error("Restriction site checking module not available.")
+
+    sequences = args["sequences"]
+    enzyme_name = args["enzyme_name"]
+
+    result = _check_re_sites(sequences, enzyme_name)
+
+    if result["all_clear"]:
+        return _text(
+            f"RE site check PASSED\n"
+            f"No unexpected {enzyme_name} ({result['recognition_sequence']}) sites found "
+            f"in {len(sequences)} sequence(s). Safe to proceed with assembly."
+        )
+
+    lines = [
+        f"RE site check ISSUES FOUND",
+        f"Enzyme: {enzyme_name} ({result['recognition_sequence']})",
+        "",
+    ]
+    for ps in result["problematic_sequences"]:
+        lines.append(
+            f"[{ps['sequence_name']}] — {ps['extra_site_count']} unexpected site(s):"
+        )
+        for site in ps["sites"]:
+            feat = site.get("overlapping_feature")
+            if feat:
+                feat_str = (
+                    f"in feature '{feat['name']}' ({feat['type']}, "
+                    f"{feat['start']}..{feat['end']})"
+                )
+            else:
+                feat_str = "in non-coding / intergenic region"
+            solvable_str = (
+                "CAN be eliminated by silent mutation"
+                if site["solvable_by_silent_mutation"]
+                else "CANNOT be silently mutated (non-coding region)"
+            )
+            lines.append(
+                f"  Position {site['position']} (strand {site['strand']}): {feat_str}\n"
+                f"    -> {solvable_str}"
+            )
+        lines.append("")
+
+    lines.append(
+        "To resolve: call design_silent_mutations for sites in coding regions. "
+        "Non-coding sites require a different enzyme or manual sequence redesign."
+    )
+    return _text("\n".join(lines))
+
+
+@tool(
+    "design_silent_mutations",
+    (
+        "Design synonymous codon substitutions to eliminate unexpected restriction enzyme "
+        "recognition sites from a coding sequence (CDS) without changing the encoded protein. "
+        "Call this ONLY after check_re_sites identified solvable sites AND the user confirmed "
+        "they want silent mutations applied. "
+        "Processes one site at a time sequentially to avoid interference. "
+        "Returns the modified CDS with a detailed report of every codon changed "
+        "(original codon, new codon, amino acid position, amino acid preserved). "
+        "After mutation, re-run check_re_sites to confirm the sequence is clean."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "cds_sequence": {
+                "type": "string",
+                "description": "CDS DNA sequence in sense (5'→3') orientation.",
+            },
+            "sites_to_eliminate": {
+                "type": "array",
+                "description": (
+                    "List of site positions to eliminate, each as "
+                    "{'position_in_cds': int (0-based start within cds_sequence)}. "
+                    "Sites are processed sequentially; order matters if they are nearby."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "position_in_cds": {
+                            "type": "integer",
+                            "description": "0-based start position of the recognition site within cds_sequence.",
+                        },
+                    },
+                    "required": ["position_in_cds"],
+                },
+                "minItems": 1,
+            },
+            "enzyme_name": {
+                "type": "string",
+                "enum": list(GG_ENZYMES.keys()),
+                "description": "Enzyme whose recognition sites to eliminate.",
+            },
+            "cds_frame_offset": {
+                "type": "integer",
+                "description": "Nucleotides before the first in-frame codon (almost always 0 for a standard ATG-start CDS).",
+            },
+        },
+        "required": ["cds_sequence", "sites_to_eliminate", "enzyme_name"],
+    },
+)
+async def design_silent_mutations_tool(args):
+    if not RE_SITE_CHECK_AVAILABLE:
+        return _error("Restriction site checking module not available.")
+
+    cds = clean_sequence(args["cds_sequence"])
+    enzyme_name = args["enzyme_name"]
+    sites = args["sites_to_eliminate"]
+    frame_offset = args.get("cds_frame_offset", 0) or 0
+
+    current_cds = cds
+    all_changes: list[dict] = []
+    failed_sites: list[dict] = []
+
+    for site_entry in sites:
+        pos = site_entry["position_in_cds"]
+        result = _design_silent_mutation(current_cds, pos, enzyme_name, frame_offset)
+        if not result["success"]:
+            failed_sites.append({"position": pos, "reason": result["reason"]})
+        else:
+            all_changes.extend(result["codons_changed"])
+            current_cds = result["mutated_sequence"]
+
+    lines = []
+    if all_changes:
+        lines.append(f"Silent mutations applied ({len(all_changes)} codon change(s)):")
+        for ch in all_changes:
+            lines.append(
+                f"  Codon {ch['codon_index']} (DNA pos {ch['dna_position']}): "
+                f"{ch['original_codon']} -> {ch['new_codon']}  [{ch['amino_acid']} preserved]"
+            )
+        lines.append("")
+        lines.append(f"Modified CDS ({len(current_cds)} bp):")
+        lines.append(current_cds)
+
+    if failed_sites:
+        lines.append("")
+        lines.append(f"WARNING: {len(failed_sites)} site(s) could not be mutated:")
+        for f in failed_sites:
+            lines.append(f"  Position {f['position']}: {f['reason']}")
+
+    if not all_changes and not failed_sites:
+        return _error("No sites were processed.")
+
+    lines.append("")
+    lines.append("Run check_re_sites on the modified sequence to confirm it is clean.")
+    return _text("\n".join(lines))
+
+
 # ── Golden Gate Assembly Tool ───────────────────────────────────────────────
 
 @tool(
@@ -2414,6 +2627,9 @@ ALL_TOOLS = [
     lookup_known_mutations_tool,
     apply_mutation_tool,
     fetch_promoter_region_tool,
+    # RE site checking and silent mutation
+    check_re_sites_tool,
+    design_silent_mutations_tool,
     # Golden Gate assembly
     assemble_golden_gate_tool,
     design_golden_gate_oligos_tool,

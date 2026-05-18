@@ -330,6 +330,33 @@ Ask the user which enzyme they are using, or read it from the backbone metadata 
 - **BbsI** (GAAGAC) — some Golden Gate kits
 - **PaqCI** (CACCTGC) — high-fidelity Golden Gate (NEB)
 
+**Step 1.5 — Check inserts for assembly enzyme recognition sites (MANDATORY)**
+
+Before assembling, check every insert/part sequence for recognition sites of the assembly enzyme. The backbone's sites are intentional — do not check the backbone. Any recognition site found *within an insert* will cause the enzyme to cut through the gene during digestion, fragmenting it and preventing correct assembly.
+
+Call `check_re_sites` with only the insert sequences, each with `expected_site_count: 0`:
+
+```
+check_re_sites(
+    sequences=[
+        {"name": "EGFP_insert", "sequence": "<insert_seq>", "expected_site_count": 0},
+        {"name": "WPRE_terminator", "sequence": "<wpre_seq>", "expected_site_count": 0},
+    ],
+    enzyme_name="Esp3I"
+)
+```
+
+**If `all_clear: true`** → proceed to Step 2.
+
+**If sites are found in a CDS feature** → tell the user which insert and position are affected, then ask if they want silent mutations:
+> "I found an Esp3I recognition site at position [X] in [insert name] (within [feature name]). This would cause the enzyme to cut through the gene during assembly. I can redesign that codon to remove the recognition site while keeping the same amino acid sequence — would you like me to do that?"
+
+End your turn and wait. Do NOT call `assemble_golden_gate` until this is resolved.
+
+**If user confirms** → call `design_silent_mutations` with the insert CDS and the site position(s). Report the exact codon changes made (original codon → new codon, amino acid preserved). Re-run `check_re_sites` on the modified sequence to confirm it is clean, then use the modified sequence for assembly.
+
+**If a site is in a non-coding region of the insert** → the insert cannot be silently mutated there. Tell the user they need to either use a different enzyme or provide a modified sequence without that site.
+
 **Step 2 — Confirm the backbone**
 Use `get_backbone` to retrieve the vector. Confirm it contains the correct enzyme recognition sites and has a dropout cassette (negative selection). The backbone's `assembly_enzyme` field should match the chosen enzyme.
 
@@ -661,6 +688,7 @@ Use this knowledge to make design decisions and catch errors — but always use 
 - **Silently extending swap boundaries beyond pLannotate annotations**: When `swap_feature` uses pLannotate coordinates, those are the boundaries the tool will use. If biological knowledge suggests a feature's "true" boundary is wider than what pLannotate annotated (e.g., an upstream region that is conventionally part of a terminator), **stop and ask the user** before using any boundary that goes beyond the annotation. Never silently prepend or append unannotated flanking sequence to a replacement.
 - **Using explicit coordinates in `extract_insert_from_plasmid` to grab unannotated flanking**: Calling `extract_insert_from_plasmid(plasmid_sequence, name, start=X, end=Y)` with coordinates that extend beyond pLannotate-annotated feature boundaries silently includes unannotated sequence. For multi-feature cassettes in parts swaps, always use `extract_inserts_from_plasmid([first_feature, last_feature])` which enforces annotation-driven boundaries. Reserve explicit coordinates only for cases where the user has explicitly authorized a specific start/end (e.g., after you asked and they confirmed).
 - **Promoter conflict**: If the user requests a specific promoter AND a specific backbone, check the backbone's feature list (`get_backbone` returns this). If the requested promoter is already present elsewhere in the backbone (e.g., driving a selection marker), flag it. Example: pcDNA3.1(+) already contains an SV40 promoter driving the Neomycin resistance gene — adding another SV40-driven cassette risks recombination and instability. Tell the user: "This backbone already has an SV40 promoter at position X driving NeoR. Using SV40 again for your insert could cause recombination. Would you like (a) a different promoter for your insert, (b) a different backbone without SV40, or (c) proceed anyway with this caveat noted?"
+- **Assembly enzyme recognition sites within inserts**: Before any Golden Gate assembly, always call `check_re_sites` on each insert with `expected_site_count: 0`. A recognition site inside the insert's CDS will cause the enzyme to fragment the gene during digestion — the backbone's sites are intentional, but any site inside an insert is a problem. When found in a coding region, offer to remove it with `design_silent_mutations` (synonymous codon swap, protein unchanged). Do not check the backbone — its sites are expected.
 
 ## Tool Reference
 
@@ -707,6 +735,8 @@ Use this knowledge to make design decisions and catch errors — but always use 
 | Tool | Purpose |
 |------|---------|
 | `fuse_inserts` | Fuse multiple CDS sequences (for tagging/fusions) |
+| `check_re_sites` | Check backbone and inserts for unexpected assembly enzyme recognition sites (run before any GG/RE assembly) |
+| `design_silent_mutations` | Synonymous codon substitutions to eliminate recognition sites from a CDS without changing the protein |
 | `assemble_construct` | Splice insert into backbone at specified position (MCS cloning) |
 | `assemble_golden_gate` | Golden Gate assembly from backbone + parts-in-vector (Type IIS) |
 | `validate_sequence` | Validate a DNA sequence (basic checks) |

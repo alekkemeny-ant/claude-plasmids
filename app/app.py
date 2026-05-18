@@ -125,6 +125,10 @@ _cancelled_sessions: set[str] = set()
 _active_turns: set[str] = set()   # sessions with a turn currently in flight
 _sessions_lock = threading.Lock()
 
+# Live event log for reconnect streaming: session_id → (event_list, Condition)
+_session_live_streams: dict = {}
+_session_live_streams_lock = threading.Lock()
+
 # ── Batch job state ─────────────────────────────────────────────────────
 _batch_jobs: dict[str, dict] = {}
 _batch_pause_events: dict[str, threading.Event] = {}
@@ -137,6 +141,8 @@ def _get_pause_event(job_id: str, row_idx: int) -> threading.Event:
         _batch_pause_events[key] = ev
     return _batch_pause_events[key]
 SESSIONS_FILE = Path(__file__).parent / ".sessions.json"
+BATCH_JOBS_FILE = Path(__file__).parent / ".batch_jobs.json"
+_batch_jobs_lock = threading.Lock()
 
 MODEL = "claude-opus-4-7"
 
@@ -220,6 +226,11 @@ def _save_sessions():
                     # to empty for sessions created before these were added.
                     "project_name": data.get("project_name"),
                     "experimental_outcomes": data.get("experimental_outcomes", []),
+                    # Batch session fields (None for regular chats)
+                    "batch_job_id": data.get("batch_job_id"),
+                    "batch_filename": data.get("batch_filename"),
+                    "batch_model": data.get("batch_model"),
+                    "batch_row_count": data.get("batch_row_count"),
                 }
                 try:
                     s = {"display_messages": data.get("display_messages", []), **base_fields}
@@ -273,6 +284,75 @@ def _load_sessions():
 
 # Load persisted sessions at import time
 _load_sessions()
+
+
+def _save_batch_jobs():
+    """Persist completed batch job data to disk so it survives server restarts."""
+    import shutil as _shutil
+    with _batch_jobs_lock:
+        try:
+            serializable = {}
+            for job_id, job in _batch_jobs.items():
+                rows = []
+                for row in job.get("rows", []):
+                    rows.append({
+                        "description": row.get("description", ""),
+                        "name": row.get("name", ""),
+                        "output_format": row.get("output_format", "genbank"),
+                        "status": row.get("status", "pending"),
+                        "paused": False,
+                        "exports": [
+                            {"filename": e.get("filename", ""), "content": e.get("content", ""),
+                             "plot_json": e.get("plot_json")}
+                            for e in row.get("exports", [])
+                        ],
+                        "error": row.get("error"),
+                        "log": row.get("log", []),
+                    })
+                serializable[job_id] = {
+                    "status": job.get("status", "done"),
+                    "model": job.get("model", ""),
+                    "rows": rows,
+                }
+            tmp = BATCH_JOBS_FILE.with_suffix(".json.tmp")
+            with open(tmp, "w") as f:
+                json.dump(serializable, f)
+            if BATCH_JOBS_FILE.exists():
+                bak = BATCH_JOBS_FILE.with_suffix(".json.bak")
+                try:
+                    _shutil.copy2(str(BATCH_JOBS_FILE), str(bak))
+                except OSError:
+                    pass
+            os.replace(str(tmp), str(BATCH_JOBS_FILE))
+        except Exception as e:
+            logger.debug(f"Failed to save batch jobs: {e}")
+
+
+def _load_batch_jobs():
+    """Load batch jobs from disk on startup, marking any mid-run rows as interrupted."""
+    global _batch_jobs
+    for filepath in [BATCH_JOBS_FILE, BATCH_JOBS_FILE.with_suffix(".json.bak")]:
+        try:
+            if filepath.exists():
+                with open(filepath) as f:
+                    data = json.load(f)
+                # Fix up any rows that were still running when the server stopped
+                for job in data.values():
+                    for row in job.get("rows", []):
+                        if row.get("status") in ("running", "pending"):
+                            row["status"] = "error"
+                            row["error"] = "Interrupted: server was restarted."
+                    # Mark the whole job done so it doesn't appear stuck
+                    job["status"] = "done"
+                _batch_jobs = data
+                if _batch_jobs:
+                    return
+        except Exception as e:
+            logger.debug(f"Failed to load batch jobs from {filepath}: {e}")
+    _batch_jobs = {}
+
+
+_load_batch_jobs()
 
 # ── Database ─────────────────────────────────────────────────────────────────
 DB_PATH = Path(__file__).parent / "constructs.db"
@@ -395,19 +475,28 @@ def _emit_tool_result(
             "timestamp": time.time(),
         })
         _save_sessions()
-    display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
-    event_data = {
-        "type": "tool_result",
-        "tool": tool_name,
-        "input": tool_input,
-        "content": display_result,
-    }
     if tool_name == "export_construct":
-        event_data["download_content"] = result_str
         fmt = tool_input.get("output_format", "raw")
         cname = tool_input.get("construct_name", "construct")
         ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
-        event_data["download_filename"] = cname + ext
+        filename = cname + ext
+        display_result = f"Exported: {filename}"
+        event_data = {
+            "type": "tool_result",
+            "tool": tool_name,
+            "input": tool_input,
+            "content": display_result,
+            "download_content": result_str,
+            "download_filename": filename,
+        }
+    else:
+        display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
+        event_data = {
+            "type": "tool_result",
+            "tool": tool_name,
+            "input": tool_input,
+            "content": display_result,
+        }
     safe_write(event_data)
     plot = get_last_plot_json()
     if tool_name == "export_construct" and plot:
@@ -448,6 +537,19 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         return
     _active_turns.add(session_id)
 
+    # Per-turn live event log so clients can reconnect and replay the stream
+    _live_log: list = []
+    _live_cond = threading.Condition()
+    with _session_live_streams_lock:
+        _session_live_streams[session_id] = (_live_log, _live_cond)
+
+    _orig_write_event = write_event
+    def write_event(data):  # type: ignore[assignment]
+        _orig_write_event(data)
+        with _live_cond:
+            _live_log.append(data)
+            _live_cond.notify_all()
+
     tracker = ReferenceTracker()
     set_tracker(tracker)
     clear_last_plot_json()
@@ -484,7 +586,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
 
     try:
         for _ in range(max_iterations):
-            if is_cancelled() or disconnected:
+            if is_cancelled():
                 break
 
             stop_reason = None
@@ -517,7 +619,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                         thinking=thinking_config,
                     ) as stream:
                         for event in stream:
-                            if is_cancelled() or disconnected:
+                            if is_cancelled():
                                 stream.close()
                                 break
 
@@ -562,7 +664,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                                     assistant_blocks.append({"type": "text", "content": current_text_content})
                                     safe_write({"type": "text_end"})
                                 elif current_block_type == "tool_use":
-                                    if is_cancelled() or disconnected:
+                                    if is_cancelled():
                                         break
                                     tool_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
                                     result_str = _dispatch_tool(current_tool_name, tool_input)
@@ -583,7 +685,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                             elif event.type == "message_delta":
                                 stop_reason = event.delta.stop_reason
 
-                        if is_cancelled() or disconnected:
+                        if is_cancelled():
                             break
 
                         final_message = stream.get_final_message()
@@ -605,11 +707,11 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                     safe_write({"type": "error", "content": f"{type(e).__name__} after retries. Please try again."})
                     break
                 except Exception:
-                    if is_cancelled() or disconnected:
+                    if is_cancelled():
                         break
                     raise
 
-            if is_cancelled() or disconnected or final_message is None:
+            if is_cancelled() or final_message is None:
                 break
 
             # Convert content blocks to plain dicts to strip extra SDK fields
@@ -647,54 +749,64 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
             if stop_reason == "end_turn":
                 break
     finally:
-        _active_turns.discard(session_id)
+        # All post-loop work is here so it runs whether the loop exited normally
+        # or via an exception, and _active_turns.discard happens last — after the
+        # session is saved — so the polling indicator sees a consistent state.
+
+        # Flush any in-progress block that was interrupted mid-stream
+        if current_text_content and not any(
+            b.get("type") == "text" and b.get("content") == current_text_content
+            for b in assistant_blocks
+        ):
+            assistant_blocks.append({"type": "text", "content": current_text_content})
+        if current_thinking_text and not any(
+            b.get("type") == "thinking" and b.get("content") == current_thinking_text
+            for b in assistant_blocks
+        ):
+            assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
+
+        # Append formatted references only when a sequence file was exported this turn
+        if export_called and not is_cancelled():
+            refs_text = tracker.format_references()
+            if refs_text:
+                ref_block = f"\n\n{refs_text}"
+                assistant_text += ref_block
+                assistant_blocks.append({"type": "text", "content": ref_block})
+                safe_write({"type": "text_start"})
+                safe_write({"type": "text_delta", "content": ref_block})
+                safe_write({"type": "text_end"})
+            session["last_export_references"] = tracker.to_list()
+
+        if assistant_text or assistant_blocks:
+            session["display_messages"].append({
+                "role": "assistant",
+                "content": assistant_text,
+                "blocks": assistant_blocks,
+            })
+        elif is_cancelled():
+            # Remove dangling user message if the run was explicitly cancelled
+            if history and history[-1]["role"] == "user" and isinstance(history[-1].get("content"), str):
+                history.pop()
+                if session["display_messages"] and session["display_messages"][-1]["role"] == "user":
+                    session["display_messages"].pop()
+
+        _save_sessions()
+
+        if not disconnected:
+            try:
+                write_event({"type": "done"})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
         set_tracker(None)
+        _active_turns.discard(session_id)  # Last: poll / status endpoint now sees saved state
 
-    # Flush any in-progress block that was interrupted mid-stream
-    if current_text_content and not any(
-        b.get("type") == "text" and b.get("content") == current_text_content
-        for b in assistant_blocks
-    ):
-        assistant_blocks.append({"type": "text", "content": current_text_content})
-    if current_thinking_text and not any(
-        b.get("type") == "thinking" and b.get("content") == current_thinking_text
-        for b in assistant_blocks
-    ):
-        assistant_blocks.append({"type": "thinking", "content": current_thinking_text})
-
-    # Append formatted references only when a sequence file was exported this turn
-    if export_called and not (is_cancelled() or disconnected):
-        refs_text = tracker.format_references()
-        if refs_text:
-            ref_block = f"\n\n{refs_text}"
-            assistant_text += ref_block
-            assistant_blocks.append({"type": "text", "content": ref_block})
-            safe_write({"type": "text_start"})
-            safe_write({"type": "text_delta", "content": ref_block})
-            safe_write({"type": "text_end"})
-        # Persist structured references so the save handler can use them
-        session["last_export_references"] = tracker.to_list()
-
-    if assistant_text or assistant_blocks:
-        session["display_messages"].append({
-            "role": "assistant",
-            "content": assistant_text,
-            "blocks": assistant_blocks,
-        })
-    elif is_cancelled() or disconnected:
-        # Remove dangling user message if no response was generated
-        if history and history[-1]["role"] == "user" and isinstance(history[-1].get("content"), str):
-            history.pop()
-            if session["display_messages"] and session["display_messages"][-1]["role"] == "user":
-                session["display_messages"].pop()
-
-    _save_sessions()
-
-    if not disconnected:
-        try:
-            write_event({"type": "done"})
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        # Signal the sentinel so reconnect-stream consumers know we're done
+        with _live_cond:
+            _live_log.append(None)
+            _live_cond.notify_all()
+        with _session_live_streams_lock:
+            _session_live_streams.pop(session_id, None)
 
 
 # ── HTML UI ─────────────────────────────────────────────────────────────
@@ -1819,9 +1931,9 @@ function renderSessions() {
 }
 
 async function selectSession(sessionId) {
-  // If streaming, stop the current generation before switching
+  // If streaming, detach from the SSE connection but let the backend keep running
   if (isStreaming) {
-    stopGeneration();
+    _detachStream();
     // Reset streaming UI state
     isStreaming = false;
     abortController = null;
@@ -1847,9 +1959,121 @@ async function selectSession(sessionId) {
     // Guard: if user switched to another session while fetch was in flight, discard
     if (currentSessionId !== sessionId) return;
     renderStoredMessages(msgs);
+    // If the agent is still running in the background, reconnect to the live
+    // stream so the user sees the response streaming in real time.
+    _reconnectToStream(sessionId);
   } catch {
     // Don't clear messages on fetch failure (e.g., during server reload)
     // — leave the current display intact rather than showing empty state
+  }
+}
+
+async function _reconnectToStream(sessionId) {
+  if (isStreaming) return;
+
+  // Try to open the live replay stream. Returns 404 if the run already ended.
+  abortController = new AbortController();
+  let resp;
+  try {
+    resp = await fetch('/api/sessions/' + sessionId + '/stream', { signal: abortController.signal });
+  } catch (err) {
+    abortController = null;
+    if (err.name !== 'AbortError') {
+      // Network error — fall back to a one-shot message reload
+      try {
+        const msgs = await fetch('/api/sessions/' + sessionId + '/messages').then(function(r) { return r.json(); });
+        if (currentSessionId === sessionId) renderStoredMessages(msgs);
+      } catch {}
+    }
+    return;
+  }
+
+  if (!resp.ok) {
+    abortController = null;
+    // Run already finished — just reload stored messages
+    try {
+      const msgs = await fetch('/api/sessions/' + sessionId + '/messages').then(function(r) { return r.json(); });
+      if (currentSessionId === sessionId) renderStoredMessages(msgs);
+    } catch {}
+    return;
+  }
+
+  // Run is in progress — set up streaming UI and replay/continue the event stream
+  isStreaming = true;
+  streamingSessionId = sessionId;
+  streamingInner = messagesEl.querySelector('.messages-inner');
+  if (!streamingInner) {
+    streamingInner = document.createElement('div');
+    streamingInner.className = 'messages-inner';
+    messagesEl.innerHTML = '';
+    messagesEl.appendChild(streamingInner);
+  }
+  sendBtn.style.display = 'none';
+  stopBtn.style.display = 'flex';
+  inputEl.disabled = true;
+  showPendingCursor();
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      let streamDone = false;
+      for (const part of parts) {
+        const trimmed = part.trim();
+        if (!trimmed.startsWith('data: ')) continue;
+        const jsonStr = trimmed.slice(6);
+        if (!jsonStr) continue;
+        let event;
+        try { event = JSON.parse(jsonStr); } catch { continue; }
+        switch (event.type) {
+          case 'thinking_start': clearPendingCursor(); startThinkingBlock(); break;
+          case 'thinking_delta': appendThinkingDelta(event.content); break;
+          case 'thinking_end': endThinkingBlock(); break;
+          case 'text_start': clearPendingCursor(); flushTextBuffer(); startTextBlock(); break;
+          case 'text_delta': bufferTextDelta(event.content); break;
+          case 'text_end': endTextBlock(); break;
+          case 'tool_use_start': clearPendingCursor(); startToolBlock(event.tool); break;
+          case 'tool_result': finishToolBlock(event.tool, event.input || {}, event.content, event.download_content, event.download_filename); break;
+          case 'plot_data': addPlasmidPlot(event.plot_json); break;
+          case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
+          case 'error': clearPendingCursor(); startTextBlock(); appendTextDelta('Error: ' + event.content); endTextBlock(); break;
+          case 'done': streamDone = true; break;
+        }
+        if (streamDone) break;
+      }
+      if (streamDone) break;
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      clearPendingCursor(); startTextBlock(); appendTextDelta('Connection error: ' + err.message); endTextBlock();
+    }
+  }
+
+  clearPendingCursor();
+  isStreaming = false;
+  abortController = null;
+  streamingInner = null;
+  streamingSessionId = null;
+  sendBtn.style.display = 'flex';
+  stopBtn.style.display = 'none';
+  inputEl.disabled = false;
+  const cursor = messagesEl.querySelector('.streaming-cursor');
+  if (cursor) cursor.remove();
+  loadUserLibrary();
+
+  // Reload stored messages so the view is stable (not dependent on DOM built during streaming)
+  if (currentSessionId === sessionId) {
+    try {
+      const msgs = await fetch('/api/sessions/' + sessionId + '/messages').then(function(r) { return r.json(); });
+      if (currentSessionId === sessionId) renderStoredMessages(msgs);
+    } catch {}
   }
 }
 
@@ -1955,11 +2179,7 @@ async function restoreBatchSession(meta) {
     const data = await r.json();
     if (currentSessionId !== sessionId) return;
     if (data.error) {
-      // Job no longer in memory (server was restarted). Show a graceful expired state.
-      messagesEl.innerHTML = '<div class="messages-inner"><div class="msg assistant"><div class="msg-bubble-assistant" style="color:var(--sand-500);font-size:13px;">' +
-        '<strong>' + escapeHtml(filename || 'Batch run') + '</strong> · ' + rowCount + ' design' + (rowCount === 1 ? '' : 's') + '<br>' +
-        '<span style="color:var(--sand-400);font-size:12px;margin-top:4px;display:block;">Results are no longer available — the server was restarted after this batch ran. Re-upload the CSV to run it again.</span>' +
-        '</div></div></div>';
+      messagesEl.innerHTML = '<div class="messages-inner"><div class="msg assistant"><div class="msg-bubble-assistant" style="color:var(--sand-400);font-size:13px;">Could not load batch results.</div></div></div>';
       return;
     }
 
@@ -2021,7 +2241,7 @@ async function deleteSessionById(sessionId) {
 
 function newChat() {
   if (isStreaming) {
-    stopGeneration();
+    _detachStream();
     isStreaming = false;
     abortController = null;
     streamingInner = null;
@@ -2901,7 +3121,14 @@ async function sendMessage() {
   loadUserLibrary();
 }
 
+function _detachStream() {
+  // Drop the SSE connection without cancelling the server-side run.
+  // Use this when navigating away — the agent keeps going in the background.
+  if (abortController) abortController.abort();
+}
+
 function stopGeneration() {
+  // Explicitly cancel the run (Stop button). Aborts client AND tells server to stop.
   if (abortController) abortController.abort();
   if (currentSessionId) {
     fetch('/api/sessions/' + currentSessionId + '/cancel', { method: 'POST' }).catch(function(){});
@@ -3176,7 +3403,7 @@ function showBatchConfirm(csvText, filename) {
   var card = document.createElement('div');
   card.className = 'msg assistant';
   card.id = confirmId;
-  var curModel = modelSelect.value;
+  var curModel = 'claude-sonnet-4-6';
   var modelOpts = [
     ['claude-opus-4-7', 'Opus 4.7 — most capable'],
     ['claude-opus-4-6', 'Opus 4.6'],
@@ -4646,6 +4873,8 @@ def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str) -> None:
         row_state["status"] = "error"
         row_state["error"] = str(e)
         row_state["log"].append({"type": "error", "content": str(e)})
+    finally:
+        _save_batch_jobs()
 
 
 def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
@@ -4678,6 +4907,8 @@ def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
         row_state["status"] = "error"
         row_state["error"] = str(e)
         row_state["log"].append({"type": "error", "content": str(e)})
+    finally:
+        _save_batch_jobs()
 
 
 def start_batch_job(rows: list, model: str) -> str:
@@ -4706,6 +4937,7 @@ def start_batch_job(rows: list, model: str) -> str:
         for idx, row in enumerate(rows):
             _run_batch_row(job_id, idx, row, model)
         job["status"] = "done"
+        _save_batch_jobs()
 
     threading.Thread(target=worker, daemon=True).start()
     return job_id
@@ -4785,6 +5017,66 @@ class AgentHandler(SimpleHTTPRequestHandler):
                     self._send_json(session["display_messages"])
             else:
                 self._send_json([], 404)
+
+        elif path.startswith("/api/sessions/") and path.endswith("/status"):
+            session_id = path.split("/")[3]
+            session = get_session(session_id)
+            if session:
+                self._send_json({
+                    "session_id": session_id,
+                    "running": session_id in _active_turns,
+                })
+            else:
+                self._send_json({"error": "Session not found"}, 404)
+
+        elif path.startswith("/api/sessions/") and path.endswith("/stream"):
+            session_id = path.split("/")[3]
+            with _session_live_streams_lock:
+                entry = _session_live_streams.get(session_id)
+            if not entry:
+                self._send_json({"error": "Session not running"}, 404)
+                return
+
+            live_log, live_cond = entry
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+
+            def _write_sse(data: dict):
+                line = f"data: {json.dumps(data)}\n\n"
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+
+            offset = 0
+            stream_done = False
+            while not stream_done:
+                with live_cond:
+                    if offset >= len(live_log):
+                        live_cond.wait(timeout=30)
+                    new_events = live_log[offset:]
+                    offset += len(new_events)
+
+                if not new_events:
+                    # Keepalive on timeout
+                    try:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        return
+                    continue
+
+                for evt in new_events:
+                    if evt is None:
+                        stream_done = True
+                        break
+                    try:
+                        _write_sse(evt)
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        return
 
         elif path == "/api/user-library":
             from src.user_library import load_user_designed_constructs
@@ -5049,22 +5341,57 @@ class AgentHandler(SimpleHTTPRequestHandler):
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
 
-            def write_event(data: dict):
-                try:
-                    line = f"data: {json.dumps(data)}\n\n"
-                    self.wfile.write(line.encode("utf-8"))
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
+            def _write_sse(data: dict):
+                line = f"data: {json.dumps(data)}\n\n"
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
 
-            # Send session_id to client
-            write_event({"type": "session_id", "session_id": session_id})
-
+            # Send session_id synchronously before handing off to the thread
             try:
-                run_agent_turn_streaming(user_message, session_id, write_event, model=request_model)
-            except Exception as e:
-                logger.exception("Agent error")
-                write_event({"type": "error", "content": str(e)})
+                _write_sse({"type": "session_id", "session_id": session_id})
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
+            # Run the agent in a background thread so the run survives if the
+            # client navigates away. Events are queued; this handler drains the
+            # queue and forwards to the SSE client until it disconnects or the
+            # agent finishes.
+            import queue as _q
+            event_queue: _q.Queue = _q.Queue()
+
+            def _agent_thread():
+                try:
+                    run_agent_turn_streaming(
+                        user_message, session_id,
+                        write_event=event_queue.put,
+                        model=request_model,
+                    )
+                except Exception as e:
+                    logger.exception("Agent error")
+                    event_queue.put({"type": "error", "content": str(e)})
+                finally:
+                    event_queue.put(None)  # sentinel — agent done
+
+            threading.Thread(target=_agent_thread, daemon=True).start()
+
+            # Forward events to the SSE client until it disconnects or agent finishes
+            while True:
+                try:
+                    item = event_queue.get(timeout=30)
+                except _q.Empty:
+                    # Send a keepalive comment to detect dead connections
+                    try:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        break  # client gone; agent thread keeps running
+                    continue
+                if item is None:
+                    break  # sentinel — agent finished
+                try:
+                    _write_sse(item)
+                except (BrokenPipeError, ConnectionResetError):
+                    break  # client gone; agent thread keeps running
 
         elif path.startswith("/api/sessions/") and path.endswith("/cancel"):
             session_id = path.split("/")[3]

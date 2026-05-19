@@ -88,8 +88,8 @@ src/
 ├── assembler.py           # Deterministic sequence assembly engine + fusion support
 ├── library.py             # Backbone/insert library search + Addgene/NCBI auto-fallback
 ├── ncbi_integration.py    # NCBI Entrez gene search + CDS retrieval (Biopython)
-├── server.py              # MCP server with 18 tools (imports from library.py)
-├── tools.py               # Standalone tool definitions for agent loop
+├── server.py              # Standalone stdio MCP server (exposes ALL_TOOLS from tools.py)
+├── tools.py               # Tool definitions — single source of truth for all interfaces
 └── addgene_integration.py # Addgene web scraping, GenBank feature parsing, API client
 
 app/
@@ -240,25 +240,38 @@ Severity weights: **Critical** = 2 pts, **Major** = 1 pt, **Minor** = 0.5 pts, *
 
 ## MCP Server
 
-The MCP server (`src/server.py`) exposes 18 tools for Claude to use:
+The plasmid designer can run as a standalone stdio MCP server (`src/server.py`)
+in any MCP client — Claude Desktop, Claude Code, Cowork, or third-party hosts.
+It exposes the full tool set from `src/tools.py` (`ALL_TOOLS`), so the same
+tools are available everywhere: library search, Addgene/NCBI retrieval,
+deterministic assembly, Golden Gate design, fusion proteins, restriction-site
+checking, validation, and export.
 
-- `search_backbones` / `get_backbone` — search and retrieve backbone vectors
-- `search_inserts` / `get_insert` — search and retrieve insert sequences
-- `search_addgene` / `fetch_addgene_sequence_with_metadata` / `import_addgene_to_library` — Addgene integration
-- `search_gene` / `fetch_gene` — NCBI gene search + CDS retrieval
-- `fuse_inserts` — protein tagging / fusion CDS assembly
-- `validate_sequence` — DNA validation (valid chars, GC content, codons)
-- `assemble_construct` — deterministic sequence assembly
-- `export_construct` — format as raw/FASTA/GenBank
-- `validate_construct` — rubric-style validation report
-- `get_insertion_site` — MCS position info
-- `design_construct` — metadata and size estimates
+The server is a thin wrapper over `tools.py` — adding a tool there
+automatically exposes it via MCP. There is no separate tool registry to keep
+in sync.
 
-To use as a standalone MCP server:
+To run directly:
 
 ```bash
 python -m src.server
 ```
+
+To register in Claude Desktop, add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "plasmid-library": {
+      "command": "python",
+      "args": ["-m", "src.server"],
+      "cwd": "/path/to/claude-plasmids"
+    }
+  }
+}
+```
+
+(Use the full path to your conda env's python if `plannotate` is conda-only.)
 
 ## Backbone Library
 

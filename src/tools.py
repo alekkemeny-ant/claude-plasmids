@@ -103,6 +103,13 @@ try:
 except ImportError:
     PROTEIN_ANALYSIS_AVAILABLE = False
 
+# Fusion design advisor (combinatorial variant generation + ranking)
+try:
+    from .fusion_designer import design_fusion_variants as _design_fusion_variants
+    FUSION_DESIGNER_AVAILABLE = True
+except ImportError:
+    FUSION_DESIGNER_AVAILABLE = False
+
 # Smart mutations (curated GoF/LoF + deterministic edits)
 try:
     from .mutations import (
@@ -1485,6 +1492,175 @@ async def predict_fusion_sites_tool(args):
 
 
 @tool(
+    "design_fusion_variants",
+    "Analyse a fluorescent protein + target protein pair and return ~5 ranked "
+    "fusion construct designs with rationale. Evaluates FP suitability (pKa, "
+    "oligomerization, compartment compatibility), predicts protein topology "
+    "(signal peptide, MTS, TM helices, GPI anchors), finds internal loop "
+    "insertion sites, and suggests better FP alternatives when issues are found. "
+    "Call this BEFORE fuse_inserts / assemble_construct when the user asks for "
+    "a fluorescent fusion construct, especially when they want options or when "
+    "the target has a known or suspected subcellular localisation. Does NOT "
+    "assemble — returns design plans for the user to choose from.",
+    {
+        "type": "object",
+        "properties": {
+            "fp_name": {
+                "type": "string",
+                "description": "Fluorescent protein name (e.g. 'mCherry', 'mNeonGreen', 'EGFP')",
+            },
+            "target_gene_name": {
+                "type": "string",
+                "description": "Target gene or protein name (e.g. 'CHCHD4', 'H2B', 'LMNA')",
+            },
+            "target_aa_sequence": {
+                "type": "string",
+                "description": "Target protein amino acid sequence (single-letter code). Preferred over dna_sequence.",
+            },
+            "target_dna_sequence": {
+                "type": "string",
+                "description": "Alternative: target CDS as DNA (will be translated in frame 0).",
+            },
+            "fp_aa_sequence": {
+                "type": "string",
+                "description": "FP amino acid sequence (optional; used to infer FP length when the FP is not in the built-in database).",
+            },
+            "known_localization": {
+                "type": "string",
+                "description": (
+                    "Known or expected subcellular localisation of the target protein "
+                    "(e.g. 'mitochondria', 'lysosome', 'ER', 'nucleus'). "
+                    "If provided, it overrides topology-based inference for compartment-specific "
+                    "FP suitability checks."
+                ),
+            },
+        },
+        "required": ["fp_name", "target_gene_name"],
+    },
+)
+async def design_fusion_variants_tool(args):
+    if not FUSION_DESIGNER_AVAILABLE:
+        return _error("Fusion Designer module not available.")
+
+    fp_name = args.get("fp_name", "").strip()
+    target_name = args.get("target_gene_name", "").strip()
+    if not fp_name or not target_name:
+        return _error("Both fp_name and target_gene_name are required.")
+
+    target_aa = args.get("target_aa_sequence") or None
+    target_dna = args.get("target_dna_sequence") or None
+    fp_aa = args.get("fp_aa_sequence") or None
+    localization = args.get("known_localization") or None
+
+    if not target_aa and not target_dna:
+        return _error(
+            "Provide either target_aa_sequence (preferred) or target_dna_sequence. "
+            "Retrieve the sequence with get_insert / fetch_gene first."
+        )
+
+    try:
+        result = _design_fusion_variants(
+            fp_name=fp_name,
+            target_gene_name=target_name,
+            target_aa_sequence=target_aa,
+            target_dna_sequence=target_dna,
+            fp_aa_sequence=fp_aa,
+            known_localization=localization,
+        )
+    except Exception as exc:
+        return _error(f"Fusion design analysis failed: {exc}")
+
+    # Format a readable report for the agent
+    lines: list[str] = []
+
+    # ── FP assessment ──
+    fp_props = result["fp_properties"]
+    fp_assess = result["fp_assessment"]
+    lines.append(f"## Fluorescent Protein: {result['fp_name']}")
+    lines.append(
+        f"- Oligomerization: {fp_props['oligomerization']} | "
+        f"pKa: {fp_props['pka'] if fp_props['pka'] is not None else 'N/A'} | "
+        f"Brightness: {fp_props['brightness']:.2f}× EGFP | "
+        f"Size: ~{fp_props['aa_length']} aa"
+    )
+    if fp_props["strengths"]:
+        lines.append(f"- Strengths: {'; '.join(fp_props['strengths'])}")
+    if fp_props["weaknesses"]:
+        lines.append(f"- Weaknesses: {'; '.join(fp_props['weaknesses'])}")
+
+    lines.append(
+        f"\n**FP Suitability: {fp_assess['verdict'].upper()} ({fp_assess['score']}/100)**"
+    )
+    if fp_assess["issues"]:
+        lines.append("Issues:")
+        for issue in fp_assess["issues"]:
+            lines.append(f"  ⚠ {issue}")
+    if fp_assess["notes"]:
+        for note in fp_assess["notes"]:
+            lines.append(f"  ✓ {note}")
+
+    # ── Alternative suggestions ──
+    alts = result.get("alternatives", [])
+    if alts:
+        lines.append("\n**Alternative FP Suggestions:**")
+        for alt in alts:
+            lines.append(
+                f"  • {alt['canonical_name']} — {alt['reason']} "
+                f"(pKa {alt['pka']}, {alt['brightness']:.2f}× EGFP)"
+            )
+
+    # ── Topology ──
+    topo = result["target_topology"]
+    lines.append(f"\n## Target Protein: {target_name} ({topo['protein_length_aa']} aa)")
+    lines.append(
+        f"- N-terminus: {'accessible' if topo['n_terminal_accessible'] else '** BLOCKED **'} | "
+        f"C-terminus: {'accessible' if topo['c_terminal_accessible'] else '** BLOCKED **'} | "
+        f"TM helices: {topo['tm_count']}"
+    )
+    if topo["inferred_localization"]:
+        lines.append(f"- Inferred localisation: {topo['inferred_localization'].replace('_', ' ')}")
+    for feat in topo["features"]:
+        lines.append(f"  ⚠ [{feat['type'].upper()}] {feat['note']}")
+    for warn in topo.get("warnings", []):
+        lines.append(f"  ⚠ {warn}")
+
+    # Internal sites
+    internal = result.get("internal_sites", [])
+    if internal:
+        lines.append(f"- Internal disordered loops ({len(internal)} found):")
+        for site in internal[:3]:
+            lines.append(
+                f"    Residues {site['start'] + 1}–{site['end']} "
+                f"({site['length']} aa, disorder score {site['mean_disorder']:.2f})"
+            )
+    else:
+        lines.append("- No long disordered internal loops found — terminal fusions preferred.")
+
+    # ── Ranked designs ──
+    lines.append(f"\n## Ranked Fusion Designs")
+    for design in result["designs"]:
+        rank = design["rank"]
+        conf = design["confidence"]
+        lines.append(f"\n### Design #{rank}: {design['name']}")
+        lines.append(f"**Confidence: {conf}** (score {design['score']}/100)")
+        lines.append(f"Orientation: `{design['orientation']}`")
+        lines.append(f"Linker: {design['linker']}")
+        lines.append(f"Linker rationale: {design['linker_rationale']}")
+        lines.append(f"Design rationale: {design['design_rationale']}")
+        if design.get("concerns"):
+            lines.append("Concerns:")
+            for c in design["concerns"]:
+                lines.append(f"  ⚠ {c}")
+
+    lines.append(
+        "\n---\nPresent these designs to the user and ask which they would like to assemble. "
+        "Then use fuse_inserts → assemble_construct → validate_construct → export_construct."
+    )
+
+    return _text("\n".join(lines))
+
+
+@tool(
     "lookup_known_mutations",
     "Look up curated GoF/LoF mutations for common oncogenes and tumor "
     "suppressors (BRAF, KRAS, TP53, EGFR, PTEN, PIK3CA, IDH1/2, etc.). "
@@ -2566,6 +2742,39 @@ async def search_fpbase_tool(args):
 
 
 @tool(
+    "submit_bulk_designs",
+    "Hand a list of constructs to the bulk design planning flow. "
+    "Call this tool as soon as the user provides (or implies) multiple constructs to build in one batch — "
+    "for example, a table of names and oligo/gene sequences, or a numbered list of designs. "
+    "Do NOT attempt to design the constructs yourself. Just parse the list and call this tool immediately.",
+    {
+        "type": "object",
+        "properties": {
+            "rows": {
+                "type": "array",
+                "description": "One entry per construct. Each entry must have at least 'description' (full design prompt) and optionally 'name'.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name":        {"type": "string", "description": "Construct name/ID"},
+                        "description": {"type": "string", "description": "Complete design instruction for this construct"},
+                    },
+                    "required": ["description"],
+                },
+            },
+        },
+        "required": ["rows"],
+    },
+)
+async def submit_bulk_designs_tool(args):
+    rows = args.get("rows", [])
+    # The web UI intercepts [BULK_DESIGNS_READY] to launch the planning flow.
+    # CLI/eval callers can ignore it.
+    import json as _json
+    return _text(f"[BULK_DESIGNS_READY] {_json.dumps(rows)}")
+
+
+@tool(
     "log_experimental_outcome",
     "Record a wet-lab experimental outcome for a construct designed in this "
     "session. The web UI persists this to session memory so future "
@@ -2624,6 +2833,7 @@ ALL_TOOLS = [
     # Phase-2 advanced design tools
     score_construct_confidence_tool,
     predict_fusion_sites_tool,
+    design_fusion_variants_tool,
     lookup_known_mutations_tool,
     apply_mutation_tool,
     fetch_promoter_region_tool,
@@ -2640,6 +2850,8 @@ ALL_TOOLS = [
     fetch_oa_fulltext_tool,
     # FPbase fluorescent protein search
     search_fpbase_tool,
+    # Bulk design handoff
+    submit_bulk_designs_tool,
     # Troubleshooting / project memory
     log_experimental_outcome_tool,
 ]

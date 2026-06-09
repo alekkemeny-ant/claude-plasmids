@@ -52,6 +52,14 @@ from src.tools import (
 from src.references import ReferenceTracker
 from src.library import load_backbones, load_inserts
 from src.plasmid_intake import parse_upload, run_plannotate, build_intake_message
+from bulk_planner import (
+    generate_bulk_plan,
+    generate_from_template,
+    estimate_cost,
+    COST_WARN_THRESHOLD,
+    COST_SPLIT_THRESHOLD,
+    MODEL_PRICING,
+)
 _DB_MODULE_PATH = Path(__file__).parent / "database.py"
 import importlib.util as _importlib_util
 _db_spec = _importlib_util.spec_from_file_location("plasmid_database", _DB_MODULE_PATH)
@@ -132,6 +140,20 @@ _session_live_streams_lock = threading.Lock()
 # ── Batch job state ─────────────────────────────────────────────────────
 _batch_jobs: dict[str, dict] = {}
 _batch_pause_events: dict[str, threading.Event] = {}
+
+# ── Bulk plan store (in-memory, lives until /api/bulk/run consumes it) ──
+_bulk_plans: dict[str, dict] = {}
+
+# ── Row-gate events — cleared by default; set by /api/batch/{id}/proceed/{idx} ──
+_row_gate_events: dict[str, threading.Event] = {}
+
+def _get_row_gate(job_id: str, row_idx: int) -> threading.Event:
+    key = f"{job_id}:gate:{row_idx}"
+    if key not in _row_gate_events:
+        ev = threading.Event()
+        # Starts cleared — worker blocks until user approves
+        _row_gate_events[key] = ev
+    return _row_gate_events[key]
 
 def _get_pause_event(job_id: str, row_idx: int) -> threading.Event:
     key = f"{job_id}:{row_idx}"
@@ -464,6 +486,21 @@ def _emit_tool_result(
     session persistence, and display-message recording. Shared between
     the streaming loop and any future callers so behaviour stays in sync.
     """
+    if tool_name == "submit_bulk_designs" and result_str.startswith("[BULK_DESIGNS_READY]"):
+        try:
+            rows_json = result_str[len("[BULK_DESIGNS_READY] "):]
+            rows_data = json.loads(rows_json)
+        except Exception:
+            rows_data = []
+        safe_write({"type": "bulk_design_rows", "rows": rows_data})
+        assistant_blocks.append({
+            "type": "tool_use",
+            "name": tool_name,
+            "input": tool_input,
+            "result": f"Handed {len(rows_data)} construct(s) to the bulk design planner.",
+        })
+        return  # don't emit a regular tool_result card
+
     if (
         tool_name == "log_experimental_outcome"
         and result_str.startswith("[OUTCOME_LOGGED]")
@@ -1270,7 +1307,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .token-bar-fill.warn  { background: var(--brand-fig); }
   .token-bar-fill.alert { background: var(--brand-orange); }
-  .input-buttons { position: absolute; right: 12px; bottom: 12px; }
+  .input-buttons { position: absolute; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 4px; }
   .send-btn, .stop-btn {
     width: 36px; height: 36px; border: none; border-radius: 12px;
     cursor: pointer; display: flex; align-items: center; justify-content: center;
@@ -1403,6 +1440,56 @@ HTML_PAGE = r"""<!DOCTYPE html>
     transition: background 0.15s, color 0.15s;
   }
   .attach-btn:hover { background: var(--sand-100); color: var(--sand-700); }
+
+  /* ── Bulk design entry menu ── */
+  .bulk-entry-menu {
+    position: absolute; bottom: 44px; left: 0;
+    background: white; border: 1px solid var(--sand-200); border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.10); padding: 6px; min-width: 220px;
+    z-index: 200;
+  }
+  .bulk-entry-menu button {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 9px 12px; border: none; background: transparent; border-radius: 7px;
+    cursor: pointer; font-size: 13px; color: var(--sand-700); font-family: inherit;
+    text-align: left;
+  }
+  .bulk-entry-menu button:hover { background: var(--sand-100); }
+  .bulk-entry-menu button svg { flex-shrink: 0; color: var(--sand-500); }
+
+  /* ── Bulk plan card ── */
+  .bulk-plan-card {
+    border: 1px solid var(--sand-200); border-radius: 12px;
+    background: white; padding: 18px; width: 100%; box-sizing: border-box;
+  }
+  .bulk-plan-title { font-size: 14px; font-weight: 600; color: var(--sand-800); margin-bottom: 6px; }
+  .bulk-plan-summary { font-size: 13px; color: var(--sand-600); margin-bottom: 12px; line-height: 1.5; }
+  .bulk-plan-cost {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 500; padding: 4px 10px;
+    border-radius: 6px; margin-bottom: 14px;
+  }
+  .bulk-plan-cost.ok     { background: #f0fdf4; color: #166534; }
+  .bulk-plan-cost.yellow { background: #fefce8; color: #854d0e; }
+  .bulk-plan-cost.orange { background: #fff7ed; color: #9a3412; }
+  .bulk-plan-rows-wrap {
+    border: 1px solid var(--sand-200); border-radius: 8px;
+    max-height: 260px; overflow-y: auto; margin-bottom: 14px;
+  }
+  .bulk-plan-row {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 7px 10px; border-bottom: 1px solid var(--sand-100); font-size: 12px;
+  }
+  .bulk-plan-row:last-child { border-bottom: none; }
+  .bulk-plan-row-num { color: var(--sand-400); min-width: 22px; flex-shrink: 0; }
+  .bulk-plan-row-name { color: var(--sand-700); font-weight: 500; flex-shrink: 0; }
+  .bulk-plan-row-desc { color: var(--sand-500); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bulk-context-area { display: none; margin-bottom: 12px; }
+  .bulk-context-area textarea {
+    width: 100%; box-sizing: border-box; border: 1px solid var(--sand-200); border-radius: 8px;
+    padding: 8px 10px; font-size: 13px; font-family: inherit; resize: vertical;
+    min-height: 70px; color: var(--sand-800);
+  }
 
   /* ── Batch cards (rendered inline in the chat) ── */
   .batch-card {
@@ -1695,8 +1782,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <span id="plasmid-badge-name"></span>
           <span id="plasmid-badge-status" style="color:var(--sand-400);">analyzing…</span>
         </div>
+        <div id="csv-badge" style="display:none;align-items:center;gap:6px;padding:4px 8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;font-size:12px;color:#166534;margin-bottom:4px;">
+          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <span id="csv-badge-name"></span>
+          <button onclick="clearPendingCSV()" style="margin-left:4px;background:none;border:none;cursor:pointer;color:#166534;font-size:13px;line-height:1;padding:0" title="Remove CSV">&times;</button>
+        </div>
         <div class="input-buttons">
-          <button class="attach-btn" id="attach-btn" title="Attach plasmid file (.gb, .gbk, .fasta)" onclick="document.getElementById('plasmid-file-input').click()">
+          <button class="attach-btn" id="attach-btn" title="Attach file (.gb/.gbk/.fasta for plasmid library · .csv for bulk design)" onclick="document.getElementById('combined-file-input').click()">
             <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
           </button>
           <button class="send-btn" id="send-btn" onclick="sendMessage()">
@@ -1714,6 +1806,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
+  <input type="file" id="combined-file-input" accept=".gb,.gbk,.genbank,.fasta,.fa,.seq,.csv" style="display:none" onchange="onCombinedFileChosen(this)">
+  <!-- legacy IDs kept so drag-drop and any other callers still work -->
   <input type="file" id="batch-csv-input" accept=".csv" style="display:none" onchange="onBatchFileChosen(this)">
   <input type="file" id="plasmid-file-input" accept=".gb,.gbk,.genbank,.fasta,.fa,.seq" style="display:none" onchange="onPlasmidFileChosen(this)">
 
@@ -2057,6 +2151,10 @@ async function _reconnectToStream(sessionId) {
           case 'plot_data': addPlasmidPlot(event.plot_json); break;
           case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
           case 'error': clearPendingCursor(); startTextBlock(); appendTextDelta('Error: ' + event.content); endTextBlock(); break;
+          case 'bulk_design_rows':
+            streamDone = true;
+            requestBulkPlanFromRows(event.rows || [], modelSelect.value);
+            break;
           case 'done': streamDone = true; break;
         }
         if (streamDone) break;
@@ -3027,6 +3125,60 @@ async function sendMessage() {
   const text = inputEl.value.trim();
   if (!text || isStreaming) return;
 
+  // If a CSV is attached, run the template-batch flow instead of normal chat
+  if (_pendingCSV && _pendingCSV.rows && _pendingCSV.rows.length) {
+    var pendingRows = _pendingCSV.rows;
+    var pendingFilename = _pendingCSV.filename;
+    clearPendingCSV();
+    inputEl.value = '';
+    autoResize(inputEl);
+    hideWelcome();
+    var inner = getInner();
+    // Show user message bubble
+    var nowStr = new Date().toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'});
+    var userDiv = document.createElement('div');
+    userDiv.className = 'msg user';
+    userDiv.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(text) + '</div>' +
+      '<div class="msg-date" style="display:flex;align-items:center;gap:6px">' +
+        '<svg width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' +
+        escapeHtml(pendingFilename) + ' · ' + pendingRows.length + ' rows' +
+        ' &nbsp;' + nowStr +
+      '</div></div>';
+    inner.appendChild(userDiv);
+    // Show "merging" spinner
+    var loadId = 'tpl-loading-' + Date.now();
+    var lc = document.createElement('div');
+    lc.className = 'msg assistant'; lc.id = loadId;
+    lc.innerHTML = '<div class="msg-bubble-assistant" style="color:var(--sand-500);font-size:13px">' +
+      '<span class="streaming-cursor"></span> Merging template with ' + pendingRows.length + ' row' + (pendingRows.length === 1 ? '' : 's') + '&hellip;</div>';
+    inner.appendChild(lc);
+    scrollToBottom();
+    fetch('/api/bulk/template-run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({template: text, csv_rows: pendingRows, model: modelSelect.value}),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var l = document.getElementById(loadId); if (l) l.remove();
+      if (data.error) { alert('Error: ' + data.error); return; }
+      var sid = data.session_id; var jobId = data.job_id;
+      saveSessionId(sid);
+      loadSessions();
+      messagesEl.innerHTML = '';
+      initBatchCards(jobId, data.row_count, pendingFilename, modelSelect.value);
+      _batchSessions[sid] = jobId;
+      if (_batchPollTimers[sid]) clearInterval(_batchPollTimers[sid]);
+      _batchPollTimers[sid] = setInterval(function() { pollBatchForSession(sid); }, 2000);
+      pollBatchForSession(sid);
+    })
+    .catch(function(e) {
+      var l = document.getElementById(loadId); if (l) l.remove();
+      alert('Template run failed: ' + e);
+    });
+    return;
+  }
+
   isStreaming = true;
   streamingSessionId = currentSessionId;
   sendBtn.style.display = 'none';
@@ -3165,6 +3317,7 @@ inputEl.addEventListener('keydown', function(e) {
 var _batchSessions = {};    // sessionId → jobId
 var _batchPollTimers = {};  // sessionId → interval timer
 var _batchConfirmData = {};
+var _bulkPlanContext = {};  // cardId → {csvText, filename, model}
 const chatPanelEl = document.getElementById('chat-panel');
 const dropOverlayEl = document.getElementById('drop-overlay');
 
@@ -3226,7 +3379,7 @@ chatPanelEl.addEventListener('drop', function(e) {
     reader.onload = function(ev) { uploadPlasmidFile(ev.target.result, file.name); };
     reader.readAsText(file);
   } else if (file.name.endsWith('.csv') || file.type === 'text/csv') {
-    reader.onload = function(ev) { showBatchConfirm(ev.target.result, file.name); };
+    reader.onload = function(ev) { requestBulkPlan(ev.target.result, file.name); };
     reader.readAsText(file);
   } else {
     alert('Supported file types: .gb, .gbk, .fasta (plasmid library) or .csv (batch design).');
@@ -3237,9 +3390,59 @@ function onBatchFileChosen(input) {
   var file = input.files[0];
   if (!file) return;
   var reader = new FileReader();
-  reader.onload = function(e) { showBatchConfirm(e.target.result, file.name); };
+  reader.onload = function(e) { requestBulkPlan(e.target.result, file.name); };
   reader.readAsText(file);
   input.value = '';
+}
+
+var _pendingCSV = null; // {rows, filename, rawText}
+
+function onCombinedFileChosen(input) {
+  var file = input.files[0];
+  if (!file) return;
+  input.value = '';
+  var reader = new FileReader();
+  if (file.name.endsWith('.csv') || file.type === 'text/csv') {
+    reader.onload = function(e) { attachPendingCSV(e.target.result, file.name); };
+  } else if (isPlasmidFile(file)) {
+    reader.onload = function(e) { uploadPlasmidFile(e.target.result, file.name); };
+  } else {
+    alert('Supported: .gb, .gbk, .fasta (plasmid library) or .csv (bulk design)');
+    return;
+  }
+  reader.readAsText(file);
+}
+
+function attachPendingCSV(csvText, filename) {
+  var parsed = _parseCSVRows(csvText);
+  if (!parsed.rows.length) {
+    alert('No rows with a "description" column found. If you just have Name/Oligo columns, that\'s fine — just attach and send your template message.');
+    // Still attach even if no description column — raw rows carry the data
+  }
+  // Store raw rows from csv (all columns, not just description)
+  var rawRows = [];
+  var lines = csvText.split('\n').filter(function(l) { return l.trim(); });
+  if (lines.length > 1) {
+    var headers = _splitCSVLine(lines[0]);
+    for (var i = 1; i < lines.length; i++) {
+      var fields = _splitCSVLine(lines[i]);
+      if (!fields.some(function(f) { return f.trim(); })) continue;
+      var row = {};
+      headers.forEach(function(h, j) { row[h.trim()] = (fields[j] || '').trim(); });
+      rawRows.push(row);
+    }
+  }
+  _pendingCSV = {rows: rawRows, filename: filename, rawText: csvText};
+  var badge = document.getElementById('csv-badge');
+  var label = document.getElementById('csv-badge-name');
+  if (badge) badge.style.display = 'flex';
+  if (label) label.textContent = filename + ' — ' + rawRows.length + ' row' + (rawRows.length === 1 ? '' : 's');
+}
+
+function clearPendingCSV() {
+  _pendingCSV = null;
+  var badge = document.getElementById('csv-badge');
+  if (badge) badge.style.display = 'none';
 }
 
 function onPlasmidFileChosen(input) {
@@ -3527,6 +3730,492 @@ function cancelBatchConfirm(confirmId) {
   if (card) card.remove();
 }
 
+// ── Bulk design planning flow ────────────────────────────────────────────
+
+var _bulkEntryMenuOpen = false;
+
+function showBulkEntryMenu(e) {
+  e.stopPropagation();
+  var existing = document.getElementById('bulk-entry-menu');
+  if (existing) { existing.remove(); _bulkEntryMenuOpen = false; return; }
+  _bulkEntryMenuOpen = true;
+  var btn = document.getElementById('bulk-design-btn');
+  var wrap = btn.closest('.input-buttons') || btn.parentElement;
+  var menu = document.createElement('div');
+  menu.className = 'bulk-entry-menu';
+  menu.id = 'bulk-entry-menu';
+  menu.innerHTML =
+    '<button onclick="closeBulkEntryMenu();document.getElementById(\'batch-csv-input\').click()">' +
+      '<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>' +
+      'Upload CSV' +
+    '</button>' +
+    '<button onclick="closeBulkEntryMenu();startBulkChatMode()">' +
+      '<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>' +
+      'Describe in chat' +
+    '</button>';
+  wrap.style.position = 'relative';
+  wrap.appendChild(menu);
+  setTimeout(function() {
+    document.addEventListener('click', closeBulkEntryMenuOnBlur);
+  }, 0);
+}
+
+function closeBulkEntryMenu() {
+  var m = document.getElementById('bulk-entry-menu');
+  if (m) m.remove();
+  _bulkEntryMenuOpen = false;
+  document.removeEventListener('click', closeBulkEntryMenuOnBlur);
+}
+
+function closeBulkEntryMenuOnBlur() { closeBulkEntryMenu(); }
+
+function startBulkChatMode() {
+  // Inject a primer into the chat textarea so the user knows what to do
+  var ta = document.getElementById('user-input');
+  if (ta) {
+    ta.value = 'I want to design multiple constructs in bulk. ';
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    if (typeof autoResize === 'function') autoResize(ta);
+  }
+}
+
+// Called when the agent invokes submit_bulk_designs — rows already parsed.
+function requestBulkPlanFromRows(rows, model) {
+  if (!rows || !rows.length) return;
+  hideWelcome();
+  var inner = getInner();
+  var loadingId = 'bulk-loading-' + Date.now();
+  var lc = document.createElement('div');
+  lc.className = 'msg assistant';
+  lc.id = loadingId;
+  lc.innerHTML = '<div class="msg-bubble-assistant" style="color:var(--sand-500);font-size:13px">' +
+    '<span class="streaming-cursor"></span> Analysing ' + rows.length + ' design' + (rows.length === 1 ? '' : 's') + '&hellip;' +
+    '</div>';
+  inner.appendChild(lc);
+  scrollToBottom();
+
+  fetch('/api/bulk/plan', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({rows: rows, model: model || modelSelect.value, filename: 'bulk_design.csv'}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(plan) {
+    var l = document.getElementById(loadingId); if (l) l.remove();
+    if (plan.error) { alert('Planning error: ' + plan.error); return; }
+    showBulkPlanCard(plan, null, 'bulk_design.csv');
+  })
+  .catch(function(e) {
+    var l = document.getElementById(loadingId); if (l) l.remove();
+    alert('Failed to generate plan: ' + e);
+  });
+}
+
+// Core planning flow — called when a CSV is uploaded via drag-drop or button.
+// Routes through /api/bulk/plan instead of showing the old batch confirm dialog.
+function requestBulkPlan(csvText, filename) {
+  var parsed = _parseCSVRows(csvText);
+  if (!parsed.rows.length) {
+    showBatchConfirm(csvText, filename); // fallback if no rows
+    return;
+  }
+  hideWelcome();
+  var inner = getInner();
+  // Show a loading card while we call the planning API
+  var loadingId = 'bulk-loading-' + Date.now();
+  var loadingCard = document.createElement('div');
+  loadingCard.className = 'msg assistant';
+  loadingCard.id = loadingId;
+  loadingCard.innerHTML = '<div class="msg-bubble-assistant" style="color:var(--sand-500);font-size:13px">' +
+    '<span class="streaming-cursor"></span> Analysing ' + parsed.rows.length + ' design' + (parsed.rows.length === 1 ? '' : 's') + '&hellip;' +
+    '</div>';
+  inner.appendChild(loadingCard);
+  scrollToBottom();
+
+  fetch('/api/bulk/plan', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({csv_content: csvText, model: modelSelect.value, filename: filename}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(plan) {
+    var lc = document.getElementById(loadingId);
+    if (lc) lc.remove();
+    if (plan.error) { alert('Planning error: ' + plan.error); return; }
+    showBulkPlanCard(plan, csvText, filename, null);
+  })
+  .catch(function(e) {
+    var lc = document.getElementById(loadingId);
+    if (lc) lc.remove();
+    alert('Failed to generate plan: ' + e);
+  });
+}
+
+function showBulkPlanCard(plan, csvText, filename, rows) {
+  hideWelcome();
+  var inner = getInner();
+  var cardId = 'bulk-plan-' + Date.now();
+  _bulkPlanContext[cardId] = {csvText: csvText || null, filename: filename || 'bulk_design.csv', rows: rows || null};
+  var n = plan.rows.length;
+
+  var modelOpts = [
+    ['claude-opus-4-7',          'Opus 4.7 — most capable'],
+    ['claude-opus-4-6',          'Opus 4.6'],
+    ['claude-sonnet-4-6',        'Sonnet 4.6 — recommended for bulk'],
+    ['claude-haiku-4-5-20251001','Haiku 4.5 — fastest / cheapest'],
+  ].map(function(o) {
+    var sel = o[0] === plan.model_suggestion ? ' selected' : '';
+    return '<option value="' + o[0] + '"' + sel + '>' + o[1] + '</option>';
+  }).join('');
+
+  var costClass = plan.warning === 'orange' ? 'orange' : plan.warning === 'yellow' ? 'yellow' : 'ok';
+  var costLabel = plan.estimated_cost_usd < 0.01
+    ? '< $0.01 estimated'
+    : '~$' + plan.estimated_cost_usd.toFixed(2) + ' estimated';
+  var batchBadge = plan.batch_eligible
+    ? '<div style="display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;padding:3px 9px;background:#f0fdf4;color:#166534;border-radius:6px;margin-bottom:10px">' +
+        '<svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>' +
+        'Batch mode — all ' + n + ' constructs run in one agent call' +
+      '</div><div style="font-size:12px;color:var(--sand-500);margin-bottom:12px">' + escapeHtml(plan.shared_context || '') + '</div>'
+    : '';
+  var costWarning = '';
+  if (plan.warning === 'orange') {
+    costWarning = '<div style="font-size:12px;color:#9a3412;margin-top:6px;margin-bottom:10px">' +
+      '⚠ High cost estimate. The run will be split into ' + plan.job_groups.length + ' sub-batch' + (plan.job_groups.length === 1 ? '' : 'es') + ' to stay under $20 each.</div>';
+  } else if (plan.warning === 'yellow') {
+    costWarning = '<div style="font-size:12px;color:#854d0e;margin-top:6px;margin-bottom:10px">' +
+      '⚠ Cost is above $5 — consider using Haiku to reduce costs.</div>';
+  }
+
+  var rowsHtml = plan.rows.map(function(r, i) {
+    return '<div class="bulk-plan-row">' +
+      '<span class="bulk-plan-row-num">' + (i + 1) + '</span>' +
+      '<span class="bulk-plan-row-name">' + escapeHtml(r.name || '') + '</span>' +
+      '<span class="bulk-plan-row-desc">' + escapeHtml(r.description || '') + '</span>' +
+    '</div>';
+  }).join('');
+
+  var card = document.createElement('div');
+  card.className = 'msg assistant';
+  card.id = cardId;
+  card.innerHTML = '<div class="msg-bubble-assistant"><div class="bulk-plan-card">' +
+    '<div class="bulk-plan-title">' + escapeHtml(filename) + ' · ' + n + ' design' + (n === 1 ? '' : 's') + '</div>' +
+    '<div class="bulk-plan-summary">' + escapeHtml(plan.summary) + '</div>' +
+    batchBadge +
+    '<div class="bulk-plan-cost ' + costClass + '">' +
+      '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>' +
+      costLabel +
+    '</div>' +
+    costWarning +
+    '<div class="bulk-plan-rows-wrap">' + rowsHtml + '</div>' +
+    '<div style="margin-bottom:14px">' +
+      '<label style="font-size:12px;font-weight:500;color:var(--sand-500);display:block;margin-bottom:5px">Model for full run</label>' +
+      '<select id="' + cardId + '-model" class="model-select" style="font-size:12px;max-width:100%">' + modelOpts + '</select>' +
+    '</div>' +
+    '<div id="' + cardId + '-context-wrap" class="bulk-context-area">' +
+      '<label style="font-size:12px;font-weight:500;color:var(--sand-500);display:block;margin-bottom:5px">Additional context</label>' +
+      '<textarea id="' + cardId + '-context-text" placeholder="e.g. &quot;All constructs need a WPRE terminator&quot; or &quot;Use Haiku 4.5 for cost savings&quot;"></textarea>' +
+      '<div style="display:flex;gap:8px;margin-top:8px">' +
+        '<button class="send-btn" style="width:auto;padding:0 14px;height:30px;font-size:12px;border-radius:8px" onclick="replanWithContext(\'' + cardId + '\',\'' + plan.plan_id + '\')">Re-analyse</button>' +
+        '<button onclick="document.getElementById(\'' + cardId + '-context-wrap\').style.display=\'none\'" style="padding:0 12px;height:30px;font-size:12px;background:transparent;border:1px solid var(--sand-200);border-radius:8px;cursor:pointer;color:var(--sand-600);font-family:inherit">Cancel</button>' +
+      '</div>' +
+    '</div>' +
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+      '<button class="send-btn" style="width:auto;padding:0 16px;height:32px;font-size:13px;border-radius:10px" onclick="approveBulkPlan(\'' + cardId + '\',\'' + plan.plan_id + '\')">' +
+        'Run sample design' +
+      '</button>' +
+      '<button onclick="document.getElementById(\'' + cardId + '-context-wrap\').style.display=\'block\'" style="padding:0 14px;height:32px;font-size:13px;background:transparent;border:1px solid var(--sand-200);border-radius:10px;cursor:pointer;color:var(--sand-600);font-family:inherit">Add context / Modify</button>' +
+      '<button onclick="cancelBulkPlan(\'' + cardId + '\')" style="padding:0 10px;height:32px;font-size:13px;background:transparent;border:none;cursor:pointer;color:var(--sand-400);font-family:inherit">Cancel</button>' +
+    '</div>' +
+  '</div></div>';
+  inner.appendChild(card);
+  scrollToBottom();
+}
+
+function cancelBulkPlan(cardId) {
+  delete _bulkPlanContext[cardId];
+  var card = document.getElementById(cardId);
+  if (card) card.remove();
+}
+
+function replanWithContext(cardId, oldPlanId) {
+  var contextText = (document.getElementById(cardId + '-context-text') || {}).value || '';
+  var ctx         = _bulkPlanContext[cardId] || {};
+  var csvText     = ctx.csvText || null;
+  var rows        = ctx.rows || null;
+  var filename    = ctx.filename || 'bulk_design.csv';
+  var model       = (document.getElementById(cardId + '-model') || {}).value || 'claude-sonnet-4-6';
+
+  delete _bulkPlanContext[cardId];
+  var card = document.getElementById(cardId);
+  if (card) card.remove();
+
+  // Show loading
+  hideWelcome();
+  var inner = getInner();
+  var loadingId = 'bulk-loading-' + Date.now();
+  var lc = document.createElement('div');
+  lc.className = 'msg assistant';
+  lc.id = loadingId;
+  lc.innerHTML = '<div class="msg-bubble-assistant" style="color:var(--sand-500);font-size:13px"><span class="streaming-cursor"></span> Re-analysing with updated context&hellip;</div>';
+  inner.appendChild(lc);
+  scrollToBottom();
+
+  var replanBody = {user_context: contextText, model: model, filename: filename};
+  if (csvText) replanBody.csv_content = csvText;
+  else if (rows) replanBody.rows = rows;
+
+  fetch('/api/bulk/plan', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(replanBody),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(plan) {
+    var l = document.getElementById(loadingId); if (l) l.remove();
+    if (plan.error) { alert('Planning error: ' + plan.error); return; }
+    showBulkPlanCard(plan, csvText, filename, rows);
+  })
+  .catch(function(e) {
+    var l = document.getElementById(loadingId); if (l) l.remove();
+    alert('Re-analysis failed: ' + e);
+  });
+}
+
+function approveBulkPlan(cardId, planId) {
+  var modelEl = document.getElementById(cardId + '-model');
+  var model = modelEl ? modelEl.value : 'claude-sonnet-4-6';
+  var card = document.getElementById(cardId);
+
+  // Replace plan card content with "running sample" state
+  var planCard = card ? card.querySelector('.bulk-plan-card') : null;
+  if (planCard) {
+    planCard.innerHTML = '<div style="color:var(--sand-500);font-size:13px"><span class="streaming-cursor"></span> Running sample design&hellip;</div>';
+  }
+
+  fetch('/api/bulk/sample', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({plan_id: planId, model: model}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) {
+      if (planCard) planCard.innerHTML = '<div style="color:red;font-size:13px">Error: ' + escapeHtml(data.error) + '</div>';
+      return;
+    }
+    // Re-ID the spinner card so updateBulkSampleProgress can find it by job ID
+    if (card) card.id = 'bulk-sample-' + data.job_id;
+    pollBulkSample(data.job_id, planId, model, data.session_id);
+  })
+  .catch(function(e) {
+    if (planCard) planCard.innerHTML = '<div style="color:red;font-size:13px">Request failed: ' + e + '</div>';
+  });
+}
+
+// Poll the sample job (single-row batch) and render/update result inline in chat
+function pollBulkSample(sampleJobId, planId, model, sessionId) {
+  var pollTimer = null;
+
+  function checkSample() {
+    fetch('/api/batch/' + sampleJobId)
+      .then(function(r) { return r.json(); })
+      .then(function(job) {
+        if (!job.rows || !job.rows.length) return;
+        var row = job.rows[0];
+        if (row.status === 'done' || row.status === 'error' || row.status === 'no_export') {
+          clearInterval(pollTimer);
+          renderBulkSampleResult(row, sampleJobId, planId, model);
+        } else if (row.status === 'running') {
+          // Show live activity so the user knows the agent is working
+          updateBulkSampleProgress(sampleJobId, row.log || []);
+        }
+      })
+      .catch(function() {});
+  }
+  pollTimer = setInterval(checkSample, 2000);
+  checkSample();
+}
+
+function updateBulkSampleProgress(sampleJobId, log) {
+  var card = document.getElementById('bulk-sample-' + sampleJobId);
+  if (!card) return;
+  var pc = card.querySelector('.bulk-plan-card');
+  if (!pc) return;
+
+  // Find the last non-empty text entry (agent message) and last tool call
+  var lastText = '', lastTool = '';
+  for (var i = log.length - 1; i >= 0; i--) {
+    var e = log[i];
+    if (!lastText && e.type === 'text' && e.content && e.content.trim()) lastText = e.content.trim();
+    if (!lastTool && e.type === 'tool') lastTool = e.name || '';
+    if (lastText && lastTool) break;
+  }
+
+  var statusLine = lastTool
+    ? '<div style="font-size:11px;color:var(--sand-400);margin-top:6px;font-family:monospace">' + escapeHtml(lastTool) + '…</div>'
+    : '';
+  var previewLine = lastText
+    ? '<div style="font-size:12px;color:var(--sand-500);margin-top:6px;border-left:3px solid var(--sand-200);padding-left:8px;white-space:pre-wrap">' +
+        escapeHtml(lastText.slice(0, 300)) + (lastText.length > 300 ? '…' : '') +
+      '</div>'
+    : '';
+
+  pc.innerHTML =
+    '<div class="bulk-plan-title" style="margin-bottom:6px">Sample design running…</div>' +
+    '<div style="color:var(--sand-500);font-size:13px"><span class="streaming-cursor"></span> Working on your design</div>' +
+    statusLine +
+    previewLine;
+}
+
+function renderBulkSampleResult(row, sampleJobId, planId, model) {
+  hideWelcome();
+  var inner = getInner();
+  // Reuse existing card if present (re-render after continuation)
+  var existingCard = document.getElementById('bulk-sample-' + sampleJobId);
+  var sampleCardId = existingCard ? existingCard.id : 'bulk-sample-' + sampleJobId;
+
+  var succeeded = row.status === 'done' && row.exports && row.exports.length > 0;
+  var needsInput = row.status === 'no_export';
+
+  var exportsHtml = '';
+  if (row.exports && row.exports.length) {
+    exportsHtml = '<div style="margin:10px 0 4px;font-size:12px;font-weight:500;color:var(--sand-500)">Sample output</div>' +
+      row.exports.map(function(exp, ei) {
+        return '<div style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:6px">' +
+          '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' +
+          '<a href="/api/batch/' + sampleJobId + '/download/0/' + ei + '" style="color:var(--brand-fig);text-decoration:none" download>' + escapeHtml(exp.filename) + '</a>' +
+        '</div>';
+      }).join('');
+  } else if (row.status === 'error') {
+    exportsHtml = '<div style="color:#b91c1c;font-size:12px;margin-top:8px;padding:8px;background:#fef2f2;border-radius:6px">' +
+      '⚠ Sample failed: ' + escapeHtml(row.error || 'unknown error') + '</div>';
+  }
+
+  // Show the last text the agent produced (usually a question when no_export)
+  var lastText = '';
+  if (row.log) {
+    for (var i = row.log.length - 1; i >= 0; i--) {
+      if (row.log[i].type === 'text') { lastText = row.log[i].content; break; }
+    }
+  }
+  var summaryHtml = lastText
+    ? '<div style="font-size:13px;color:var(--sand-700);margin-bottom:10px;white-space:pre-wrap;line-height:1.5;border-left:3px solid var(--sand-200);padding-left:10px">' +
+        escapeHtml(lastText.slice(0, 800)) + (lastText.length > 800 ? '…' : '') +
+      '</div>'
+    : '';
+
+  // Continuation input — shown when agent asked a question but didn't finish
+  var continuationHtml = '';
+  if (needsInput) {
+    continuationHtml =
+      '<div style="margin-top:12px;padding:10px;background:var(--sand-50,#fafaf9);border:1px solid var(--sand-200);border-radius:8px">' +
+        '<div style="font-size:12px;font-weight:500;color:var(--sand-500);margin-bottom:6px">The agent needs more information to complete this design:</div>' +
+        '<textarea id="bulk-sample-input-' + sampleJobId + '" rows="2" ' +
+          'style="width:100%;box-sizing:border-box;border:1px solid var(--sand-200);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;resize:vertical" ' +
+          'placeholder="Type your answer here…" ' +
+          'onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();continueBulkSample(\'' + sampleJobId + '\',\'' + planId + '\',\'' + model + '\')}"></textarea>' +
+        '<div style="display:flex;gap:8px;margin-top:6px">' +
+          '<button class="send-btn" style="width:auto;padding:0 14px;height:28px;font-size:12px;border-radius:7px" ' +
+            'onclick="continueBulkSample(\'' + sampleJobId + '\',\'' + planId + '\',\'' + model + '\')">' +
+            'Send' +
+          '</button>' +
+        '</div>' +
+      '</div>';
+  }
+
+  var actionsHtml = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px">' +
+    (succeeded
+      ? '<button class="send-btn" style="width:auto;padding:0 16px;height:32px;font-size:13px;border-radius:10px" onclick="approveBulkSample(\'' + sampleCardId + '\',\'' + planId + '\',\'' + sampleJobId + '\',\'' + model + '\')">' +
+          'Looks good — run all' +
+        '</button>'
+      : '') +
+    '<button onclick="document.getElementById(\'' + sampleCardId + '\').remove()" style="padding:0 14px;height:32px;font-size:13px;background:transparent;border:1px solid var(--sand-200);border-radius:10px;cursor:pointer;color:var(--sand-600);font-family:inherit">Cancel</button>' +
+  '</div>';
+
+  var innerHtml = '<div class="msg-bubble-assistant"><div class="bulk-plan-card">' +
+    '<div class="bulk-plan-title">Sample design: ' + escapeHtml(row.name || 'construct 1') + '</div>' +
+    summaryHtml +
+    exportsHtml +
+    continuationHtml +
+    actionsHtml +
+  '</div></div>';
+
+  if (existingCard) {
+    existingCard.innerHTML = innerHtml;
+  } else {
+    var card = document.createElement('div');
+    card.className = 'msg assistant';
+    card.id = sampleCardId;
+    card.innerHTML = innerHtml;
+    inner.appendChild(card);
+  }
+  scrollToBottom();
+}
+
+function continueBulkSample(sampleJobId, planId, model) {
+  var inputEl = document.getElementById('bulk-sample-input-' + sampleJobId);
+  if (!inputEl) return;
+  var message = inputEl.value.trim();
+  if (!message) return;
+
+  // Disable input while waiting
+  inputEl.disabled = true;
+  inputEl.value = '';
+
+  fetch('/api/batch/' + sampleJobId + '/rows/0/continue', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: message}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) { alert('Error: ' + data.error); if (inputEl) inputEl.disabled = false; return; }
+    // Clear the card to a base spinner; pollBulkSample will update it with live activity
+    var card = document.getElementById('bulk-sample-' + sampleJobId);
+    var pc = card ? card.querySelector('.bulk-plan-card') : null;
+    if (pc) {
+      pc.innerHTML =
+        '<div class="bulk-plan-title" style="margin-bottom:6px">Sample design running…</div>' +
+        '<div style="color:var(--sand-500);font-size:13px"><span class="streaming-cursor"></span> Continuing design — tool activity will appear here</div>';
+    }
+    // Resume polling — live log updates every 2 s
+    pollBulkSample(sampleJobId, planId, model, null);
+  })
+  .catch(function(e) { alert('Failed: ' + e); if (inputEl) inputEl.disabled = false; });
+}
+
+function approveBulkSample(sampleCardId, planId, sampleJobId, model) {
+  var card = document.getElementById(sampleCardId);
+  if (card) {
+    var bc = card.querySelector('.bulk-plan-card');
+    if (bc) bc.innerHTML = '<div style="color:var(--sand-500);font-size:13px"><span class="streaming-cursor"></span> Submitting full run&hellip;</div>';
+  }
+
+  fetch('/api/bulk/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({plan_id: planId, model: model, sample_job_id: sampleJobId}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) { alert('Error: ' + data.error); return; }
+    if (card) card.remove();
+    var sid = data.session_id;
+    var jobId = data.job_id;
+    saveSessionId(sid);
+    loadSessions();
+    messagesEl.innerHTML = '';
+    initBatchCards(jobId, data.row_count, data.filename || 'bulk_design.csv', model);
+    _batchSessions[sid] = jobId;
+    if (_batchPollTimers[sid]) clearInterval(_batchPollTimers[sid]);
+    _batchPollTimers[sid] = setInterval(function() { pollBatchForSession(sid); }, 2000);
+    pollBatchForSession(sid);
+  })
+  .catch(function(e) { alert('Full run failed: ' + e); });
+}
+
 function uploadBatchCSV(csvText, filename, model) {
   model = model || modelSelect.value;
   fetch('/api/batch', {
@@ -3604,7 +4293,9 @@ function pollBatchForSession(sessionId) {
     if (currentSessionId === sessionId) {
       updateBatchCards(jobId, data.rows);
     }
-    var anyRunning = data.rows && data.rows.some(function(r) { return r.status === 'running' || r.status === 'pending'; });
+    var anyRunning = data.rows && data.rows.some(function(r) {
+      return r.status === 'running' || r.status === 'pending' || r.status === 'waiting';
+    });
     if (data.status === 'done' && !anyRunning) {
       clearInterval(_batchPollTimers[sessionId]);
       delete _batchPollTimers[sessionId];
@@ -3648,7 +4339,8 @@ var STATUS_ICONS = {
   error: '<svg width="18" height="18" fill="none" stroke="var(--brand-orange)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>',
   paused: '<svg width="18" height="18" fill="none" stroke="var(--sand-400)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>',
 };
-var STATUS_LABELS = {pending: 'Pending', running: 'Running\u2026', done: 'Done', no_export: 'No export produced', error: 'Error', paused: 'Paused'};
+STATUS_ICONS['waiting'] = '<svg width="18" height="18" fill="none" stroke="var(--brand-fig)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>';
+var STATUS_LABELS = {pending: 'Pending', running: 'Running\u2026', done: 'Done', no_export: 'No export produced', error: 'Error', paused: 'Paused', waiting: 'Waiting for approval\u2026'};
 var CHEV_SVG = '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>';
 var PAUSE_SVG = '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
 var RESUME_SVG = '<svg width="12" height="12" fill="currentColor" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
@@ -3734,7 +4426,7 @@ function buildDownloadsHtml(jobId, idx, exports) {
 }
 
 function buildFollowupHtml(jobId, idx, status) {
-  if (status === 'running' || status === 'pending') return '';
+  if (status === 'running' || status === 'pending' || status === 'waiting') return '';
   var fid = 'batch-finput-' + jobId + '-' + idx;
   return '<div class="batch-followup">' +
     '<textarea class="batch-followup-input" id="' + fid + '" rows="1" ' +
@@ -3763,6 +4455,13 @@ function buildBatchCardHtml(jobId, idx, row, isOpen) {
       pauseBtn = '<button class="batch-row-pause-btn" title="Pause" onclick="event.stopPropagation();pauseBatchRow(\'' + jobId + '\',' + idx + ')">' + PAUSE_SVG + '</button>';
     }
   }
+  var proceedBtn = (row.status === 'waiting')
+    ? '<button class="send-btn" style="width:auto;padding:0 14px;height:28px;font-size:12px;border-radius:7px;margin:10px 0 4px" ' +
+        'onclick="event.stopPropagation();proceedToBatchRow(\'' + jobId + '\',' + idx + ')">' +
+        'Proceed to design ' + (idx + 1) +
+      '</button>'
+    : '';
+
   return '<div class="batch-card">' +
     '<div class="batch-row-header" onclick="toggleBatchCard(\'' + jobId + '\',' + idx + ')">' +
       '<div class="batch-row-status">' + icon + '</div>' +
@@ -3770,6 +4469,7 @@ function buildBatchCardHtml(jobId, idx, row, isOpen) {
         '<div class="batch-row-desc">' + desc + '</div>' +
         '<div class="batch-row-meta">' + (idx + 1) + ' \xb7 ' + label + '</div>' +
         downloads +
+        proceedBtn +
       '</div>' +
       pauseBtn +
       '<span id="' + chevId + '" class="batch-row-chevron' + (isOpen ? ' open' : '') + '">' + CHEV_SVG + '</span>' +
@@ -3798,6 +4498,12 @@ function toggleBatchCard(jobId, idx) {
   if (!log) return;
   var open = log.classList.toggle('open');
   if (chev) chev.classList.toggle('open', open);
+}
+
+function proceedToBatchRow(jobId, rowIdx) {
+  fetch('/api/batch/' + jobId + '/proceed/' + rowIdx, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' })
+    .then(function(r) { return r.json(); })
+    .catch(function() {});
 }
 
 function batchFollowupKey(e, jobId, rowIdx) {
@@ -4935,14 +5641,88 @@ def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
         _save_batch_jobs()
 
 
-def start_batch_job(rows: list, model: str) -> str:
-    """Create a batch job, launch a background thread, return job_id."""
+def _run_batch_group(job_id: str, row_indices: list, combined_prompt: str, model: str) -> None:
+    """Run ONE agent call for multiple similar rows, then distribute exports by name."""
+    job = _batch_jobs.get(job_id)
+    if not job:
+        return
+
+    for idx in row_indices:
+        job["rows"][idx]["status"] = "running"
+        job["rows"][idx]["paused"] = False
+        job["rows"][idx]["log"] = []
+
+    combined_exports: list[dict] = []
+    combined_log: list[dict] = []
+    history: list[dict] = []
+
+    try:
+        _run_batch_agent(
+            combined_prompt, model,
+            append_log=combined_log.append,
+            exports=combined_exports,
+            history=history,
+        )
+    except Exception as e:
+        for idx in row_indices:
+            job["rows"][idx]["status"] = "error"
+            job["rows"][idx]["error"] = str(e)
+            job["rows"][idx]["log"] = combined_log
+        _save_batch_jobs()
+        return
+
+    # Distribute exports back to individual rows by matching filename vs row name
+    import re as _re_bg
+    assigned: set[int] = set()
+    for idx in row_indices:
+        row_name = (job["rows"][idx].get("name") or "").lower()
+        row_name_slug = _re_bg.sub(r"[^a-z0-9]", "", row_name)
+        matched = []
+        for exp in combined_exports:
+            fn_stem = _re_bg.sub(r"[^a-z0-9]", "", (exp.get("filename") or "").lower().rsplit(".", 1)[0])
+            if fn_stem == row_name_slug or row_name_slug in fn_stem or fn_stem in row_name_slug:
+                matched.append(exp)
+        job["rows"][idx]["exports"] = matched
+        job["rows"][idx]["status"] = "done" if matched else "no_export"
+        job["rows"][idx]["log"] = combined_log  # all rows share the log
+        job["rows"][idx]["history"] = history
+        assigned.update(id(e) for e in matched)
+
+    # Any exports that didn't match a named row: assign to rows without exports in order
+    unmatched = [e for e in combined_exports if id(e) not in assigned]
+    no_export_indices = [i for i in row_indices if not job["rows"][i]["exports"]]
+    for exp, idx in zip(unmatched, no_export_indices):
+        job["rows"][idx]["exports"] = [exp]
+        job["rows"][idx]["status"] = "done"
+
+    _save_batch_jobs()
+
+
+def start_batch_job(
+    rows: list,
+    model: str,
+    pre_seeded_rows: Optional[dict] = None,
+    batch_groups: Optional[list[dict]] = None,
+    approval_required: bool = False,
+) -> str:
+    """Create a batch job, launch a background thread, return job_id.
+
+    pre_seeded_rows: optional dict {row_idx: row_state_dict} for rows already
+    complete (e.g. the sample design ran ahead of the full batch). Those rows
+    are skipped by the worker.
+
+    batch_groups: optional list of {prompt: str, indices: [int, ...]} dicts.
+    When provided, rows in the same group are run as ONE agent call (sharing
+    backbone load, RE site checks, etc.) rather than N separate calls.
+    """
     job_id = str(uuid.uuid4())
-    job: dict = {
-        "status": "running",
-        "model": model,
-        "rows": [
-            {
+    pre_seeded_rows = pre_seeded_rows or {}
+    job_rows: list[dict] = []
+    for i, r in enumerate(rows):
+        if i in pre_seeded_rows:
+            job_rows.append(pre_seeded_rows[i])
+        else:
+            job_rows.append({
                 "description": r.get("description", ""),
                 "name": r.get("name", ""),
                 "output_format": r.get("output_format", "genbank"),
@@ -4950,16 +5730,45 @@ def start_batch_job(rows: list, model: str) -> str:
                 "paused": False,
                 "exports": [],
                 "error": None,
-            }
-            for r in rows
-        ],
+            })
+    job: dict = {
+        "status": "running",
+        "model": model,
+        "rows": job_rows,
+        "approval_required": approval_required,
     }
     _batch_jobs[job_id] = job
 
-    # Run rows sequentially in one daemon thread to avoid hammering the API
     def worker():
-        for idx, row in enumerate(rows):
-            _run_batch_row(job_id, idx, row, model)
+        if batch_groups:
+            # Indices covered by batch groups (run as combined agent calls)
+            covered: set[int] = set()
+            for grp in batch_groups:
+                prompt   = grp["prompt"]
+                indices  = [i for i in grp["indices"] if job["rows"][i].get("status") != "done"]
+                if not indices:
+                    continue
+                covered.update(indices)
+                if len(indices) == 1:
+                    _run_batch_row(job_id, indices[0], rows[indices[0]], model)
+                else:
+                    _run_batch_group(job_id, indices, prompt, model)
+            for idx, row in enumerate(rows):
+                if idx not in covered and job["rows"][idx].get("status") != "done":
+                    _run_batch_row(job_id, idx, row, model)
+        else:
+            for idx, row in enumerate(rows):
+                if job["rows"][idx].get("status") == "done":
+                    continue
+                # For approval_required jobs, wait for user confirmation before row > 0
+                if approval_required and idx > 0:
+                    job["rows"][idx]["status"] = "waiting"
+                    _save_batch_jobs()
+                    _get_row_gate(job_id, idx).wait()
+                    if job["rows"][idx].get("status") == "waiting":
+                        job["rows"][idx]["status"] = "pending"
+                _run_batch_row(job_id, idx, row, model)
+
         job["status"] = "done"
         _save_batch_jobs()
 
@@ -5537,6 +6346,20 @@ class AgentHandler(SimpleHTTPRequestHandler):
                     row["paused"] = False
             self._send_json({"status": "ok"})
 
+        elif __import__('re').search(r"^/api/batch/[^/]+/proceed/\d+$", path):
+            # POST /api/batch/{job_id}/proceed/{row_idx}
+            parts = path.split("/")
+            try:
+                job_id  = parts[3]
+                row_idx = int(parts[5])
+            except (IndexError, ValueError):
+                self._send_json({"error": "Bad request"}, 400); return
+            job = _batch_jobs.get(job_id)
+            if not job:
+                self._send_json({"error": "Job not found"}, 404); return
+            _get_row_gate(job_id, row_idx).set()
+            self._send_json({"status": "ok"})
+
         elif path == "/api/upload-plasmid":
             content_length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(content_length)) if content_length else {}
@@ -5560,6 +6383,240 @@ class AgentHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 logger.exception("Error processing uploaded plasmid")
                 self._send_json({"error": f"Failed to process file: {e}"}, 500)
+
+        # ── Template + CSV sequential run ────────────────────────────────
+        elif path == "/api/bulk/template-run":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body     = json.loads(self.rfile.read(content_length)) if content_length else {}
+            template = body.get("template", "").strip()
+            csv_rows = body.get("csv_rows", [])
+            model    = body.get("model", MODEL)
+
+            if not template or not csv_rows:
+                self._send_json({"error": "template and csv_rows required"}, 400)
+                return
+
+            try:
+                plan = generate_from_template(template, csv_rows, run_model=model)
+            except Exception as e:
+                logger.exception("generate_from_template failed")
+                self._send_json({"error": f"Merge failed: {e}"}, 500)
+                return
+
+            batch_rows = [
+                {
+                    "description": r["enriched_prompt"],
+                    "name":        r["name"],
+                    "output_format": r["output_format"],
+                }
+                for r in plan.enriched_rows
+            ]
+            job_id = start_batch_job(batch_rows, model, approval_required=True)
+
+            session_id = str(uuid.uuid4())
+            _sessions[session_id] = {
+                "history": [],
+                "display_messages": [],
+                "created_at":    time.time(),
+                "first_message": f"Bulk design ({len(batch_rows)} constructs)",
+                "project_name":  None,
+                "experimental_outcomes": [],
+                "batch_job_id":    job_id,
+                "batch_filename":  "bulk_design.csv",
+                "batch_model":     model,
+                "batch_row_count": len(batch_rows),
+            }
+            _save_sessions()
+            self._send_json({
+                "job_id":    job_id,
+                "session_id": session_id,
+                "row_count": len(batch_rows),
+            })
+
+        # ── Bulk design planning endpoints ───────────────────────────────
+        elif path == "/api/bulk/plan":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            csv_text     = body.get("csv_content", "")
+            user_context = body.get("user_context", "")
+            run_model    = body.get("model", "claude-sonnet-4-6")
+            filename     = body.get("filename", "bulk_design.csv")
+            # Direct rows list (from submit_bulk_designs tool) takes priority over CSV
+            direct_rows  = body.get("rows")
+
+            rows: list[dict] = []
+            if direct_rows:
+                rows = [r for r in direct_rows if r.get("description", "").strip()]
+            elif csv_text.strip():
+                reader = csv.DictReader(io.StringIO(csv_text))
+                rows = [r for r in reader if r.get("description", "").strip()]
+
+            if not rows:
+                self._send_json({"error": "No rows found"}, 400)
+                return
+
+            try:
+                plan = generate_bulk_plan(rows, user_context, run_model)
+            except Exception as e:
+                logger.exception("bulk_plan generation failed")
+                self._send_json({"error": f"Planning failed: {e}"}, 500)
+                return
+
+            _bulk_plans[plan.plan_id] = {
+                "plan_id":            plan.plan_id,
+                "summary":            plan.summary,
+                "enriched_rows":      plan.enriched_rows,
+                "job_groups":         plan.job_groups,
+                "model_suggestion":   plan.model_suggestion,
+                "estimated_cost_usd": plan.estimated_cost_usd,
+                "complexity":         plan.complexity,
+                "batch_eligible":     plan.batch_eligible,
+                "batch_prompt":       plan.batch_prompt,
+                "shared_context":     plan.shared_context,
+                "filename":           filename,
+                "original_rows":      rows,
+            }
+
+            warning = None
+            if plan.estimated_cost_usd > COST_SPLIT_THRESHOLD:
+                warning = "orange"
+            elif plan.estimated_cost_usd > COST_WARN_THRESHOLD:
+                warning = "yellow"
+
+            self._send_json({
+                "plan_id":            plan.plan_id,
+                "summary":            plan.summary,
+                "rows":               [
+                    {"name": r["name"], "description": r["description"]}
+                    for r in plan.enriched_rows
+                ],
+                "estimated_cost_usd": plan.estimated_cost_usd,
+                "model_suggestion":   plan.model_suggestion,
+                "job_groups":         plan.job_groups,
+                "warning":            warning,
+                "filename":           filename,
+                "batch_eligible":     plan.batch_eligible,
+                "shared_context":     plan.shared_context,
+            })
+
+        elif path == "/api/bulk/sample":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body     = json.loads(self.rfile.read(content_length)) if content_length else {}
+            plan_id  = body.get("plan_id", "")
+            model    = body.get("model", "claude-sonnet-4-6")
+
+            plan_data = _bulk_plans.get(plan_id)
+            if not plan_data:
+                self._send_json({"error": "Plan not found"}, 404)
+                return
+
+            row_0 = plan_data["enriched_rows"][0]
+            sample_rows = [{
+                "description": row_0["enriched_prompt"],
+                "name":        row_0["name"],
+                "output_format": row_0["output_format"],
+            }]
+            job_id = start_batch_job(sample_rows, model)
+
+            session_id = str(uuid.uuid4())
+            _sessions[session_id] = {
+                "history": [],
+                "display_messages": [],
+                "created_at":   time.time(),
+                "first_message": f"Sample: {row_0['name']}",
+                "project_name": None,
+                "experimental_outcomes": [],
+                "batch_job_id":    job_id,
+                "batch_filename":  f"sample: {row_0['name']}",
+                "batch_model":     model,
+                "batch_row_count": 1,
+                "is_bulk_sample":  True,
+                "bulk_plan_id":    plan_id,
+            }
+            _save_sessions()
+            self._send_json({"job_id": job_id, "session_id": session_id, "row_count": 1})
+
+        elif path == "/api/bulk/run":
+            content_length  = int(self.headers.get("Content-Length", 0))
+            body            = json.loads(self.rfile.read(content_length)) if content_length else {}
+            plan_id         = body.get("plan_id", "")
+            model           = body.get("model", "claude-sonnet-4-6")
+            sample_job_id   = body.get("sample_job_id")
+
+            plan_data = _bulk_plans.get(plan_id)
+            if not plan_data:
+                self._send_json({"error": "Plan not found"}, 404)
+                return
+
+            enriched_rows = plan_data["enriched_rows"]
+            batch_rows = [
+                {
+                    "description": r["enriched_prompt"],
+                    "name":        r["name"],
+                    "output_format": r["output_format"],
+                }
+                for r in enriched_rows
+            ]
+
+            # Pre-seed row 0 with the sample result if available
+            pre_seeded: dict[int, dict] = {}
+            if sample_job_id:
+                sample_job = _batch_jobs.get(sample_job_id)
+                if sample_job and sample_job.get("rows"):
+                    sr = sample_job["rows"][0]
+                    pre_seeded[0] = {
+                        "description":  enriched_rows[0]["description"],
+                        "name":         enriched_rows[0]["name"],
+                        "output_format": enriched_rows[0]["output_format"],
+                        "status":       sr.get("status", "done"),
+                        "paused":       False,
+                        "exports":      sr.get("exports", []),
+                        "error":        sr.get("error"),
+                        "log":          sr.get("log", []),
+                        "history":      sr.get("history", []),
+                    }
+
+            # Build batch_groups when the plan is batch-eligible
+            # (all rows share backbone + method → one agent call handles them all)
+            batch_grps: Optional[list[dict]] = None
+            if plan_data.get("batch_eligible") and plan_data.get("batch_prompt"):
+                # Exclude row 0 if it was pre-seeded by the sample run
+                remaining = [i for i in range(len(batch_rows)) if i not in pre_seeded]
+                if remaining:
+                    batch_grps = [{"prompt": plan_data["batch_prompt"], "indices": remaining}]
+
+            job_id = start_batch_job(
+                batch_rows, model,
+                pre_seeded_rows=pre_seeded,
+                batch_groups=batch_grps,
+            )
+
+            filename   = plan_data.get("filename", "bulk_design.csv")
+            session_id = str(uuid.uuid4())
+            _sessions[session_id] = {
+                "history": [],
+                "display_messages": [],
+                "created_at":    time.time(),
+                "first_message": f"Bulk design: {filename}",
+                "project_name":  None,
+                "experimental_outcomes": [],
+                "batch_job_id":    job_id,
+                "batch_filename":  filename,
+                "batch_model":     model,
+                "batch_row_count": len(batch_rows),
+            }
+            _save_sessions()
+
+            # Consume the plan so it doesn't leak memory
+            _bulk_plans.pop(plan_id, None)
+
+            self._send_json({
+                "job_id":     job_id,
+                "session_id": session_id,
+                "row_count":  len(batch_rows),
+                "filename":   filename,
+                "batch_mode": batch_grps is not None,
+            })
 
         elif path == "/api/batch":
             content_length = int(self.headers.get("Content-Length", 0))

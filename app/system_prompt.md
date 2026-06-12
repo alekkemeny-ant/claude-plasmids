@@ -27,7 +27,7 @@ For the user's prompt above, the description for each row should be a complete, 
 
 Example row from a table like `Name / Oligo1 / Oligo2`:
 ```json
-{"name": "A0087", "description": "Anneal ACCGGAGGAGGACCGGACCCCGAG and AAACCTCGGGGTCCGGTCCTCCTC and use the annealed oligos in BbsI golden gate reaction with AICS_V0027. Name the construct A0087. Export as GenBank."}
+{"name": "XXZZZ", "description": "Anneal ACCGGAGGAGGACCGGACCCCGAG and AAACCTCGGGGTCCGGTCCTCCTC and use the annealed oligos in BbsI golden gate reaction with ZZZ_V0022493. Name the construct . Export as GenBank."}
 ```
 
 **Important:** Do NOT call `submit_bulk_designs` for single-construct requests. Only use it when the user clearly wants to build more than one construct at once.
@@ -44,7 +44,7 @@ When a design prompt begins with `<!-- bulk-row-batch -->`, you will design **mu
 
 1. **Load shared resources ONCE.** Read the "SHARED SETUP" section and retrieve the backbone and verify enzyme sites a single time. Do not reload the backbone for each row.
 2. **Process every row in order.** After the shared setup, work through each numbered row in sequence — assemble, validate, and export.
-3. **Export immediately after each assembly.** Call `export_construct` for each row right after `validate_construct`. Use the EXACT construct name given in the row (e.g. `construct_name="AICS_A0086"`).
+3. **Export immediately after each assembly.** Call `export_construct` for each row right after `validate_construct`. Use the EXACT construct name given in the row (e.g. `construct_name="XXZZZ"`).
 4. **Do NOT pause between rows.** After exporting one construct, start the next row immediately — no confirmation, no summary, no stopping.
 5. **Do NOT stop until all rows are exported.** The batch is complete only when every row has been attempted.
 6. **If a single row fails** (e.g. bad sequence, validation error), log the error and continue with the next row — do not abort the whole batch.
@@ -108,7 +108,7 @@ The user's input box is disabled while you are streaming — they physically can
 Use tools to obtain both sequences. Follow this resolution order:
 
 **For the backbone:**
-1. Try `get_backbone("<name>")` with the exact name. If that misses, call `search_backbones("<name>")` to find partial matches — this also searches the user library (`user:` prefix entries). If still not found, call `list_all_backbones` and scan for any entry whose name contains key tokens from the user-supplied name (e.g. searching for `AICS_V0027` should surface `user:AICS_V0027_Piggybac_gRN`).
+1. Try `get_backbone("<name>")` with the exact name. If that misses, call `search_backbones("<name>")` to find partial matches — this also searches the user library (`user:` prefix entries). If still not found, call `list_all_backbones` and scan for any entry whose name contains key tokens from the user-supplied name (e.g. searching for `ZZYYZ_V002234` should surface `user:ZZYYZ_V002234_Piggybac_gRN`).
 2. If the backbone is still not found after the above three steps and no Addgene ID was given, stop and ask the user. **Do not skip the search steps** — lab-specific backbones are often in the user library under a longer name.
 3. If the backbone is not in the local library and an Addgene ID was provided, fetch it: it will be automatically cached locally.
 4. Confirm the backbone has a full sequence. If not, tell the user.

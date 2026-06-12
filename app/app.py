@@ -2153,6 +2153,13 @@ async function _reconnectToStream(sessionId) {
           case 'error': clearPendingCursor(); startTextBlock(); appendTextDelta('Error: ' + event.content); endTextBlock(); break;
           case 'bulk_design_rows':
             streamDone = true;
+            if (currentToolId) {
+              var _pulse = document.getElementById(currentToolId + '-pulse');
+              if (_pulse) _pulse.remove();
+              var _body = document.getElementById(currentToolId + '-body');
+              if (_body) _body.innerHTML = '<div class="section"><div class="label">Result</div>Submitted ' + (event.rows || []).length + ' design(s) to bulk planner.</div>';
+              currentToolId = null;
+            }
             requestBulkPlanFromRows(event.rows || [], modelSelect.value);
             break;
           case 'done': streamDone = true; break;
@@ -3188,12 +3195,12 @@ async function sendMessage() {
   autoResize(inputEl);
   hideWelcome();
 
-  const inner = getInner();
+  var inner = getInner();
   // Pin this container so stream events write here even if user switches sessions
   streamingInner = inner;
-  const userDiv = document.createElement('div');
+  var userDiv = document.createElement('div');
   userDiv.className = 'msg user';
-  const nowStr = new Date().toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'});
+  var nowStr = new Date().toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'});
   userDiv.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(text) + '</div><div class="msg-date">' + nowStr + '</div></div>';
   inner.appendChild(userDiv);
   scrollToBottom();
@@ -3254,6 +3261,17 @@ async function sendMessage() {
             startTextBlock();
             appendTextDelta('Error: ' + event.content);
             endTextBlock();
+            break;
+          case 'bulk_design_rows':
+            streamDone = true;
+            if (currentToolId) {
+              var _pulse = document.getElementById(currentToolId + '-pulse');
+              if (_pulse) _pulse.remove();
+              var _body = document.getElementById(currentToolId + '-body');
+              if (_body) _body.innerHTML = '<div class="section"><div class="label">Result</div>Submitted ' + (event.rows || []).length + ' design(s) to bulk planner.</div>';
+              currentToolId = null;
+            }
+            requestBulkPlanFromRows(event.rows || [], modelSelect.value);
             break;
           case 'done': streamDone = true; break;
         }
@@ -3732,6 +3750,31 @@ function cancelBatchConfirm(confirmId) {
 
 // ── Bulk design planning flow ────────────────────────────────────────────
 
+// Client-side pricing mirrors bulk_planner.py so cost updates instantly on model change
+var _BULK_MODEL_PRICING = {
+  'claude-haiku-4-5-20251001': [1.00,  5.00],
+  'claude-sonnet-4-6':          [3.00, 15.00],
+  'claude-opus-4-6':            [5.00, 25.00],
+  'claude-opus-4-7':            [5.00, 25.00],
+};
+var _BULK_TOKENS_BY_COMPLEXITY = {
+  'simple':   [2000,  800],
+  'standard': [3500, 1400],
+  'complex':  [6000, 2500],
+};
+var BULK_COST_WARN  = 5.0;
+var BULK_COST_SPLIT = 20.0;
+
+function _estimateBulkCost(nRows, model, complexity) {
+  var pricing = _BULK_MODEL_PRICING[model] || _BULK_MODEL_PRICING['claude-sonnet-4-6'];
+  var tokens  = _BULK_TOKENS_BY_COMPLEXITY[complexity] || _BULK_TOKENS_BY_COMPLEXITY['standard'];
+  var cpr = (tokens[0] * pricing[0] + tokens[1] * pricing[1]) / 1000000;
+  return Math.round(cpr * nRows * 10000) / 10000;
+}
+
+// plan_id → [{name, description}, ...] for subset selection
+var _bulkPlanRows = {};
+
 var _bulkEntryMenuOpen = false;
 
 function showBulkEntryMenu(e) {
@@ -3857,7 +3900,13 @@ function showBulkPlanCard(plan, csvText, filename, rows) {
   var inner = getInner();
   var cardId = 'bulk-plan-' + Date.now();
   _bulkPlanContext[cardId] = {csvText: csvText || null, filename: filename || 'bulk_design.csv', rows: rows || null};
+  // Store rows keyed by plan_id for subset selection later
+  _bulkPlanRows[plan.plan_id] = plan.rows || [];
   var n = plan.rows.length;
+  // Default to Sonnet even if the planner suggested Haiku
+  var defaultModel = (plan.model_suggestion === 'claude-haiku-4-5-20251001')
+    ? 'claude-sonnet-4-6' : (plan.model_suggestion || 'claude-sonnet-4-6');
+  var complexity = plan.complexity || 'standard';
 
   var modelOpts = [
     ['claude-opus-4-7',          'Opus 4.7 — most capable'],
@@ -3865,28 +3914,32 @@ function showBulkPlanCard(plan, csvText, filename, rows) {
     ['claude-sonnet-4-6',        'Sonnet 4.6 — recommended for bulk'],
     ['claude-haiku-4-5-20251001','Haiku 4.5 — fastest / cheapest'],
   ].map(function(o) {
-    var sel = o[0] === plan.model_suggestion ? ' selected' : '';
+    var sel = o[0] === defaultModel ? ' selected' : '';
     return '<option value="' + o[0] + '"' + sel + '>' + o[1] + '</option>';
   }).join('');
 
-  var costClass = plan.warning === 'orange' ? 'orange' : plan.warning === 'yellow' ? 'yellow' : 'ok';
-  var costLabel = plan.estimated_cost_usd < 0.01
-    ? '< $0.01 estimated'
-    : '~$' + plan.estimated_cost_usd.toFixed(2) + ' estimated';
+  function buildCostHtml(model) {
+    var cost = _estimateBulkCost(n, model, complexity);
+    var cls  = cost >= BULK_COST_SPLIT ? 'orange' : cost >= BULK_COST_WARN ? 'yellow' : 'ok';
+    var lbl  = cost < 0.01 ? '< $0.01 estimated' : '~$' + cost.toFixed(2) + ' estimated';
+    var warn = '';
+    if (cls === 'orange') {
+      warn = '<div id="' + cardId + '-cost-warn" style="font-size:12px;color:#9a3412;margin-top:6px;margin-bottom:10px">⚠ High cost estimate.</div>';
+    } else if (cls === 'yellow') {
+      warn = '<div id="' + cardId + '-cost-warn" style="font-size:12px;color:#854d0e;margin-top:6px;margin-bottom:10px">⚠ Cost is above $5 — consider using Haiku to reduce costs.</div>';
+    } else {
+      warn = '<div id="' + cardId + '-cost-warn"></div>';
+    }
+    return { cls: cls, lbl: lbl, warn: warn };
+  }
+
+  var costInfo = buildCostHtml(defaultModel);
   var batchBadge = plan.batch_eligible
     ? '<div style="display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;padding:3px 9px;background:#f0fdf4;color:#166534;border-radius:6px;margin-bottom:10px">' +
         '<svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>' +
         'Batch mode — all ' + n + ' constructs run in one agent call' +
       '</div><div style="font-size:12px;color:var(--sand-500);margin-bottom:12px">' + escapeHtml(plan.shared_context || '') + '</div>'
     : '';
-  var costWarning = '';
-  if (plan.warning === 'orange') {
-    costWarning = '<div style="font-size:12px;color:#9a3412;margin-top:6px;margin-bottom:10px">' +
-      '⚠ High cost estimate. The run will be split into ' + plan.job_groups.length + ' sub-batch' + (plan.job_groups.length === 1 ? '' : 'es') + ' to stay under $20 each.</div>';
-  } else if (plan.warning === 'yellow') {
-    costWarning = '<div style="font-size:12px;color:#854d0e;margin-top:6px;margin-bottom:10px">' +
-      '⚠ Cost is above $5 — consider using Haiku to reduce costs.</div>';
-  }
 
   var rowsHtml = plan.rows.map(function(r, i) {
     return '<div class="bulk-plan-row">' +
@@ -3903,15 +3956,15 @@ function showBulkPlanCard(plan, csvText, filename, rows) {
     '<div class="bulk-plan-title">' + escapeHtml(filename) + ' · ' + n + ' design' + (n === 1 ? '' : 's') + '</div>' +
     '<div class="bulk-plan-summary">' + escapeHtml(plan.summary) + '</div>' +
     batchBadge +
-    '<div class="bulk-plan-cost ' + costClass + '">' +
+    '<div id="' + cardId + '-cost" class="bulk-plan-cost ' + costInfo.cls + '">' +
       '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>' +
-      costLabel +
+      '<span id="' + cardId + '-cost-lbl">' + costInfo.lbl + '</span>' +
     '</div>' +
-    costWarning +
+    costInfo.warn +
     '<div class="bulk-plan-rows-wrap">' + rowsHtml + '</div>' +
     '<div style="margin-bottom:14px">' +
       '<label style="font-size:12px;font-weight:500;color:var(--sand-500);display:block;margin-bottom:5px">Model for full run</label>' +
-      '<select id="' + cardId + '-model" class="model-select" style="font-size:12px;max-width:100%">' + modelOpts + '</select>' +
+      '<select id="' + cardId + '-model" class="model-select" style="font-size:12px;max-width:100%" onchange="updateBulkPlanCost(\'' + cardId + '\',' + n + ',\'' + complexity + '\')">' + modelOpts + '</select>' +
     '</div>' +
     '<div id="' + cardId + '-context-wrap" class="bulk-context-area">' +
       '<label style="font-size:12px;font-weight:500;color:var(--sand-500);display:block;margin-bottom:5px">Additional context</label>' +
@@ -3931,6 +3984,25 @@ function showBulkPlanCard(plan, csvText, filename, rows) {
   '</div></div>';
   inner.appendChild(card);
   scrollToBottom();
+}
+
+function updateBulkPlanCost(cardId, nRows, complexity) {
+  var sel = document.getElementById(cardId + '-model');
+  if (!sel) return;
+  var model = sel.value;
+  var cost  = _estimateBulkCost(nRows, model, complexity);
+  var cls   = cost >= BULK_COST_SPLIT ? 'orange' : cost >= BULK_COST_WARN ? 'yellow' : 'ok';
+  var lbl   = cost < 0.01 ? '< $0.01 estimated' : '~$' + cost.toFixed(2) + ' estimated';
+  var costEl = document.getElementById(cardId + '-cost');
+  var lblEl  = document.getElementById(cardId + '-cost-lbl');
+  var warnEl = document.getElementById(cardId + '-cost-warn');
+  if (costEl) { costEl.className = 'bulk-plan-cost ' + cls; }
+  if (lblEl)  { lblEl.textContent = lbl; }
+  if (warnEl) {
+    if (cls === 'orange') warnEl.textContent = '⚠ High cost estimate.';
+    else if (cls === 'yellow') warnEl.textContent = '⚠ Cost is above $5 — consider using Haiku to reduce costs.';
+    else warnEl.textContent = '';
+  }
 }
 
 function cancelBulkPlan(cardId) {
@@ -4044,29 +4116,16 @@ function updateBulkSampleProgress(sampleJobId, log) {
   var pc = card.querySelector('.bulk-plan-card');
   if (!pc) return;
 
-  // Find the last non-empty text entry (agent message) and last tool call
-  var lastText = '', lastTool = '';
-  for (var i = log.length - 1; i >= 0; i--) {
-    var e = log[i];
-    if (!lastText && e.type === 'text' && e.content && e.content.trim()) lastText = e.content.trim();
-    if (!lastTool && e.type === 'tool') lastTool = e.name || '';
-    if (lastText && lastTool) break;
-  }
-
-  var statusLine = lastTool
-    ? '<div style="font-size:11px;color:var(--sand-400);margin-top:6px;font-family:monospace">' + escapeHtml(lastTool) + '…</div>'
-    : '';
-  var previewLine = lastText
-    ? '<div style="font-size:12px;color:var(--sand-500);margin-top:6px;border-left:3px solid var(--sand-200);padding-left:8px;white-space:pre-wrap">' +
-        escapeHtml(lastText.slice(0, 300)) + (lastText.length > 300 ? '…' : '') +
-      '</div>'
-    : '';
-
+  // Show rich batch-card log so users see tool calls as they happen
   pc.innerHTML =
     '<div class="bulk-plan-title" style="margin-bottom:6px">Sample design running…</div>' +
-    '<div style="color:var(--sand-500);font-size:13px"><span class="streaming-cursor"></span> Working on your design</div>' +
-    statusLine +
-    previewLine;
+    '<div style="color:var(--sand-500);font-size:13px;margin-bottom:8px"><span class="streaming-cursor"></span> Working on your design</div>' +
+    '<div class="batch-row-log open" style="max-height:280px;overflow-y:auto;border:1px solid var(--sand-100);border-radius:8px;padding:6px 8px">' +
+      renderBatchLog(log) +
+    '</div>';
+  // Auto-scroll to bottom of the log
+  var logEl = pc.querySelector('.batch-row-log');
+  if (logEl) logEl.scrollTop = logEl.scrollHeight;
 }
 
 function renderBulkSampleResult(row, sampleJobId, planId, model) {
@@ -4125,10 +4184,41 @@ function renderBulkSampleResult(row, sampleJobId, planId, model) {
       '</div>';
   }
 
+  // Build subset selection for rows 1..n (row 0 was the sample)
+  var subsetHtml = '';
+  if (succeeded) {
+    var planRows = _bulkPlanRows[planId] || [];
+    var remaining = planRows.slice(1);  // rows 1..n
+    if (remaining.length > 0) {
+      var checkboxId = sampleCardId + '-subset';
+      var rowChecks = remaining.map(function(r, i) {
+        var idx = i + 1;  // original index
+        return '<label class="batch-confirm-row" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--sand-100)">' +
+          '<input type="checkbox" class="bulk-subset-chk" data-idx="' + idx + '" checked style="accent-color:var(--brand-fig)">' +
+          '<span class="batch-confirm-row-num" style="font-size:11px;color:var(--sand-400);width:20px">' + (idx + 1) + '</span>' +
+          '<span class="batch-confirm-row-name" style="font-size:11px;color:var(--sand-400);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(r.name || '') + '</span>' +
+          '<span class="batch-confirm-row-desc" style="font-size:12px;color:var(--sand-700);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml((r.description || '').slice(0, 80)) + '</span>' +
+        '</label>';
+      }).join('');
+      subsetHtml =
+        '<div style="margin-top:14px">' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">' +
+            '<span style="font-size:12px;font-weight:500;color:var(--sand-500)">Remaining constructs to run:</span>' +
+            '<label style="font-size:11px;color:var(--sand-400);cursor:pointer;display:flex;align-items:center;gap:4px">' +
+              '<input type="checkbox" id="' + checkboxId + '-all" checked onchange="toggleBulkSubsetAll(\'' + sampleCardId + '\',this.checked)" style="accent-color:var(--brand-fig)"> Select all' +
+            '</label>' +
+          '</div>' +
+          '<div class="batch-confirm-rows" style="border:1px solid var(--sand-200);border-radius:8px;max-height:200px;overflow-y:auto" id="' + checkboxId + '-list">' +
+            rowChecks +
+          '</div>' +
+        '</div>';
+    }
+  }
+
   var actionsHtml = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px">' +
     (succeeded
-      ? '<button class="send-btn" style="width:auto;padding:0 16px;height:32px;font-size:13px;border-radius:10px" onclick="approveBulkSample(\'' + sampleCardId + '\',\'' + planId + '\',\'' + sampleJobId + '\',\'' + model + '\')">' +
-          'Looks good — run all' +
+      ? '<button class="send-btn" id="' + sampleCardId + '-run-btn" style="width:auto;padding:0 16px;height:32px;font-size:13px;border-radius:10px" onclick="approveBulkSample(\'' + sampleCardId + '\',\'' + planId + '\',\'' + sampleJobId + '\',\'' + model + '\')">' +
+          'Run selected' +
         '</button>'
       : '') +
     '<button onclick="document.getElementById(\'' + sampleCardId + '\').remove()" style="padding:0 14px;height:32px;font-size:13px;background:transparent;border:1px solid var(--sand-200);border-radius:10px;cursor:pointer;color:var(--sand-600);font-family:inherit">Cancel</button>' +
@@ -4139,6 +4229,7 @@ function renderBulkSampleResult(row, sampleJobId, planId, model) {
     summaryHtml +
     exportsHtml +
     continuationHtml +
+    subsetHtml +
     actionsHtml +
   '</div></div>';
 
@@ -4152,6 +4243,12 @@ function renderBulkSampleResult(row, sampleJobId, planId, model) {
     inner.appendChild(card);
   }
   scrollToBottom();
+}
+
+function toggleBulkSubsetAll(sampleCardId, checked) {
+  var card = document.getElementById(sampleCardId);
+  if (!card) return;
+  card.querySelectorAll('.bulk-subset-chk').forEach(function(chk) { chk.checked = checked; });
 }
 
 function continueBulkSample(sampleJobId, planId, model) {
@@ -4187,8 +4284,13 @@ function continueBulkSample(sampleJobId, planId, model) {
 }
 
 function approveBulkSample(sampleCardId, planId, sampleJobId, model) {
+  // Collect which remaining rows the user selected (0-based original indices)
   var card = document.getElementById(sampleCardId);
+  var selectedIndices = [0];  // row 0 is always included (the sample)
   if (card) {
+    card.querySelectorAll('.bulk-subset-chk:checked').forEach(function(chk) {
+      selectedIndices.push(parseInt(chk.getAttribute('data-idx'), 10));
+    });
     var bc = card.querySelector('.bulk-plan-card');
     if (bc) bc.innerHTML = '<div style="color:var(--sand-500);font-size:13px"><span class="streaming-cursor"></span> Submitting full run&hellip;</div>';
   }
@@ -4196,22 +4298,27 @@ function approveBulkSample(sampleCardId, planId, sampleJobId, model) {
   fetch('/api/bulk/run', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({plan_id: planId, model: model, sample_job_id: sampleJobId}),
+    body: JSON.stringify({
+      plan_id: planId,
+      model: model,
+      sample_job_id: sampleJobId,
+      selected_indices: selectedIndices,
+    }),
   })
   .then(function(r) { return r.json(); })
   .then(function(data) {
     if (data.error) { alert('Error: ' + data.error); return; }
     if (card) card.remove();
-    var sid = data.session_id;
     var jobId = data.job_id;
-    saveSessionId(sid);
-    loadSessions();
-    messagesEl.innerHTML = '';
+    // Render batch cards inline in the CURRENT session (no session switch)
+    var activeSid = currentSessionId || ('bulk-' + jobId);
     initBatchCards(jobId, data.row_count, data.filename || 'bulk_design.csv', model);
-    _batchSessions[sid] = jobId;
-    if (_batchPollTimers[sid]) clearInterval(_batchPollTimers[sid]);
-    _batchPollTimers[sid] = setInterval(function() { pollBatchForSession(sid); }, 2000);
-    pollBatchForSession(sid);
+    // Refresh sidebar to show the new persisted batch entry without switching sessions
+    loadSessions();
+    _batchSessions[activeSid] = jobId;
+    if (_batchPollTimers[activeSid]) clearInterval(_batchPollTimers[activeSid]);
+    _batchPollTimers[activeSid] = setInterval(function() { pollBatchForSession(activeSid); }, 2000);
+    pollBatchForSession(activeSid);
   })
   .catch(function(e) { alert('Full run failed: ' + e); });
 }
@@ -5641,7 +5748,8 @@ def _continue_batch_row(job_id: str, row_idx: int, user_message: str) -> None:
         _save_batch_jobs()
 
 
-def _run_batch_group(job_id: str, row_indices: list, combined_prompt: str, model: str) -> None:
+def _run_batch_group(job_id: str, row_indices: list, combined_prompt: str, model: str,
+                     seed_history: Optional[list] = None) -> None:
     """Run ONE agent call for multiple similar rows, then distribute exports by name."""
     job = _batch_jobs.get(job_id)
     if not job:
@@ -5654,7 +5762,8 @@ def _run_batch_group(job_id: str, row_indices: list, combined_prompt: str, model
 
     combined_exports: list[dict] = []
     combined_log: list[dict] = []
-    history: list[dict] = []
+    # Pre-populate history with sample context so backbone lookups aren't repeated
+    history: list[dict] = list(seed_history) if seed_history else []
 
     try:
         _run_batch_agent(
@@ -5704,6 +5813,7 @@ def start_batch_job(
     pre_seeded_rows: Optional[dict] = None,
     batch_groups: Optional[list[dict]] = None,
     approval_required: bool = False,
+    seed_history: Optional[list] = None,
 ) -> str:
     """Create a batch job, launch a background thread, return job_id.
 
@@ -5714,6 +5824,9 @@ def start_batch_job(
     batch_groups: optional list of {prompt: str, indices: [int, ...]} dicts.
     When provided, rows in the same group are run as ONE agent call (sharing
     backbone load, RE site checks, etc.) rather than N separate calls.
+
+    seed_history: optional agent history from a prior sample run to pre-populate
+    context so subsequent rows skip redundant backbone/RE-site lookups.
     """
     job_id = str(uuid.uuid4())
     pre_seeded_rows = pre_seeded_rows or {}
@@ -5752,7 +5865,7 @@ def start_batch_job(
                 if len(indices) == 1:
                     _run_batch_row(job_id, indices[0], rows[indices[0]], model)
                 else:
-                    _run_batch_group(job_id, indices, prompt, model)
+                    _run_batch_group(job_id, indices, prompt, model, seed_history=seed_history)
             for idx, row in enumerate(rows):
                 if idx not in covered and job["rows"][idx].get("status") != "done":
                     _run_batch_row(job_id, idx, row, model)
@@ -6537,11 +6650,14 @@ class AgentHandler(SimpleHTTPRequestHandler):
             self._send_json({"job_id": job_id, "session_id": session_id, "row_count": 1})
 
         elif path == "/api/bulk/run":
-            content_length  = int(self.headers.get("Content-Length", 0))
-            body            = json.loads(self.rfile.read(content_length)) if content_length else {}
-            plan_id         = body.get("plan_id", "")
-            model           = body.get("model", "claude-sonnet-4-6")
-            sample_job_id   = body.get("sample_job_id")
+            content_length   = int(self.headers.get("Content-Length", 0))
+            body             = json.loads(self.rfile.read(content_length)) if content_length else {}
+            plan_id          = body.get("plan_id", "")
+            model            = body.get("model", "claude-sonnet-4-6")
+            sample_job_id    = body.get("sample_job_id")
+            # selected_indices: list of row indices the user wants to run (1-based from UI
+            # but 0-based here). None or empty means run all.
+            selected_indices = body.get("selected_indices")  # list[int] or None
 
             plan_data = _bulk_plans.get(plan_id)
             if not plan_data:
@@ -6549,7 +6665,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 return
 
             enriched_rows = plan_data["enriched_rows"]
-            batch_rows = [
+            all_batch_rows = [
                 {
                     "description": r["enriched_prompt"],
                     "name":        r["name"],
@@ -6558,7 +6674,8 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 for r in enriched_rows
             ]
 
-            # Pre-seed row 0 with the sample result if available
+            # Extract sample history for context seeding (avoids re-doing backbone lookups)
+            sample_history: Optional[list] = None
             pre_seeded: dict[int, dict] = {}
             if sample_job_id:
                 sample_job = _batch_jobs.get(sample_job_id)
@@ -6575,12 +6692,19 @@ class AgentHandler(SimpleHTTPRequestHandler):
                         "log":          sr.get("log", []),
                         "history":      sr.get("history", []),
                     }
+                    sample_history = sr.get("history") or None
+
+            # Filter to only user-selected rows; always include row 0 (pre-seeded sample)
+            if selected_indices is not None and len(selected_indices) > 0:
+                selected_set = set(selected_indices)
+                selected_set.add(0)  # always include the sample row
+                batch_rows = [r for i, r in enumerate(all_batch_rows) if i in selected_set]
+            else:
+                batch_rows = all_batch_rows
 
             # Build batch_groups when the plan is batch-eligible
-            # (all rows share backbone + method → one agent call handles them all)
             batch_grps: Optional[list[dict]] = None
             if plan_data.get("batch_eligible") and plan_data.get("batch_prompt"):
-                # Exclude row 0 if it was pre-seeded by the sample run
                 remaining = [i for i in range(len(batch_rows)) if i not in pre_seeded]
                 if remaining:
                     batch_grps = [{"prompt": plan_data["batch_prompt"], "indices": remaining}]
@@ -6589,11 +6713,14 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 batch_rows, model,
                 pre_seeded_rows=pre_seeded,
                 batch_groups=batch_grps,
+                seed_history=sample_history,
             )
 
-            filename   = plan_data.get("filename", "bulk_design.csv")
-            session_id = str(uuid.uuid4())
-            _sessions[session_id] = {
+            filename = plan_data.get("filename", "bulk_design.csv")
+            # Create a sidebar session for persistence but DON'T make the client switch to it.
+            # The client renders batch cards inline in the current chat session.
+            bg_session_id = str(uuid.uuid4())
+            _sessions[bg_session_id] = {
                 "history": [],
                 "display_messages": [],
                 "created_at":    time.time(),
@@ -6612,7 +6739,6 @@ class AgentHandler(SimpleHTTPRequestHandler):
 
             self._send_json({
                 "job_id":     job_id,
-                "session_id": session_id,
                 "row_count":  len(batch_rows),
                 "filename":   filename,
                 "batch_mode": batch_grps is not None,

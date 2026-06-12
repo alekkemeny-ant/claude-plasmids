@@ -18,18 +18,19 @@ PLANNER_MODEL = "claude-haiku-4-5-20251001"
 
 # ── Pricing per million tokens (input_price, output_price) ────────────────
 MODEL_PRICING: dict[str, tuple[float, float]] = {
-    "claude-haiku-4-5-20251001": (0.80,  4.00),
-    "claude-sonnet-4-6":          (3.00, 15.00),
-    "claude-opus-4-6":            (15.00, 75.00),
-    "claude-opus-4-7":            (15.00, 75.00),
+    "claude-haiku-4-5-20251001": (1.00,  5.00),   # was 0.80/4.00
+    "claude-sonnet-4-6":         (3.00, 15.00),   # ✓ correct
+    "claude-opus-4-6":           (5.00, 25.00),   # was 15.00/75.00
+    "claude-opus-4-7":           (5.00, 25.00),   # was 15.00/75.00
+    "claude-opus-4-8":           (5.00, 25.00),   # new flagship, same rate
 }
 
 # ── Estimated tokens per design row, by complexity ────────────────────────
 # Covers system prompt share + enriched prompt + tool round-trips + export output.
 TOKENS_BY_COMPLEXITY: dict[str, tuple[int, int]] = {
-    "simple":   (2_000,   800),
-    "standard": (3_500, 1_400),
-    "complex":  (6_000, 2_500),
+    "simple":   (200_000,   1_400),
+    "standard": (300_000, 8_000),
+    "complex":  (450_000, 17_000),
 }
 
 # ── Cost thresholds ────────────────────────────────────────────────────────
@@ -88,8 +89,8 @@ Instructions:
    - "standard" → MCS with NCBI/Addgene retrieval, some disambiguation needed
    - "complex"  → fusions, mutations, feature swaps, multiple unknowns
 4. Suggest the best run model:
-   - "claude-haiku-4-5-20251001" → pure oligo-annealing / simple GG
-   - "claude-sonnet-4-6"         → standard designs with gene retrieval
+  
+   - "claude-sonnet-4-6"         → pure oligo-annealing / simple GG or standard designs with gene retrieval
    - "claude-opus-4-7"           → complex designs, fusions, mutations
 5. Decide if batch_eligible:
    - Set batch_eligible=true ONLY when ALL rows share the SAME backbone AND the SAME assembly method
@@ -231,7 +232,7 @@ def generate_from_template(
         summary=f"{len(csv_rows)} construct(s) from template",
         enriched_rows=enriched,
         job_groups=groups,
-        model_suggestion="claude-haiku-4-5-20251001",
+        model_suggestion="claude-sonnet-4-6",
         estimated_cost_usd=cost,
         complexity="simple",
         batch_eligible=False,

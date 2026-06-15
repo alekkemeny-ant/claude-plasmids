@@ -3278,6 +3278,22 @@ async function sendMessage() {
     return;
   }
 
+  // Data CSV context — append raw CSV to the message sent to the agent, but display only the user's text.
+  var _csvDataAttachment = null;
+  if (_pendingDataCSV) {
+    _csvDataAttachment = _pendingDataCSV;
+    _pendingDataCSV = null;
+    // Remove the pending summary card and badge.
+    var pendingCard = document.getElementById(_csvDataAttachment.pendingCardId);
+    if (pendingCard) pendingCard.remove();
+    var badge = document.getElementById('csv-badge');
+    if (badge) badge.style.display = 'none';
+  }
+  var apiText = text;
+  if (_csvDataAttachment) {
+    apiText = text + '\n\n[CSV data from: ' + _csvDataAttachment.filename + ']\n```csv\n' + _csvDataAttachment.rawText + '\n```';
+  }
+
   isStreaming = true;
   streamingSessionId = currentSessionId;
   sendBtn.style.display = 'none';
@@ -3293,7 +3309,13 @@ async function sendMessage() {
   var userDiv = document.createElement('div');
   userDiv.className = 'msg user';
   var nowStr = new Date().toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'});
-  userDiv.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(text) + '</div><div class="msg-date">' + nowStr + '</div></div>';
+  var attachNote = _csvDataAttachment
+    ? '<div class="msg-date" style="display:flex;align-items:center;gap:6px;margin-top:4px">' +
+        '<svg width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' +
+        escapeHtml(_csvDataAttachment.filename) + ' (data)' +
+      '</div>'
+    : '';
+  userDiv.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(text) + '</div>' + attachNote + '<div class="msg-date">' + nowStr + '</div></div>';
   inner.appendChild(userDiv);
   scrollToBottom();
   showPendingCursor();
@@ -3301,7 +3323,7 @@ async function sendMessage() {
   abortController = new AbortController();
 
   try {
-    const reqBody = { message: text, model: modelSelect.value };
+    const reqBody = { message: apiText, model: modelSelect.value };
     if (currentSessionId) reqBody.session_id = currentSessionId;
 
     const resp = await fetch('/api/chat', {
@@ -3499,10 +3521,10 @@ chatPanelEl.addEventListener('drop', function(e) {
     reader.onload = function(ev) { uploadPlasmidFile(ev.target.result, file.name); };
     reader.readAsText(file);
   } else if (file.name.endsWith('.csv') || file.type === 'text/csv') {
-    reader.onload = function(ev) { requestBulkPlan(ev.target.result, file.name); };
+    reader.onload = function(ev) { handleCSVUpload(ev.target.result, file.name); };
     reader.readAsText(file);
   } else {
-    alert('Supported file types: .gb, .gbk, .fasta (plasmid library) or .csv (batch design).');
+    alert('Supported file types: .gb, .gbk, .fasta (plasmid files) or .csv (data or bulk design).');
   }
 });
 
@@ -3510,12 +3532,13 @@ function onBatchFileChosen(input) {
   var file = input.files[0];
   if (!file) return;
   var reader = new FileReader();
-  reader.onload = function(e) { requestBulkPlan(e.target.result, file.name); };
+  reader.onload = function(e) { handleCSVUpload(e.target.result, file.name); };
   reader.readAsText(file);
   input.value = '';
 }
 
 var _pendingCSV = null; // {rows, filename, rawText}
+var _pendingDataCSV = null; // {rawText, filename} — CSV attached as data context, not bulk design
 
 function onCombinedFileChosen(input) {
   var file = input.files[0];
@@ -3523,11 +3546,11 @@ function onCombinedFileChosen(input) {
   input.value = '';
   var reader = new FileReader();
   if (file.name.endsWith('.csv') || file.type === 'text/csv') {
-    reader.onload = function(e) { attachPendingCSV(e.target.result, file.name); };
+    reader.onload = function(e) { handleCSVUpload(e.target.result, file.name); };
   } else if (isPlasmidFile(file)) {
     reader.onload = function(e) { uploadPlasmidFile(e.target.result, file.name); };
   } else {
-    alert('Supported: .gb, .gbk, .fasta (plasmid library) or .csv (bulk design)');
+    alert('Supported: .gb, .gbk, .fasta (plasmid files) or .csv (data or bulk design)');
     return;
   }
   reader.readAsText(file);
@@ -3561,6 +3584,136 @@ function attachPendingCSV(csvText, filename) {
 
 function clearPendingCSV() {
   _pendingCSV = null;
+  _pendingDataCSV = null;
+  var badge = document.getElementById('csv-badge');
+  if (badge) badge.style.display = 'none';
+}
+
+// Detect whether a CSV looks like a bulk design request (has a 'description' column).
+function detectCSVIntent(csvText) {
+  var lines = csvText.split('\n').filter(function(l) { return l.trim(); });
+  if (!lines.length) return {isBulkDesign: false, columns: [], rowCount: 0};
+  var headers = _splitCSVLine(lines[0]).map(function(h) { return h.trim(); });
+  var hasDescription = headers.some(function(h) { return h.toLowerCase() === 'description'; });
+  // Count non-empty data rows (rough — doesn't re-parse each line fully)
+  var rowCount = lines.length - 1;
+  // Only call it bulk-design if there's a description col AND at least one data row
+  return {isBulkDesign: hasDescription && rowCount > 0, columns: headers, rowCount: rowCount};
+}
+
+// Central CSV upload router — replaces direct calls to requestBulkPlan / attachPendingCSV.
+function handleCSVUpload(csvText, filename) {
+  var intent = detectCSVIntent(csvText);
+  if (intent.isBulkDesign) {
+    requestBulkPlan(csvText, filename);
+  } else {
+    showCSVIntentCard(csvText, filename, intent.columns, intent.rowCount);
+  }
+}
+
+var _csvIntentStore = {}; // temporary store keyed by cardId to avoid embedding CSV text in onclick HTML
+
+// Show an inline card when the uploaded CSV doesn't look like a bulk design file.
+function showCSVIntentCard(csvText, filename, columns, rowCount) {
+  hideWelcome();
+  var inner = getInner();
+  var cardId = 'csv-intent-' + Date.now();
+  _csvIntentStore[cardId] = {csvText: csvText, filename: filename, columns: columns, rowCount: rowCount};
+
+  // Build a short preview: header + up to 3 data rows.
+  var lines = csvText.split('\n').filter(function(l) { return l.trim(); });
+  var previewLines = lines.slice(0, 4);
+  var previewText = previewLines.map(escapeHtml).join('\n');
+  if (lines.length > 4) previewText += '\n<span style="color:var(--sand-400)">&hellip; ' + (lines.length - 4) + ' more rows</span>';
+
+  var rowLabel = rowCount + ' row' + (rowCount === 1 ? '' : 's');
+
+  var card = document.createElement('div');
+  card.className = 'msg assistant';
+  card.id = cardId;
+  card.innerHTML =
+    '<div class="msg-bubble-assistant" style="font-size:13px">' +
+      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px">' +
+        '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' +
+        '<strong>' + escapeHtml(filename) + '</strong>' +
+        '<span style="color:var(--sand-400);font-weight:400;font-size:12px">' + rowLabel + '</span>' +
+      '</div>' +
+      '<pre style="background:var(--sand-100,#f5f0eb);border-radius:6px;padding:10px 12px;font-size:11.5px;margin:0 0 12px;overflow-x:auto;white-space:pre-wrap;word-break:break-all">' + previewText + '</pre>' +
+      '<p style="margin:0 0 12px;color:var(--sand-500);font-size:12px">This doesn\'t look like a bulk design file — those need a <code>description</code> column with one design instruction per row.</p>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<button onclick="_csvIntentUseAsData(\'' + cardId + '\')" ' +
+          'style="padding:6px 14px;background:var(--accent,#7c6fcd);color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer">Use as data</button>' +
+        '<button onclick="_csvIntentUseBulkFormat(\'' + cardId + '\')" ' +
+          'style="padding:6px 14px;background:transparent;color:var(--accent,#7c6fcd);border:1px solid var(--accent,#7c6fcd);border-radius:6px;font-size:12px;cursor:pointer">Use for bulk design</button>' +
+      '</div>' +
+    '</div>';
+  inner.appendChild(card);
+  scrollToBottom();
+}
+
+function _csvIntentUseAsData(cardId) {
+  var data = _csvIntentStore[cardId];
+  if (!data) return;
+  delete _csvIntentStore[cardId];
+  var el = document.getElementById(cardId);
+  if (el) el.remove();
+  attachDataCSV(data.csvText, data.filename, data.columns, data.rowCount);
+}
+
+function _csvIntentUseBulkFormat(cardId) {
+  delete _csvIntentStore[cardId];
+  var el = document.getElementById(cardId);
+  if (el) el.remove();
+  var tip = document.createElement('div');
+  tip.className = 'msg assistant';
+  tip.innerHTML = '<div class="msg-bubble-assistant" style="font-size:13px">To use bulk design, add a <code>description</code> column to your CSV with one full design instruction per row, then re-upload it.</div>';
+  getInner().appendChild(tip);
+  scrollToBottom();
+}
+
+// Attach a CSV as plain data context (included in the next message sent to the agent).
+function attachDataCSV(csvText, filename, columns, rowCount) {
+  // Show a compact summary card in the chat so the user can see what's pending.
+  hideWelcome();
+  var pendingCardId = 'csv-data-pending-' + Date.now();
+  var colSnippet = (columns && columns.length)
+    ? columns.slice(0, 5).map(escapeHtml).join(', ') + (columns.length > 5 ? ', …' : '')
+    : '';
+  var rowLabel = rowCount != null ? rowCount + ' row' + (rowCount === 1 ? '' : 's') : '';
+  var metaLine = [rowLabel, colSnippet].filter(Boolean).join('  ·  ');
+
+  var card = document.createElement('div');
+  card.className = 'msg assistant';
+  card.id = pendingCardId;
+  card.innerHTML =
+    '<div class="msg-bubble-assistant" style="font-size:12.5px;padding:10px 14px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">' +
+        '<div style="display:flex;align-items:center;gap:7px;font-weight:500;min-width:0">' +
+          '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' +
+          '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(filename) + '</span>' +
+        '</div>' +
+        '<button onclick="_csvDataRemove(\'' + pendingCardId + '\')" title="Remove" ' +
+          'style="flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--sand-400,#a09080);font-size:15px;line-height:1;padding:0 2px">&times;</button>' +
+      '</div>' +
+      (metaLine ? '<div style="margin-top:4px;color:var(--sand-500,#9a8a7a);font-size:11.5px">' + metaLine + '</div>' : '') +
+      '<div style="margin-top:6px;color:var(--sand-500,#9a8a7a);font-size:11.5px;font-style:italic">Attached as data — will be included in your next message.</div>' +
+    '</div>';
+  getInner().appendChild(card);
+  scrollToBottom();
+
+  _pendingDataCSV = {rawText: csvText, filename: filename, pendingCardId: pendingCardId};
+
+  // Also update the input-area badge as a secondary indicator.
+  var badge = document.getElementById('csv-badge');
+  var label = document.getElementById('csv-badge-name');
+  if (badge) badge.style.display = 'flex';
+  if (label) label.textContent = filename + ' — data';
+}
+
+function _csvDataRemove(pendingCardId) {
+  var el = document.getElementById(pendingCardId);
+  if (el) el.remove();
+  _pendingDataCSV = null;
   var badge = document.getElementById('csv-badge');
   if (badge) badge.style.display = 'none';
 }

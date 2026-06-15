@@ -479,6 +479,8 @@ def _emit_tool_result(
     safe_write,
     session: dict,
     assistant_blocks: list,
+    preview_state: dict | None = None,
+    current_model: str = "claude-sonnet-4-6",
 ) -> None:
     """Emit SSE event(s) for a completed tool call and apply side effects.
 
@@ -487,6 +489,7 @@ def _emit_tool_result(
     the streaming loop and any future callers so behaviour stays in sync.
     """
     if tool_name == "submit_bulk_designs" and result_str.startswith("[BULK_DESIGNS_READY]"):
+        # Legacy path: CSV-upload agent still emits this. Keep handling it.
         try:
             rows_json = result_str[len("[BULK_DESIGNS_READY] "):]
             rows_data = json.loads(rows_json)
@@ -498,6 +501,49 @@ def _emit_tool_result(
             "name": tool_name,
             "input": tool_input,
             "result": f"Handed {len(rows_data)} construct(s) to the bulk design planner.",
+        })
+        return  # don't emit a regular tool_result card
+
+    if tool_name == "submit_bulk_designs" and result_str.startswith("[BULK_DESIGNS_REGISTERED]"):
+        # New path: agent handles design directly; start preview token tracking and
+        # emit event so the frontend can show the model picker inline.
+        n_remaining = len(tool_input.get("rows", []))
+        if preview_state is not None:
+            preview_state["tracking"] = True
+            preview_state["in"] = 0
+            preview_state["out"] = 0
+            preview_state["exports"] = []
+            session["_preview_state"] = dict(preview_state)
+        safe_write({
+            "type": "bulk_designs_registered",
+            "n_constructs": n_remaining,
+            "preview_model": current_model,
+        })
+        # Fall through — let the result render as a normal tool_result card so
+        # the agent receives its workflow instructions.
+
+    if tool_name == "complete_bulk_preview" and result_str.startswith("[BULK_PREVIEW_READY]"):
+        try:
+            payload_json = result_str[len("[BULK_PREVIEW_READY] "):]
+            payload = json.loads(payload_json)
+        except Exception:
+            payload = {}
+        n_remaining = len(payload.get("remaining_rows", []))
+        # Attach actual preview token counts so the frontend can show real estimates.
+        if preview_state is not None:
+            payload["preview_tokens_in"]  = preview_state.get("in", 0)
+            payload["preview_tokens_out"] = preview_state.get("out", 0)
+            payload["preview_model"]      = current_model
+            payload["preview_exports"]    = preview_state.get("exports", [])
+            preview_state["tracking"] = False
+            preview_state["exports"] = []
+            session.pop("_preview_state", None)
+        safe_write({"type": "bulk_preview_complete", **payload})
+        assistant_blocks.append({
+            "type": "tool_use",
+            "name": tool_name,
+            "input": tool_input,
+            "result": f"Preview complete. {n_remaining} construct(s) queued for user approval.",
         })
         return  # don't emit a regular tool_result card
 
@@ -518,14 +564,31 @@ def _emit_tool_result(
         ext = {"genbank": ".gb", "gb": ".gb", "fasta": ".fasta"}.get(fmt, ".txt")
         filename = cname + ext
         display_result = f"Exported: {filename}"
-        event_data = {
-            "type": "tool_result",
-            "tool": tool_name,
-            "input": tool_input,
-            "content": display_result,
-            "download_content": result_str,
-            "download_filename": filename,
-        }
+        # Capture exports during the preview run; suppress the in-chat download
+        # button so the file only appears in the approval card (not twice).
+        is_preview_export = preview_state is not None and preview_state.get("tracking")
+        if is_preview_export:
+            preview_state.setdefault("exports", []).append({
+                "filename": filename,
+                "content": result_str,
+            })
+            safe_write({"type": "bulk_preview_export", "filename": filename, "content": result_str})
+            event_data = {
+                "type": "tool_result",
+                "tool": tool_name,
+                "input": tool_input,
+                "content": display_result,
+                # download_content/download_filename omitted — shown in the approval card
+            }
+        else:
+            event_data = {
+                "type": "tool_result",
+                "tool": tool_name,
+                "input": tool_input,
+                "content": display_result,
+                "download_content": result_str,
+                "download_filename": filename,
+            }
     else:
         display_result = result_str[:2000] + "..." if len(result_str) > 2000 else result_str
         event_data = {
@@ -591,6 +654,17 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
     set_tracker(tracker)
     clear_last_plot_json()
     export_called = False
+    # Accumulates tokens for the bulk preview construct (#1) so the approval
+    # card can show real per-construct cost estimates for the remaining runs.
+    # Persisted in session so tracking survives across the two turns (plan turn
+    # where submit_bulk_designs fires, and preview turn where the build happens).
+    _ps = session.get("_preview_state", {})
+    preview_state: dict = {
+        "tracking": bool(_ps.get("tracking")),
+        "in":       int(_ps.get("in", 0)),
+        "out":      int(_ps.get("out", 0)),
+        "exports":  list(_ps.get("exports", [])),
+    }
     # Build the system prompt once per turn (not per retry) so that
     # prompt caching works. The prompt is dynamic because it includes
     # per-session troubleshooting context (experimental_outcomes).
@@ -711,6 +785,8 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                                         current_tool_name, tool_input, result_str,
                                         safe_write=safe_write, session=session,
                                         assistant_blocks=assistant_blocks,
+                                        preview_state=preview_state,
+                                        current_model=model,
                                     )
                                     tool_results.append({
                                         "type": "tool_result",
@@ -727,6 +803,10 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
 
                         final_message = stream.get_final_message()
                         if final_message and hasattr(final_message, "usage"):
+                            if preview_state["tracking"]:
+                                preview_state["in"]  += final_message.usage.input_tokens
+                                preview_state["out"] += getattr(final_message.usage, "output_tokens", 0)
+                                session["_preview_state"] = dict(preview_state)
                             safe_write({
                                 "type": "token_usage",
                                 "input_tokens": final_message.usage.input_tokens,
@@ -2162,6 +2242,18 @@ async function _reconnectToStream(sessionId) {
             }
             requestBulkPlanFromRows(event.rows || [], modelSelect.value);
             break;
+          case 'bulk_designs_registered':
+            showBulkPreviewModelCard(event);
+            break;
+          case 'bulk_preview_export':
+            _bulkPreviewExports.push({filename: event.filename, content: event.content});
+            break;
+          case 'bulk_preview_complete':
+            // Agent finished construct 1 — close the progress card, show approval card.
+            // Do NOT set streamDone; the agent's turn ends naturally with 'done'.
+            { var _mc = document.getElementById('bulk-preview-model-card'); if (_mc) _mc.remove(); }
+            showBulkPreviewApprovalCard(event);
+            break;
           case 'done': streamDone = true; break;
         }
         if (streamDone) break;
@@ -3273,6 +3365,16 @@ async function sendMessage() {
             }
             requestBulkPlanFromRows(event.rows || [], modelSelect.value);
             break;
+          case 'bulk_designs_registered':
+            showBulkPreviewModelCard(event);
+            break;
+          case 'bulk_preview_export':
+            _bulkPreviewExports.push({filename: event.filename, content: event.content});
+            break;
+          case 'bulk_preview_complete':
+            { var _mc2 = document.getElementById('bulk-preview-model-card'); if (_mc2) _mc2.remove(); }
+            showBulkPreviewApprovalCard(event);
+            break;
           case 'done': streamDone = true; break;
         }
         if (streamDone) break;
@@ -3568,6 +3670,16 @@ async function sendPlasmidIntakeMessage(apiMessage, model, filename, sizeBp, fea
           case 'plot_data': addPlasmidPlot(event.plot_json); break;
           case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
           case 'error': clearPendingCursor(); startTextBlock(); appendTextDelta('Error: ' + event.content); endTextBlock(); break;
+          case 'bulk_designs_registered':
+            showBulkPreviewModelCard(event);
+            break;
+          case 'bulk_preview_export':
+            _bulkPreviewExports.push({filename: event.filename, content: event.content});
+            break;
+          case 'bulk_preview_complete':
+            { var _mc3 = document.getElementById('bulk-preview-model-card'); if (_mc3) _mc3.remove(); }
+            showBulkPreviewApprovalCard(event);
+            break;
           case 'done': streamDone = true; break;
         }
         if (streamDone) break;
@@ -3727,8 +3839,6 @@ function startBatchFromConfirm(confirmId, total) {
   var data = _batchConfirmData[confirmId];
   if (!data) return;
   delete _batchConfirmData[confirmId];
-  var modelEl = document.getElementById(confirmId + '-model');
-  var model = modelEl ? modelEl.value : modelSelect.value;
   // Build filtered CSV from checked rows
   var selectedLines = [];
   for (var i = 0; i < (data.rows || []).length; i++) {
@@ -3739,13 +3849,437 @@ function startBatchFromConfirm(confirmId, total) {
   if (card) card.remove();
   if (!selectedLines.length) return;
   var filteredCSV = data.header + '\n' + selectedLines.join('\n');
-  uploadBatchCSV(filteredCSV, data.filename, model);
+  // Route through chat so the agent handles it like typed input
+  requestBulkPlan(filteredCSV, data.filename);
 }
 
 function cancelBatchConfirm(confirmId) {
   delete _batchConfirmData[confirmId];
   var card = document.getElementById(confirmId);
   if (card) card.remove();
+}
+
+// ── Bulk preview approval (agent-driven new flow) ──────────────────────────
+
+// Stores {rows, sharedCtx} keyed by cardId for approveBulkPreview()
+var _bulkPreviewData    = {};
+var _bulkPreviewTokens  = {in: 0, out: 0};  // actual token counts from preview run
+var _bulkPreviewModel   = 'claude-sonnet-4-6';  // model the user picked for the bulk run
+var _bulkPreviewExports = [];  // export files captured during the preview run
+
+function buildEnrichedPrompt(description, sharedCtx) {
+  var lines = ['<!-- bulk-enriched-row -->',
+               'SHARED CONTEXT (already resolved — skip these tool calls):'];
+  if (sharedCtx.backbone_id) {
+    lines.push('- Backbone: "' + (sharedCtx.backbone_name || sharedCtx.backbone_id) +
+               '" — use backbone_id="' + sharedCtx.backbone_id + '" directly, do NOT search or fetch again');
+  }
+  if (sharedCtx.insertion_site_start !== undefined && sharedCtx.insertion_site_start !== null) {
+    var siteRange = sharedCtx.insertion_site_end
+      ? sharedCtx.insertion_site_start + '–' + sharedCtx.insertion_site_end
+      : String(sharedCtx.insertion_site_start);
+    lines.push('- Insertion site: position ' + siteRange +
+               ' — use insertion_position=' + sharedCtx.insertion_site_start + ' directly');
+  }
+  if (sharedCtx.enzyme) lines.push('- Assembly enzyme: ' + sharedCtx.enzyme);
+  if (sharedCtx.assembly_method) lines.push('- Assembly method: ' + sharedCtx.assembly_method);
+  if (sharedCtx.extra) lines.push('- Additional context: ' + sharedCtx.extra);
+  lines.push('', 'YOUR TASK:', description);
+  return lines.join('\n');
+}
+
+function _bulkModelOpts(defaultModel) {
+  return [
+    ['claude-sonnet-4-6',        'Sonnet 4.6 — recommended'],
+    ['claude-opus-4-7',          'Opus 4.7 — most capable'],
+    ['claude-haiku-4-5-20251001','Haiku 4.5 — fastest / cheapest'],
+  ].map(function(o) {
+    return '<option value="' + o[0] + '"' + (o[0] === defaultModel ? ' selected' : '') + '>' + o[1] + '</option>';
+  }).join('');
+}
+
+// Shown when the agent registers bulk designs — user picks model and confirms before preview starts.
+function showBulkPreviewModelCard(event) {
+  var n       = event.n_constructs || 0;  // remaining constructs after the preview
+  var defMdl  = event.preview_model || 'claude-sonnet-4-6';
+  _bulkPreviewModel = defMdl;
+
+  var existing = document.getElementById('bulk-preview-model-card');
+  if (existing) existing.remove();
+
+  // Reset export capture for this (re)run
+  _bulkPreviewExports = [];
+
+  var card = document.createElement('div');
+  card.className = 'msg assistant';
+  card.id = 'bulk-preview-model-card';
+  card.innerHTML = '<div class="msg-bubble-assistant"><div class="bulk-plan-card">' +
+    '<div class="bulk-plan-title">Ready to build bulk preview</div>' +
+    '<div class="bulk-plan-summary">' + (n + 1) + ' construct' + ((n + 1) === 1 ? '' : 's') + ' queued. ' +
+      'Construct #1 will be built here as a preview before committing to the rest.</div>' +
+    '<div style="margin-bottom:14px">' +
+      '<label style="font-size:12px;font-weight:500;color:var(--sand-500);display:block;margin-bottom:6px">' +
+        'Model for preview and subsequent constructs:</label>' +
+      '<select class="model-select" style="font-size:12px;max-width:280px" id="bulk-preview-model-sel" ' +
+        'onchange="_bulkPreviewModel = this.value">' +
+        _bulkModelOpts(defMdl) +
+      '</select>' +
+    '</div>' +
+    '<div style="display:flex;gap:8px;align-items:center">' +
+      '<button class="send-btn" style="width:auto;padding:0 18px;height:32px;font-size:13px;border-radius:10px" ' +
+        'onclick="startBulkPreviewRun(this)">Start Preview</button>' +
+      '<button onclick="document.getElementById(\'bulk-preview-model-card\').remove()" ' +
+        'style="padding:0 14px;height:32px;font-size:13px;background:transparent;border:1px solid var(--sand-200);border-radius:10px;cursor:pointer;color:var(--sand-600);font-family:inherit">Cancel</button>' +
+    '</div>' +
+  '</div></div>';
+
+  getInner().appendChild(card);
+  scrollToBottom();
+}
+
+function startBulkPreviewRun(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+  // Switch the global model selector so the follow-up API call uses the chosen model
+  var modelSel = document.getElementById('model-select');
+  if (modelSel) modelSel.value = _bulkPreviewModel;
+  // Replace card content with a progress indicator
+  var card = document.getElementById('bulk-preview-model-card');
+  if (card) {
+    var bc = card.querySelector('.bulk-plan-card');
+    if (bc) bc.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--sand-500)">' +
+      '<span class="streaming-cursor"></span> Building preview with ' +
+      '<strong style="color:var(--sand-700)">' + _bulkPreviewModel + '</strong>&hellip;</div>';
+  }
+  // Use rerun message if set (from rerunBulkPreview), otherwise start fresh
+  var msg = window._bulkRerunMsg || 'Please start the bulk preview.';
+  window._bulkRerunMsg = null;
+  inputEl.value = msg;
+  sendMessage();
+}
+
+function showBulkPreviewApprovalCard(event) {
+  var remainingRows = event.remaining_rows || [];
+  var sharedCtx     = event.shared_context || {};
+  var summary       = event.preview_summary || '';
+  var n             = remainingRows.length;
+  var cardId        = 'bulk-preview-' + Date.now();
+
+  // Capture actual token counts from the preview run for cost estimates.
+  _bulkPreviewTokens = {
+    in:  event.preview_tokens_in  || 0,
+    out: event.preview_tokens_out || 0,
+  };
+  // Use the model the user picked in the model-picker card (or the session default).
+  if (event.preview_model) _bulkPreviewModel = event.preview_model;
+  var defaultModel = _bulkPreviewModel || 'claude-sonnet-4-6';
+
+  _bulkPreviewData[cardId] = {rows: remainingRows, sharedCtx: sharedCtx};
+
+  // Build shared context summary lines
+  var ctxLines = [];
+  if (sharedCtx.backbone_name || sharedCtx.backbone_id)
+    ctxLines.push('Backbone: ' + (sharedCtx.backbone_name || sharedCtx.backbone_id));
+  if (sharedCtx.insertion_site_start !== undefined && sharedCtx.insertion_site_start !== null)
+    ctxLines.push('Insertion site: ' + sharedCtx.insertion_site_start +
+                  (sharedCtx.insertion_site_end ? '–' + sharedCtx.insertion_site_end : ''));
+  if (sharedCtx.enzyme) ctxLines.push('Enzyme: ' + sharedCtx.enzyme);
+  if (sharedCtx.assembly_method) ctxLines.push('Method: ' + sharedCtx.assembly_method);
+  if (sharedCtx.extra) ctxLines.push(sharedCtx.extra);
+
+  var ctxHtml = ctxLines.length
+    ? '<div style="font-size:12px;color:var(--sand-600);background:var(--sand-50,#fafaf9);border:1px solid var(--sand-100);border-radius:6px;padding:8px 10px;margin-bottom:12px">' +
+        '<div style="font-weight:500;margin-bottom:3px;color:var(--sand-500)">Shared context — already resolved, will be reused:</div>' +
+        ctxLines.map(function(l) { return '<div>· ' + escapeHtml(l) + '</div>'; }).join('') +
+      '</div>'
+    : '';
+
+  // Build preview construct download section
+  var prevExports = event.preview_exports || [];
+  var exportsHtml = '';
+  if (prevExports.length) {
+    exportsHtml = '<div style="margin-bottom:12px;padding:8px 10px;background:var(--sand-50,#fafaf9);border:1px solid var(--sand-100);border-radius:6px">' +
+      '<div style="font-size:12px;font-weight:500;color:var(--sand-500);margin-bottom:6px">Preview construct (#1):</div>' +
+      prevExports.map(function(exp, ei) {
+        var key = '_previewExp_' + cardId + '_' + ei;
+        window[key] = exp;
+        return '<div style="display:flex;align-items:center;gap:8px;font-size:12px">' +
+          '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">' +
+            '<path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>' +
+            '<polyline points="14 2 14 8 20 8"/>' +
+          '</svg>' +
+          '<a href="#" style="color:var(--brand-fig);text-decoration:none" ' +
+            'onclick="(function(e){e.preventDefault();var d=window[\'' + key + '\'];if(!d)return;' +
+              'var b=new Blob([d.content||\'\'],{type:\'text/plain\'});var u=URL.createObjectURL(b);' +
+              'var a=document.createElement(\'a\');a.href=u;a.download=d.filename;a.click();URL.revokeObjectURL(u);})(event)">' +
+            escapeHtml(exp.filename) +
+          '</a>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+  }
+
+  // Build row list — each item is a data attribute row for live filter
+  var rowChecks = remainingRows.map(function(r, i) {
+    var num  = i + 2;  // construct number (1 was the preview)
+    var name = r.name || '';
+    var desc = (r.description || '').slice(0, 80);
+    return '<label class="bulk-sel-row" data-num="' + num + '" data-name="' + escapeHtml(name).toLowerCase() + '" ' +
+      'style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:5px 8px;border-bottom:1px solid var(--sand-100)">' +
+      '<input type="checkbox" class="bulk-preview-chk" data-idx="' + i + '" checked ' +
+        'style="accent-color:var(--brand-fig);flex-shrink:0" onchange="onBulkPreviewChk(\'' + cardId + '\')">' +
+      '<span style="font-size:11px;font-weight:600;color:var(--brand-fig);width:28px;flex-shrink:0;text-align:right">#' + num + '</span>' +
+      '<span style="font-size:11px;color:var(--sand-500);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0">' + escapeHtml(name) + '</span>' +
+      '<span style="font-size:12px;color:var(--sand-700);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(desc) + '</span>' +
+    '</label>';
+  }).join('');
+
+  var modelOpts = _bulkModelOpts(defaultModel);
+
+  // Token stats banner (shown when we have real data from the preview run)
+  var tokIn  = _bulkPreviewTokens.in;
+  var tokOut = _bulkPreviewTokens.out;
+  var tokenStatHtml = (tokIn > 0)
+    ? '<div style="font-size:11px;color:var(--sand-400);background:var(--sand-50,#fafaf9);border:1px solid var(--sand-100);border-radius:6px;padding:6px 10px;margin-bottom:10px;display:flex;gap:12px;align-items:center">' +
+        '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
+        '<span>Preview used <strong>' + Math.round(tokIn / 1000) + 'k</strong> input + ' +
+          '<strong>' + Math.round(tokOut / 1000) + 'k</strong> output tokens &mdash; cost estimates below use these actual counts</span>' +
+      '</div>'
+    : '';
+
+  var rowsHtml = n > 0
+    ? '<div style="margin-bottom:14px">' +
+        // Header: label + search + all/none
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">' +
+          '<span style="font-size:12px;font-weight:500;color:var(--sand-500)">Constructs to run:</span>' +
+          '<span id="' + cardId + '-selcount" style="font-size:12px;color:var(--brand-fig);font-weight:500">' + n + ' of ' + n + ' selected</span>' +
+          '<div style="flex:1"></div>' +
+          '<input id="' + cardId + '-filter" type="text" placeholder="Filter by # or name…" ' +
+            'style="height:26px;padding:0 8px;border:1px solid var(--sand-200);border-radius:6px;font-size:12px;font-family:inherit;width:130px;box-sizing:border-box" ' +
+            'oninput="filterBulkPreviewRows(\'' + cardId + '\')">' +
+          '<button onclick="setBulkPreviewAll(\'' + cardId + '\',' + n + ',true)" ' +
+            'style="height:26px;padding:0 10px;font-size:11px;font-weight:500;border:1px solid var(--sand-200);border-radius:6px;cursor:pointer;background:transparent;color:var(--sand-600);font-family:inherit">All</button>' +
+          '<button onclick="setBulkPreviewAll(\'' + cardId + '\',' + n + ',false)" ' +
+            'style="height:26px;padding:0 10px;font-size:11px;font-weight:500;border:1px solid var(--sand-200);border-radius:6px;cursor:pointer;background:transparent;color:var(--sand-600);font-family:inherit">None</button>' +
+        '</div>' +
+        // Construct #1 done badge
+        '<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;background:var(--sand-50,#fafaf9);border:1px solid var(--sand-100);border-radius:6px;margin-bottom:4px;font-size:12px;color:var(--sand-500)">' +
+          '<svg width="14" height="14" fill="none" stroke="var(--brand-aqua)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+          '<span style="font-weight:600;color:var(--brand-fig)">#1</span>' +
+          '<span>Preview — already built</span>' +
+        '</div>' +
+        // Scrollable list
+        '<div id="' + cardId + '-list" style="border:1px solid var(--sand-200);border-radius:8px;max-height:280px;overflow-y:auto">' + rowChecks + '</div>' +
+      '</div>'
+    : '<div style="font-size:13px;color:var(--sand-500);margin-bottom:14px">No remaining constructs.</div>';
+
+  var bottomHtml = n > 0
+    ? tokenStatHtml +
+      '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">' +
+        '<div>' +
+          '<label style="font-size:12px;font-weight:500;color:var(--sand-500);display:block;margin-bottom:4px">Model</label>' +
+          '<select id="' + cardId + '-model" class="model-select" style="font-size:12px;max-width:220px" ' +
+            'onchange="onBulkPreviewChk(\'' + cardId + '\')">' + modelOpts + '</select>' +
+        '</div>' +
+        '<div id="' + cardId + '-cost" style="font-size:12px;margin-top:18px"></div>' +
+      '</div>'
+    : '';
+
+  var actionsHtml = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+    (n > 0
+      ? '<button class="send-btn" id="' + cardId + '-runbtn" style="width:auto;padding:0 18px;height:32px;font-size:13px;border-radius:10px" onclick="approveBulkPreview(\'' + cardId + '\')">' +
+          'Run ' + n + ' construct' + (n === 1 ? '' : 's') +
+        '</button>'
+      : '') +
+    '<button onclick="rerunBulkPreview(\'' + cardId + '\')" ' +
+      'style="padding:0 14px;height:32px;font-size:13px;background:transparent;border:1px solid var(--sand-200);border-radius:10px;cursor:pointer;color:var(--sand-600);font-family:inherit" ' +
+      'title="Something wrong? Fix it in chat then click here to rebuild construct #1">Rerun Preview</button>' +
+    '<button onclick="delete _bulkPreviewData[\'' + cardId + '\']; document.getElementById(\'' + cardId + '\').remove()" ' +
+      'style="padding:0 14px;height:32px;font-size:13px;background:transparent;border:1px solid var(--sand-200);border-radius:10px;cursor:pointer;color:var(--sand-600);font-family:inherit">Cancel</button>' +
+  '</div>';
+
+  var inner = getInner();
+  var card  = document.createElement('div');
+  card.className = 'msg assistant';
+  card.id = cardId;
+  card.innerHTML = '<div class="msg-bubble-assistant"><div class="bulk-plan-card">' +
+    '<div class="bulk-plan-title">Preview complete' + (n > 0 ? ' — choose constructs to run' : '') + '</div>' +
+    (summary ? '<div class="bulk-plan-summary">' + escapeHtml(summary) + '</div>' : '') +
+    exportsHtml +
+    ctxHtml +
+    rowsHtml +
+    bottomHtml +
+    actionsHtml +
+  '</div></div>';
+  inner.appendChild(card);
+  scrollToBottom();
+  if (n > 0) onBulkPreviewChk(cardId);
+}
+
+// Called whenever a checkbox changes or model changes — updates count, cost, run button
+function onBulkPreviewChk(cardId) {
+  var card = document.getElementById(cardId);
+  if (!card) return;
+  var checked = card.querySelectorAll('.bulk-preview-chk:checked').length;
+  var total   = card.querySelectorAll('.bulk-preview-chk').length;
+  var countEl = document.getElementById(cardId + '-selcount');
+  if (countEl) countEl.textContent = checked + ' of ' + total + ' selected';
+  var runBtn = document.getElementById(cardId + '-runbtn');
+  if (runBtn) {
+    runBtn.textContent = 'Run ' + checked + ' construct' + (checked === 1 ? '' : 's');
+    runBtn.disabled = (checked === 0);
+    runBtn.style.opacity = checked === 0 ? '0.4' : '1';
+  }
+  var sel   = document.getElementById(cardId + '-model');
+  var model = sel ? sel.value : (_bulkPreviewModel || 'claude-sonnet-4-6');
+  // Use actual preview token counts when available; fall back to rough estimates.
+  var cost;
+  var basedOnActual = _bulkPreviewTokens.in > 0;
+  if (basedOnActual) {
+    var pricing = _BULK_MODEL_PRICING[model] || _BULK_MODEL_PRICING['claude-sonnet-4-6'];
+    var cpr = (_bulkPreviewTokens.in * pricing[0] + _bulkPreviewTokens.out * pricing[1]) / 1000000;
+    cost = Math.round(cpr * checked * 10000) / 10000;
+  } else {
+    cost = _estimateBulkCost(checked, model, 'standard');
+  }
+  var cls = cost >= BULK_COST_SPLIT ? 'orange' : cost >= BULK_COST_WARN ? 'yellow' : 'ok';
+  var lbl = checked === 0
+    ? 'No constructs selected'
+    : (cost < 0.01 ? '< $0.01' : '~$' + cost.toFixed(2)) +
+      ' estimated' + (basedOnActual ? ' (based on preview)' : ' (rough estimate)');
+  var costEl = document.getElementById(cardId + '-cost');
+  if (costEl) {
+    costEl.innerHTML = '<div class="bulk-plan-cost ' + (checked > 0 ? cls : '') + '">' +
+      (checked > 0 ? '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg> ' : '') +
+      lbl + '</div>';
+  }
+}
+
+// Filter the construct list by number or name
+function filterBulkPreviewRows(cardId) {
+  var input = document.getElementById(cardId + '-filter');
+  if (!input) return;
+  var q = input.value.trim().toLowerCase();
+  var list = document.getElementById(cardId + '-list');
+  if (!list) return;
+  list.querySelectorAll('.bulk-sel-row').forEach(function(row) {
+    var num  = row.getAttribute('data-num') || '';
+    var name = row.getAttribute('data-name') || '';
+    var show = !q || ('#' + num).includes(q) || num.includes(q) || name.includes(q);
+    row.style.display = show ? '' : 'none';
+  });
+}
+
+// Set all VISIBLE rows checked or unchecked
+function setBulkPreviewAll(cardId, total, checked) {
+  var card = document.getElementById(cardId);
+  if (!card) return;
+  card.querySelectorAll('.bulk-sel-row').forEach(function(row) {
+    if (row.style.display === 'none') return;
+    var chk = row.querySelector('.bulk-preview-chk');
+    if (chk) chk.checked = checked;
+  });
+  onBulkPreviewChk(cardId);
+}
+
+// Legacy alias kept for CSV-upload flow
+function toggleBulkPreviewAll(cardId, checked) { setBulkPreviewAll(cardId, 0, checked); }
+
+function approveBulkPreview(cardId) {
+  var data = _bulkPreviewData[cardId];
+  if (!data) return;
+  var modelEl = document.getElementById(cardId + '-model');
+  var model   = modelEl ? modelEl.value : 'claude-sonnet-4-6';
+  var card    = document.getElementById(cardId);
+
+  // Collect selected rows
+  var selectedRows = [];
+  if (card) {
+    card.querySelectorAll('.bulk-preview-chk:checked').forEach(function(chk) {
+      var idx = parseInt(chk.getAttribute('data-idx'), 10);
+      if (data.rows[idx]) selectedRows.push(data.rows[idx]);
+    });
+    var bc = card.querySelector('.bulk-plan-card');
+    if (bc) bc.innerHTML = '<div style="color:var(--sand-500);font-size:13px"><span class="streaming-cursor"></span> Submitting ' + selectedRows.length + ' construct' + (selectedRows.length === 1 ? '' : 's') + '&hellip;</div>';
+  }
+
+  if (!selectedRows.length) {
+    alert('No constructs selected.');
+    if (card) { var bc2 = card.querySelector('.bulk-plan-card'); if (bc2) bc2.innerHTML = ''; }
+    return;
+  }
+
+  // Build enriched prompts embedding the shared context
+  var enrichedRows = selectedRows.map(function(r) {
+    return {
+      name:          r.name || '',
+      description:   buildEnrichedPrompt(r.description, data.sharedCtx),
+      output_format: 'genbank',
+    };
+  });
+
+  delete _bulkPreviewData[cardId];
+
+  fetch('/api/bulk/run', {
+    method:  'POST',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({
+      enriched_rows:   enrichedRows,
+      model:           model,
+      filename:        'bulk_design.csv',
+      preview_exports: _bulkPreviewExports,
+    }),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) { alert('Error: ' + data.error); return; }
+    if (card) card.remove();
+    var jobId = data.job_id;
+    var activeSid = currentSessionId || ('bulk-' + jobId);
+    initBatchCards(jobId, data.row_count, data.filename || 'bulk_design.csv', model);
+    loadSessions();
+    _batchSessions[activeSid] = jobId;
+    if (_batchPollTimers[activeSid]) clearInterval(_batchPollTimers[activeSid]);
+    _batchPollTimers[activeSid] = setInterval(function() { pollBatchForSession(activeSid); }, 2000);
+    pollBatchForSession(activeSid);
+  })
+  .catch(function(e) { alert('Failed to submit bulk run: ' + e); });
+}
+
+// Called when user clicks "Rerun Preview" — removes the approval card and asks
+// the agent to rebuild construct #1 with any corrections already discussed.
+function rerunBulkPreview(cardId) {
+  var data = _bulkPreviewData[cardId];
+  if (!data) return;
+
+  // Build a compact summary of the shared context already in history so the
+  // agent can fast-path (no re-fetching backbone/insertion site).
+  var ctx = data.sharedCtx || {};
+  var ctxParts = [];
+  if (ctx.backbone_id)   ctxParts.push('backbone_id=' + ctx.backbone_id);
+  if (ctx.backbone_name) ctxParts.push('backbone=' + ctx.backbone_name);
+  if (ctx.insertion_site_start != null)
+    ctxParts.push('insertion_site=' + ctx.insertion_site_start + (ctx.insertion_site_end ? '-' + ctx.insertion_site_end : ''));
+  if (ctx.enzyme)           ctxParts.push('enzyme=' + ctx.enzyme);
+  if (ctx.assembly_method)  ctxParts.push('method=' + ctx.assembly_method);
+
+  // Store remaining rows globally so the agent's complete_bulk_preview can
+  // reference them; we pass them via the rerun message too.
+  var remainingRows = data.rows || [];
+
+  // Remove the approval card and reset export buffer for the fresh run
+  var card = document.getElementById(cardId);
+  if (card) card.remove();
+  delete _bulkPreviewData[cardId];
+  _bulkPreviewExports = [];
+
+  // Show the model card again (user can change model for the rerun)
+  showBulkPreviewModelCard({n_constructs: remainingRows.length, preview_model: _bulkPreviewModel});
+
+  // Pre-fill a rerun message (startBulkPreviewRun will send it)
+  window._bulkRerunMsg = 'Please rebuild the preview construct incorporating the corrections we just discussed.\n' +
+    (ctxParts.length ? 'Use the shared context already found (do not re-fetch): ' + ctxParts.join(', ') + '.\n' : '') +
+    'After rebuilding and exporting, call complete_bulk_preview again with the same ' + remainingRows.length + ' remaining construct(s).';
 }
 
 // ── Bulk design planning flow ────────────────────────────────────────────
@@ -3758,9 +4292,9 @@ var _BULK_MODEL_PRICING = {
   'claude-opus-4-7':            [5.00, 25.00],
 };
 var _BULK_TOKENS_BY_COMPLEXITY = {
-  'simple':   [2000,  800],
-  'standard': [3500, 1400],
-  'complex':  [6000, 2500],
+  'simple':   [200000,  1400],
+  'standard': [300000,  8000],
+  'complex':  [450000, 17000],
 };
 var BULK_COST_WARN  = 5.0;
 var BULK_COST_SPLIT = 20.0;
@@ -3823,36 +4357,18 @@ function startBulkChatMode() {
   }
 }
 
-// Called when the agent invokes submit_bulk_designs — rows already parsed.
+// Legacy SSE path: agent fired the old submit_bulk_designs ([BULK_DESIGNS_READY]).
+// Route through chat so the agent handles it like typed input on the next turn.
 function requestBulkPlanFromRows(rows, model) {
   if (!rows || !rows.length) return;
-  hideWelcome();
-  var inner = getInner();
-  var loadingId = 'bulk-loading-' + Date.now();
-  var lc = document.createElement('div');
-  lc.className = 'msg assistant';
-  lc.id = loadingId;
-  lc.innerHTML = '<div class="msg-bubble-assistant" style="color:var(--sand-500);font-size:13px">' +
-    '<span class="streaming-cursor"></span> Analysing ' + rows.length + ' design' + (rows.length === 1 ? '' : 's') + '&hellip;' +
-    '</div>';
-  inner.appendChild(lc);
-  scrollToBottom();
-
-  fetch('/api/bulk/plan', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({rows: rows, model: model || modelSelect.value, filename: 'bulk_design.csv'}),
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(plan) {
-    var l = document.getElementById(loadingId); if (l) l.remove();
-    if (plan.error) { alert('Planning error: ' + plan.error); return; }
-    showBulkPlanCard(plan, null, 'bulk_design.csv');
-  })
-  .catch(function(e) {
-    var l = document.getElementById(loadingId); if (l) l.remove();
-    alert('Failed to generate plan: ' + e);
+  var lines = ['Please design the following ' + rows.length + ' construct' +
+    (rows.length === 1 ? '' : 's') + ' in bulk:'];
+  rows.forEach(function(r, i) {
+    lines.push((i + 1) + '. ' + (r.name ? r.name + ': ' : '') + (r.description || ''));
   });
+  inputEl.value = lines.join('\n');
+  autoResize(inputEl);
+  sendMessage();
 }
 
 // Core planning flow — called when a CSV is uploaded via drag-drop or button.
@@ -3860,39 +4376,26 @@ function requestBulkPlanFromRows(rows, model) {
 function requestBulkPlan(csvText, filename) {
   var parsed = _parseCSVRows(csvText);
   if (!parsed.rows.length) {
-    showBatchConfirm(csvText, filename); // fallback if no rows
+    hideWelcome();
+    var errCard = document.createElement('div');
+    errCard.className = 'msg assistant';
+    errCard.innerHTML = '<div class="msg-bubble-assistant" style="color:var(--sand-500);font-size:13px">' +
+      'Could not parse any rows from <strong>' + escapeHtml(filename) + '</strong>. ' +
+      'Make sure the CSV has a <code>description</code> column (and optionally a <code>name</code> column).' +
+    '</div>';
+    getInner().appendChild(errCard);
+    scrollToBottom();
     return;
   }
-  hideWelcome();
-  var inner = getInner();
-  // Show a loading card while we call the planning API
-  var loadingId = 'bulk-loading-' + Date.now();
-  var loadingCard = document.createElement('div');
-  loadingCard.className = 'msg assistant';
-  loadingCard.id = loadingId;
-  loadingCard.innerHTML = '<div class="msg-bubble-assistant" style="color:var(--sand-500);font-size:13px">' +
-    '<span class="streaming-cursor"></span> Analysing ' + parsed.rows.length + ' design' + (parsed.rows.length === 1 ? '' : 's') + '&hellip;' +
-    '</div>';
-  inner.appendChild(loadingCard);
-  scrollToBottom();
-
-  fetch('/api/bulk/plan', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({csv_content: csvText, model: modelSelect.value, filename: filename}),
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(plan) {
-    var lc = document.getElementById(loadingId);
-    if (lc) lc.remove();
-    if (plan.error) { alert('Planning error: ' + plan.error); return; }
-    showBulkPlanCard(plan, csvText, filename, null);
-  })
-  .catch(function(e) {
-    var lc = document.getElementById(loadingId);
-    if (lc) lc.remove();
-    alert('Failed to generate plan: ' + e);
+  // Send as a chat message so the agent handles it like typed input
+  var lines = ['Please design the following ' + parsed.rows.length + ' construct' +
+    (parsed.rows.length === 1 ? '' : 's') + ' in bulk (from ' + filename + '):'];
+  parsed.rows.forEach(function(r, i) {
+    lines.push((i + 1) + '. ' + (r.name ? r.name + ': ' : '') + r.description);
   });
+  inputEl.value = lines.join('\n');
+  autoResize(inputEl);
+  sendMessage();
 }
 
 function showBulkPlanCard(plan, csvText, filename, rows) {
@@ -5814,6 +6317,7 @@ def start_batch_job(
     batch_groups: Optional[list[dict]] = None,
     approval_required: bool = False,
     seed_history: Optional[list] = None,
+    preview_exports: Optional[list] = None,
 ) -> str:
     """Create a batch job, launch a background thread, return job_id.
 
@@ -5849,6 +6353,7 @@ def start_batch_job(
         "model": model,
         "rows": job_rows,
         "approval_required": approval_required,
+        "preview_exports": preview_exports or [],
     }
     _batch_jobs[job_id] = job
 
@@ -6098,6 +6603,9 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 return
             buf = io.BytesIO()
             with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as zf:
+                # Preview construct (#1) comes first
+                for exp in job.get("preview_exports", []):
+                    zf.writestr(exp["filename"], exp["content"])
                 for row in job["rows"]:
                     for exp in row.get("exports", []):
                         zf.writestr(exp["filename"], exp["content"])
@@ -6658,65 +7166,87 @@ class AgentHandler(SimpleHTTPRequestHandler):
             # selected_indices: list of row indices the user wants to run (1-based from UI
             # but 0-based here). None or empty means run all.
             selected_indices = body.get("selected_indices")  # list[int] or None
+            # direct_rows: enriched rows from complete_bulk_preview approval (bypass plan lookup)
+            direct_rows      = body.get("enriched_rows")     # list[{description, name, output_format}] or None
 
-            plan_data = _bulk_plans.get(plan_id)
-            if not plan_data:
-                self._send_json({"error": "Plan not found"}, 404)
-                return
-
-            enriched_rows = plan_data["enriched_rows"]
-            all_batch_rows = [
-                {
-                    "description": r["enriched_prompt"],
-                    "name":        r["name"],
-                    "output_format": r["output_format"],
-                }
-                for r in enriched_rows
-            ]
-
-            # Extract sample history for context seeding (avoids re-doing backbone lookups)
-            sample_history: Optional[list] = None
             pre_seeded: dict[int, dict] = {}
-            if sample_job_id:
-                sample_job = _batch_jobs.get(sample_job_id)
-                if sample_job and sample_job.get("rows"):
-                    sr = sample_job["rows"][0]
-                    pre_seeded[0] = {
-                        "description":  enriched_rows[0]["description"],
-                        "name":         enriched_rows[0]["name"],
-                        "output_format": enriched_rows[0]["output_format"],
-                        "status":       sr.get("status", "done"),
-                        "paused":       False,
-                        "exports":      sr.get("exports", []),
-                        "error":        sr.get("error"),
-                        "log":          sr.get("log", []),
-                        "history":      sr.get("history", []),
-                    }
-                    sample_history = sr.get("history") or None
-
-            # Filter to only user-selected rows; always include row 0 (pre-seeded sample)
-            if selected_indices is not None and len(selected_indices) > 0:
-                selected_set = set(selected_indices)
-                selected_set.add(0)  # always include the sample row
-                batch_rows = [r for i, r in enumerate(all_batch_rows) if i in selected_set]
-            else:
-                batch_rows = all_batch_rows
-
-            # Build batch_groups when the plan is batch-eligible
+            sample_history: Optional[list] = None
             batch_grps: Optional[list[dict]] = None
-            if plan_data.get("batch_eligible") and plan_data.get("batch_prompt"):
-                remaining = [i for i in range(len(batch_rows)) if i not in pre_seeded]
-                if remaining:
-                    batch_grps = [{"prompt": plan_data["batch_prompt"], "indices": remaining}]
+
+            if direct_rows is not None:
+                # New path: enriched rows sent directly from the in-chat approval card.
+                # No plan lookup needed; rows already have enriched prompts embedded.
+                all_batch_rows = [
+                    {
+                        "description":  r.get("description", ""),
+                        "name":         r.get("name", ""),
+                        "output_format": r.get("output_format", "genbank"),
+                    }
+                    for r in direct_rows
+                ]
+                batch_rows    = all_batch_rows
+                filename      = body.get("filename", "bulk_design.csv")
+                preview_expts = body.get("preview_exports", [])
+            else:
+                # Legacy path: plan_id lookup (CSV upload flow and old chat flow)
+                preview_expts = []
+                plan_data = _bulk_plans.get(plan_id)
+                if not plan_data:
+                    self._send_json({"error": "Plan not found"}, 404)
+                    return
+
+                enriched_rows = plan_data["enriched_rows"]
+                all_batch_rows = [
+                    {
+                        "description": r["enriched_prompt"],
+                        "name":        r["name"],
+                        "output_format": r["output_format"],
+                    }
+                    for r in enriched_rows
+                ]
+
+                # Extract sample history for context seeding
+                if sample_job_id:
+                    sample_job = _batch_jobs.get(sample_job_id)
+                    if sample_job and sample_job.get("rows"):
+                        sr = sample_job["rows"][0]
+                        pre_seeded[0] = {
+                            "description":   enriched_rows[0]["description"],
+                            "name":          enriched_rows[0]["name"],
+                            "output_format": enriched_rows[0]["output_format"],
+                            "status":        sr.get("status", "done"),
+                            "paused":        False,
+                            "exports":       sr.get("exports", []),
+                            "error":         sr.get("error"),
+                            "log":           sr.get("log", []),
+                            "history":       sr.get("history", []),
+                        }
+                        sample_history = sr.get("history") or None
+
+                # Filter to only user-selected rows; always include row 0
+                if selected_indices is not None and len(selected_indices) > 0:
+                    selected_set = set(selected_indices)
+                    selected_set.add(0)
+                    batch_rows = [r for i, r in enumerate(all_batch_rows) if i in selected_set]
+                else:
+                    batch_rows = all_batch_rows
+
+                # Build batch_groups when the plan is batch-eligible
+                if plan_data.get("batch_eligible") and plan_data.get("batch_prompt"):
+                    remaining = [i for i in range(len(batch_rows)) if i not in pre_seeded]
+                    if remaining:
+                        batch_grps = [{"prompt": plan_data["batch_prompt"], "indices": remaining}]
+
+                filename = plan_data.get("filename", "bulk_design.csv")
 
             job_id = start_batch_job(
                 batch_rows, model,
                 pre_seeded_rows=pre_seeded,
                 batch_groups=batch_grps,
                 seed_history=sample_history,
+                preview_exports=preview_expts,
             )
 
-            filename = plan_data.get("filename", "bulk_design.csv")
             # Create a sidebar session for persistence but DON'T make the client switch to it.
             # The client renders batch cards inline in the current chat session.
             bg_session_id = str(uuid.uuid4())
@@ -6733,9 +7263,6 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 "batch_row_count": len(batch_rows),
             }
             _save_sessions()
-
-            # Consume the plan so it doesn't leak memory
-            _bulk_plans.pop(plan_id, None)
 
             self._send_json({
                 "job_id":     job_id,

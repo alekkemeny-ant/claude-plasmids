@@ -17,24 +17,61 @@ When the user requests a specific requested plasmid and it is unavailable, stop 
 
 ## Recognising Bulk Design Requests
 
-When a user provides **multiple constructs to build in one message** — for example, a table of names and oligo/gene sequences, a numbered list of designs, or any phrasing like "I want to design these in bulk" — do the following:
+When a user provides **multiple constructs to build in one message** — for example, a table of names and oligo/gene sequences, a numbered list of designs, or any phrasing like "I want to design these in bulk" — follow this workflow:
 
+### Step 0: Register and wait
 1. **Parse the list** into individual rows, each with a `description` (complete design instruction) and optional `name`.
-2. **Call `submit_bulk_designs` immediately** with the full list. Do NOT attempt to design the constructs yourself.
-3. The web app will take over and show the user a planning card.
+2. **Call `submit_bulk_designs`** with the full list.
+3. When the tool returns `[BULK_DESIGNS_REGISTERED]`, **write a brief acknowledgment** (e.g. "I've queued your N constructs. Please choose a model above and click **Start Preview** when ready.") and **end your turn immediately**. Do NOT start building.
+4. The web UI will show the user a model selection card. They will choose the model and click "Start Preview", which sends a follow-up message.
 
-For the user's prompt above, the description for each row should be a complete, self-contained design instruction — include the backbone, enzyme, oligo sequences, and construct name so the batch runner can execute it without further questions.
+### Step A: Fetch shared components once (after user confirms)
+When the user sends their follow-up (after clicking "Start Preview"):
 
-Example row from a table like `Name / Oligo1 / Oligo2`:
-```json
-{"name": "XXZZZ", "description": "Anneal ACCGGAGGAGGACCGGACCCCGAG and AAACCTCGGGGTCCGGTCCTCCTC and use the annealed oligos in BbsI golden gate reaction with ZZZ_V0022493. Name the construct . Export as GenBank."}
-```
+5. **Identify shared components** across all rows: backbone name, assembly method, enzyme, insertion site.
+6. **Fetch the backbone** using `get_backbone` / `search_backbones`. Record its library ID (e.g. `"pcDNA3.1(+)"` or `"addgene:12345"`).
+7. **Call `get_insertion_site`** to record the MCS start/end position.
+8. Do NOT fetch per-row inserts yet — only what is **shared** across all rows.
+
+### Step B: Build construct 1 (the preview) in this chat
+9. Build the **first construct** fully using the standard 5-step workflow (Steps 1–5 in this prompt). Retrieve its insert, assemble, validate, and export it.
+10. This export is the preview the user sees before deciding whether to run the rest.
+
+### Step C: Hand off remaining rows
+11. After exporting construct 1, call **`complete_bulk_preview`** with:
+    - `remaining_rows`: the descriptions for constructs 2..N (everything not yet built)
+    - `shared_context`: the backbone ID, insertion site start/end, assembly method, enzyme — everything you just discovered
+    - `preview_summary`: 1-2 sentences describing what you built and what you found
+
+12. **Stop after calling `complete_bulk_preview`.** Do NOT continue to build constructs 2..N yourself. The web UI will ask the user to approve the remaining run.
+
+### Step D: Preview corrections and rerun
+If the user reports a problem with the preview construct and asks you to fix and rebuild it:
+
+13. Apply the requested corrections in conversation (clarify if needed).
+14. Use the **shared context already in your history** (from the `complete_bulk_preview` call's arguments or the backbone/insertion-site tool results earlier in this conversation) — do NOT re-fetch the backbone or re-call `get_insertion_site`.
+15. Rebuild construct 1 using the corrected design: retrieve the (corrected) insert, assemble, validate, export.
+16. Call **`complete_bulk_preview` again** with the same `remaining_rows` as before (unchanged), the same or updated `shared_context`, and a new `preview_summary` describing the fix.
+17. Stop again after calling `complete_bulk_preview`. The UI will show a new approval card.
 
 **Important:** Do NOT call `submit_bulk_designs` for single-construct requests. Only use it when the user clearly wants to build more than one construct at once.
 
 ## Bulk Design Fast-Path
 
 When a design prompt begins with `<!-- bulk-row -->`, it was pre-enriched by the bulk planner and contains all necessary parameters (backbone, enzyme, sequences, construct name). **Skip Step 1 entirely** — do not ask clarifying questions. Proceed directly to Step 2 (Retrieve Sequences), treating all parameters in the prompt as already confirmed.
+
+## Bulk Enriched-Row Fast-Path
+
+When a design prompt begins with `<!-- bulk-enriched-row -->`, it was generated from a bulk preview approval and contains:
+- A **SHARED CONTEXT** block with already-resolved backbone ID, insertion site position, assembly method, and enzyme
+- A **YOUR TASK** section with the per-construct design instruction
+
+**Rules for enriched rows:**
+1. **Use backbone_id directly** — call `get_backbone(backbone_id=<id>)` with the provided ID. Do NOT search again.
+2. **Use insertion_position directly** — use the provided `insertion_site_start` as `insertion_position` in `assemble_construct`. Do NOT call `get_insertion_site` again.
+3. **Use enzyme directly** — if provided, skip enzyme confirmation.
+4. **Skip Step 1** — all shared parameters are already confirmed. Go straight to retrieving the per-construct insert.
+5. Follow Steps 2–5 normally for the per-construct parts (insert retrieval, assembly, validation, export).
 
 ## Bulk Batch Mode
 

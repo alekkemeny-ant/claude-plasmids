@@ -2743,10 +2743,13 @@ async def search_fpbase_tool(args):
 
 @tool(
     "submit_bulk_designs",
-    "Hand a list of constructs to the bulk design planning flow. "
-    "Call this tool as soon as the user provides (or implies) multiple constructs to build in one batch — "
-    "for example, a table of names and oligo/gene sequences, or a numbered list of designs. "
-    "Do NOT attempt to design the constructs yourself. Just parse the list and call this tool immediately.",
+    "Register a list of constructs for bulk design, then proceed to build them yourself in the current chat. "
+    "Call this as soon as the user provides multiple constructs to build. After calling it, YOU will: "
+    "(1) identify shared components (backbone, insertion site, enzyme), "
+    "(2) fetch them ONCE using existing tools, "
+    "(3) build construct 1 as the preview using the normal workflow, "
+    "(4) call complete_bulk_preview with the remaining rows + shared context you discovered. "
+    "Do NOT hand off to a separate bulk planner — do the work yourself in this turn.",
     {
         "type": "object",
         "properties": {
@@ -2768,10 +2771,71 @@ async def search_fpbase_tool(args):
 )
 async def submit_bulk_designs_tool(args):
     rows = args.get("rows", [])
-    # The web UI intercepts [BULK_DESIGNS_READY] to launch the planning flow.
-    # CLI/eval callers can ignore it.
+    n = len(rows)
+    names = [r.get("name") or f"construct_{i + 1}" for i, r in enumerate(rows)]
+    return _text(
+        f"[BULK_DESIGNS_REGISTERED] {n} construct(s) registered: {', '.join(names)}.\n\n"
+        f"The web UI is showing the user a model selection card so they can choose which model "
+        f"to use for the preview and for all subsequent constructs.\n\n"
+        f"STOP NOW. Write a brief acknowledgment to the user (e.g. 'I've queued your {n} constructs. "
+        f"Please choose a model in the card above and click \"Start Preview\" when ready.') and end your turn.\n\n"
+        f"Do NOT start building anything yet. When the user clicks 'Start Preview', "
+        f"they will send a follow-up message and you should then proceed with the bulk preview workflow "
+        f"(Steps A-C in the system prompt): identify shared components, build construct 1 fully, "
+        f"call complete_bulk_preview."
+    )
+
+
+@tool(
+    "complete_bulk_preview",
+    "Signal that the preview construct (construct 1) is complete and hand the remaining constructs to the web UI. "
+    "Call this AFTER successfully exporting construct 1. Pass the remaining rows plus the shared context you "
+    "discovered so that subsequent batch sessions can skip redundant tool calls (no re-fetching the backbone, "
+    "no re-finding the insertion site, etc.).",
+    {
+        "type": "object",
+        "properties": {
+            "remaining_rows": {
+                "type": "array",
+                "description": "Design descriptions for constructs 2..N (the ones not yet built).",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name":        {"type": "string", "description": "Construct name"},
+                        "description": {"type": "string", "description": "Complete design instruction"},
+                    },
+                    "required": ["description"],
+                },
+            },
+            "shared_context": {
+                "type": "object",
+                "description": "Everything already resolved that subsequent runs can skip.",
+                "properties": {
+                    "backbone_id":           {"type": "string", "description": "Library backbone ID (e.g. 'pcDNA3.1(+)' or 'addgene:12345')"},
+                    "backbone_name":         {"type": "string", "description": "Human-readable backbone name"},
+                    "insertion_site_start":  {"type": "integer", "description": "0-based MCS insertion position"},
+                    "insertion_site_end":    {"type": "integer", "description": "End of replacement region (0 or omit if point insertion)"},
+                    "assembly_method":       {"type": "string", "description": "e.g. 'restriction_cloning' or 'golden_gate'"},
+                    "enzyme":                {"type": "string", "description": "Assembly enzyme if applicable (e.g. 'BbsI')"},
+                    "extra":                 {"type": "string", "description": "Any other relevant context as free text"},
+                },
+            },
+            "preview_summary": {
+                "type": "string",
+                "description": "1-2 sentence summary of what was built and what shared context was found.",
+            },
+        },
+        "required": ["remaining_rows", "shared_context", "preview_summary"],
+    },
+)
+async def complete_bulk_preview_tool(args):
     import json as _json
-    return _text(f"[BULK_DESIGNS_READY] {_json.dumps(rows)}")
+    payload = {
+        "remaining_rows":  args.get("remaining_rows", []),
+        "shared_context":  args.get("shared_context", {}),
+        "preview_summary": args.get("preview_summary", ""),
+    }
+    return _text(f"[BULK_PREVIEW_READY] {_json.dumps(payload)}")
 
 
 @tool(
@@ -2852,6 +2916,7 @@ ALL_TOOLS = [
     search_fpbase_tool,
     # Bulk design handoff
     submit_bulk_designs_tool,
+    complete_bulk_preview_tool,
     # Troubleshooting / project memory
     log_experimental_outcome_tool,
 ]

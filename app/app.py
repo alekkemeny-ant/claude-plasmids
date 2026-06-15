@@ -4228,6 +4228,7 @@ function approveBulkPreview(cardId) {
       model:           model,
       filename:        'bulk_design.csv',
       preview_exports: _bulkPreviewExports,
+      session_id:      currentSessionId,
     }),
   })
   .then(function(r) { return r.json(); })
@@ -7187,6 +7188,14 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 batch_rows    = all_batch_rows
                 filename      = body.get("filename", "bulk_design.csv")
                 preview_expts = body.get("preview_exports", [])
+                # Seed history from the preview run's chat session so batch rows
+                # don't re-fetch the backbone/insertion site the agent already found.
+                preview_sid = body.get("session_id")
+                if preview_sid:
+                    preview_sess = _sessions.get(preview_sid)
+                    if preview_sess:
+                        h = preview_sess.get("history", [])
+                        sample_history = list(h) if h else None
             else:
                 # Legacy path: plan_id lookup (CSV upload flow and old chat flow)
                 preview_expts = []
@@ -7247,22 +7256,31 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 preview_exports=preview_expts,
             )
 
-            # Create a sidebar session for persistence but DON'T make the client switch to it.
-            # The client renders batch cards inline in the current chat session.
-            bg_session_id = str(uuid.uuid4())
-            _sessions[bg_session_id] = {
-                "history": [],
-                "display_messages": [],
-                "created_at":    time.time(),
-                "first_message": f"Bulk design: {filename}",
-                "project_name":  None,
-                "experimental_outcomes": [],
-                "batch_job_id":    job_id,
-                "batch_filename":  filename,
-                "batch_model":     model,
-                "batch_row_count": len(batch_rows),
-            }
-            _save_sessions()
+            # For the new in-chat path, attach the batch job to the existing chat session
+            # so no new sidebar entry is created.  For the legacy CSV/plan_id path, create
+            # a dedicated background session as before (that flow intentionally navigates away).
+            preview_sid_for_attach = body.get("session_id") if direct_rows is not None else None
+            if preview_sid_for_attach and preview_sid_for_attach in _sessions:
+                _sessions[preview_sid_for_attach]["batch_job_id"]    = job_id
+                _sessions[preview_sid_for_attach]["batch_filename"]   = filename
+                _sessions[preview_sid_for_attach]["batch_model"]      = model
+                _sessions[preview_sid_for_attach]["batch_row_count"]  = len(batch_rows)
+                _save_sessions()
+            else:
+                bg_session_id = str(uuid.uuid4())
+                _sessions[bg_session_id] = {
+                    "history": [],
+                    "display_messages": [],
+                    "created_at":    time.time(),
+                    "first_message": f"Bulk design: {filename}",
+                    "project_name":  None,
+                    "experimental_outcomes": [],
+                    "batch_job_id":    job_id,
+                    "batch_filename":  filename,
+                    "batch_model":     model,
+                    "batch_row_count": len(batch_rows),
+                }
+                _save_sessions()
 
             self._send_json({
                 "job_id":     job_id,

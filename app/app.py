@@ -507,7 +507,11 @@ def _emit_tool_result(
     if tool_name == "submit_bulk_designs" and result_str.startswith("[BULK_DESIGNS_REGISTERED]"):
         # New path: agent handles design directly; start preview token tracking and
         # emit event so the frontend can show the model picker inline.
-        n_remaining = len(tool_input.get("rows", []))
+        # `rows` here is the FULL list submitted (system prompt: "the full list"),
+        # but construct #1 becomes the in-chat preview, so n_constructs must reflect
+        # only what's left — showBulkPreviewModelCard adds 1 back for display.
+        n_total = len(tool_input.get("rows", []))
+        n_remaining = max(n_total - 1, 0)
         if preview_state is not None:
             preview_state["tracking"] = True
             preview_state["in"] = 0
@@ -2345,51 +2349,70 @@ function renderStoredMessages(msgs) {
     showWelcome();
     return;
   }
-  if (msgs.length === 1 && msgs[0].type === 'batch_session') {
-    restoreBatchSession(msgs[0]);
+  // A trailing batch_session marker means this session has a bulk job attached.
+  // Render any prior chat history first, then append the batch cards — don't discard it.
+  var batchMeta = null;
+  if (msgs.length && msgs[msgs.length - 1].type === 'batch_session') {
+    batchMeta = msgs[msgs.length - 1];
+    msgs = msgs.slice(0, -1);
+  }
+  if (msgs.length === 0 && batchMeta) {
+    restoreBatchSession(batchMeta, false);
     return;
   }
-  hideWelcome();
-  const inner = document.createElement('div');
-  inner.className = 'messages-inner';
-  msgs.forEach(function(m) {
-    if (m.role === 'user') {
-      const div = document.createElement('div');
-      div.className = 'msg user';
-      const dateStr = m.timestamp ? new Date(m.timestamp * 1000).toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'}) : '';
-      div.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(m.content) + '</div>' + (dateStr ? '<div class="msg-date">' + dateStr + '</div>' : '') + '</div>';
-      inner.appendChild(div);
-    } else if (m.blocks && m.blocks.length > 0) {
-      m.blocks.forEach(function(block) { renderStoredBlock(block, inner); });
-    } else {
-      const div = document.createElement('div');
-      div.className = 'msg assistant';
-      div.innerHTML = '<div class="msg-bubble-assistant">' + renderContent(m.content || '') + '</div>';
-      makeTablesResizable(div);
-      inner.appendChild(div);
-    }
-  });
-  messagesEl.innerHTML = '';
-  messagesEl.appendChild(inner);
-  scrollToBottom();
+  if (msgs.length > 0) {
+    hideWelcome();
+    const inner = document.createElement('div');
+    inner.className = 'messages-inner';
+    msgs.forEach(function(m) {
+      if (m.role === 'user') {
+        const div = document.createElement('div');
+        div.className = 'msg user';
+        const dateStr = m.timestamp ? new Date(m.timestamp * 1000).toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'}) : '';
+        div.innerHTML = '<div><div class="msg-bubble-user">' + escapeHtml(m.content) + '</div>' + (dateStr ? '<div class="msg-date">' + dateStr + '</div>' : '') + '</div>';
+        inner.appendChild(div);
+      } else if (m.blocks && m.blocks.length > 0) {
+        m.blocks.forEach(function(block) { renderStoredBlock(block, inner); });
+      } else {
+        const div = document.createElement('div');
+        div.className = 'msg assistant';
+        div.innerHTML = '<div class="msg-bubble-assistant">' + renderContent(m.content || '') + '</div>';
+        makeTablesResizable(div);
+        inner.appendChild(div);
+      }
+    });
+    messagesEl.innerHTML = '';
+    messagesEl.appendChild(inner);
+  }
+  if (batchMeta) {
+    restoreBatchSession(batchMeta, msgs.length > 0);
+  } else {
+    scrollToBottom();
+  }
 }
 
-async function restoreBatchSession(meta) {
+async function restoreBatchSession(meta, keepExisting) {
   var jobId = meta.batch_job_id;
   var filename = meta.batch_filename || '';
   var model = meta.batch_model || '';
   var rowCount = meta.batch_row_count || 0;
   var sessionId = currentSessionId;
 
-  // Clear stale content and set up a fresh container
-  messagesEl.innerHTML = '';
+  // Clear stale content and set up a fresh container, unless we just rendered
+  // this session's real chat history above and want to append after it.
+  if (!keepExisting) messagesEl.innerHTML = '';
 
   try {
     const r = await fetch('/api/batch/' + jobId);
     const data = await r.json();
     if (currentSessionId !== sessionId) return;
     if (data.error) {
-      messagesEl.innerHTML = '<div class="messages-inner"><div class="msg assistant"><div class="msg-bubble-assistant" style="color:var(--sand-400);font-size:13px;">Could not load batch results.</div></div></div>';
+      var errHtml = '<div class="msg assistant"><div class="msg-bubble-assistant" style="color:var(--sand-400);font-size:13px;">Could not load batch results.</div></div>';
+      if (keepExisting) {
+        getInner().insertAdjacentHTML('beforeend', errHtml);
+      } else {
+        messagesEl.innerHTML = '<div class="messages-inner">' + errHtml + '</div>';
+      }
       return;
     }
 
@@ -2434,7 +2457,12 @@ async function restoreBatchSession(meta) {
       }
     }
   } catch(e) {
-    messagesEl.innerHTML = '<div class="messages-inner"><div class="msg assistant"><div class="msg-bubble-assistant" style="color:var(--sand-400);font-size:13px;">Could not reach the server to load batch status.</div></div></div>';
+    var failHtml = '<div class="msg assistant"><div class="msg-bubble-assistant" style="color:var(--sand-400);font-size:13px;">Could not reach the server to load batch status.</div></div>';
+    if (keepExisting) {
+      getInner().insertAdjacentHTML('beforeend', failHtml);
+    } else {
+      messagesEl.innerHTML = '<div class="messages-inner">' + failHtml + '</div>';
+    }
   }
 }
 
@@ -6325,8 +6353,15 @@ def _run_batch_agent(prompt: str, model: str, append_log, exports: list, *,
         set_tracker(None)
 
 
-def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str) -> None:
-    """Worker for a single CSV row — runs the agent and stores exports + log in _batch_jobs."""
+def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str,
+                    seed_history: Optional[list] = None) -> None:
+    """Worker for a single CSV row — runs the agent and stores exports + log in _batch_jobs.
+
+    seed_history: optional agent history from a prior run (e.g. the in-chat preview)
+    to pre-populate this row's conversation, so it doesn't re-fetch the backbone/
+    insertion site already resolved there. Without this, each row starts cold and
+    only sees a textual reminder, which the model isn't reliably guaranteed to obey.
+    """
     job = _batch_jobs.get(job_id)
     if not job:
         return
@@ -6350,7 +6385,7 @@ def _run_batch_row(job_id: str, row_idx: int, row: dict, model: str) -> None:
 
     try:
         exports: list[dict] = []
-        history: list[dict] = []
+        history: list[dict] = list(seed_history) if seed_history else []
         _run_batch_agent(
             prompt, model,
             append_log=row_state["log"].append,
@@ -6522,12 +6557,12 @@ def start_batch_job(
                     continue
                 covered.update(indices)
                 if len(indices) == 1:
-                    _run_batch_row(job_id, indices[0], rows[indices[0]], model)
+                    _run_batch_row(job_id, indices[0], rows[indices[0]], model, seed_history=seed_history)
                 else:
                     _run_batch_group(job_id, indices, prompt, model, seed_history=seed_history)
             for idx, row in enumerate(rows):
                 if idx not in covered and job["rows"][idx].get("status") != "done":
-                    _run_batch_row(job_id, idx, row, model)
+                    _run_batch_row(job_id, idx, row, model, seed_history=seed_history)
         else:
             for idx, row in enumerate(rows):
                 if job["rows"][idx].get("status") == "done":
@@ -6539,7 +6574,7 @@ def start_batch_job(
                     _get_row_gate(job_id, idx).wait()
                     if job["rows"][idx].get("status") == "waiting":
                         job["rows"][idx]["status"] = "pending"
-                _run_batch_row(job_id, idx, row, model)
+                _run_batch_row(job_id, idx, row, model, seed_history=seed_history)
 
         job["status"] = "done"
         _save_batch_jobs()
@@ -6611,7 +6646,9 @@ class AgentHandler(SimpleHTTPRequestHandler):
             session = get_session(session_id)
             if session:
                 if session.get("batch_job_id"):
-                    self._send_json([{
+                    # Keep any prior chat history (e.g. the in-chat preview conversation)
+                    # and append the batch marker, rather than discarding it.
+                    self._send_json(list(session["display_messages"]) + [{
                         "type": "batch_session",
                         "batch_job_id": session["batch_job_id"],
                         "batch_filename": session.get("batch_filename", ""),

@@ -52,6 +52,13 @@ from src.tools import (
 from src.references import ReferenceTracker
 from src.library import load_backbones, load_inserts
 from src.plasmid_intake import parse_upload, run_plannotate, build_intake_message
+
+# Inline Ori-style sequence viewer assets (CSS + JS). app/ is on sys.path when
+# run as a script; fall back to the package path just in case.
+try:
+    from viewer_assets import VIEWER_CSS, VIEWER_JS
+except ImportError:
+    from app.viewer_assets import VIEWER_CSS, VIEWER_JS
 _DB_MODULE_PATH = Path(__file__).parent / "database.py"
 import importlib.util as _importlib_util
 _db_spec = _importlib_util.spec_from_file_location("plasmid_database", _DB_MODULE_PATH)
@@ -3980,6 +3987,10 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
           '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>' +
           ' Save Construct' +
         '</button>' +
+        '<button class="viewer-btn" data-role="viewer" data-tooltip="Open an inline Ori-style sequence viewer">' +
+          '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>' +
+          '<span class="viewer-btn-label">Open in Viewer</span>' +
+        '</button>' +
       '</div>' +
     '</div>';
   container.appendChild(outer);
@@ -4103,6 +4114,22 @@ function addExportButtons(container, toolInput, genbankContent, filename) {
       else { btn.textContent = 'Save failed'; btn.disabled = false; }
     } catch(e) { btn.textContent = 'Save failed'; btn.disabled = false; }
   });
+
+  // Open in Viewer → inline Ori-style sequence panel (toggles open/closed)
+  const viewerBtn = outer.querySelector('[data-role="viewer"]');
+  if (viewerBtn) {
+    viewerBtn.addEventListener('click', function() {
+      try {
+        const nm = (toolInput.construct_name ||
+          (filename || '').replace(/\.(gb|gbk|fasta|fa|txt)$/i, '') || 'construct');
+        window.OriViewer.open(genbankContent, nm, viewerBtn);
+      } catch(err) {
+        console.error('OriViewer error', err);
+        const lbl = viewerBtn.querySelector('.viewer-btn-label');
+        if (lbl) lbl.textContent = 'Viewer error';
+      }
+    });
+  }
 }
 
 // ── Library panel toggle ─────────────────────────────────────────────────────
@@ -4790,6 +4817,14 @@ function saveAllBatchToLocal(jobId, btn) {
 </body>
 </html>
 """
+
+# Splice the Ori-style inline sequence viewer into the page: CSS just before
+# </style>, and the viewer JS as its own <script> just before </body>. Both
+# anchors are unique in HTML_PAGE.
+HTML_PAGE = HTML_PAGE.replace("</style>", VIEWER_CSS + "\n</style>", 1)
+HTML_PAGE = HTML_PAGE.replace(
+    "</body>", "<script>\n" + VIEWER_JS + "\n</script>\n</body>", 1
+)
 
 
 # ── Batch job runner ────────────────────────────────────────────────────

@@ -558,6 +558,11 @@ def _emit_tool_result(
             preview_state["exports"] = []
             preview_state["turns"] = []
             session["_preview_state"] = dict(preview_state)
+            # Mark where the bulk session begins in the history so batch rows
+            # can be seeded with only the preview-relevant turns rather than
+            # the full session. history hasn't been extended with the current
+            # assistant turn yet, so this index points to that upcoming turn.
+            session["_preview_history_start"] = len(session.get("history", []))
         safe_write({
             "type": "bulk_designs_registered",
             "n_constructs": n_remaining,
@@ -4292,7 +4297,7 @@ function showBulkPreviewApprovalCard(event) {
     : '';
 
   var rowsHtml = n > 0
-    ? '<div style="margin-bottom:14px">' +
+    ? '<div id="' + cardId + '-rows-section" style="margin-bottom:14px">' +
         // Header: label + search + all/none
         '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">' +
           '<span style="font-size:12px;font-weight:500;color:var(--sand-500)">Constructs to run:</span>' +
@@ -4318,8 +4323,8 @@ function showBulkPreviewApprovalCard(event) {
     : '<div style="font-size:13px;color:var(--sand-500);margin-bottom:14px">No remaining constructs.</div>';
 
   var bottomHtml = n > 0
-    ? tokenStatHtml +
-      '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">' +
+    ? '<div id="' + cardId + '-tokenstat">' + tokenStatHtml + '</div>' +
+      '<div id="' + cardId + '-controls" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">' +
         '<div>' +
           '<label style="font-size:12px;font-weight:500;color:var(--sand-500);display:block;margin-bottom:4px">Model</label>' +
           '<select id="' + cardId + '-model" class="model-select" style="font-size:12px;max-width:220px" ' +
@@ -4329,7 +4334,7 @@ function showBulkPreviewApprovalCard(event) {
       '</div>'
     : '';
 
-  var actionsHtml = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+  var actionsHtml = '<div id="' + cardId + '-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
     (n > 0
       ? '<button class="send-btn" id="' + cardId + '-runbtn" style="width:auto;padding:0 18px;height:32px;font-size:13px;border-radius:10px" onclick="approveBulkPreview(\'' + cardId + '\')">' +
           'Run ' + n + ' construct' + (n === 1 ? '' : 's') +
@@ -4360,6 +4365,27 @@ function showBulkPreviewApprovalCard(event) {
   if (n > 0) onBulkPreviewChk(cardId);
 }
 
+// Shared cost projection: actual preview tokens when available (using the
+// marginal/post-setup estimate, since later rows skip the preview's one-time
+// setup cost — e.g. fetching the backbone), else a rough complexity-based guess.
+function _bulkComputeCost(n, model) {
+  var cost;
+  var basedOnActual = _bulkPreviewMarginalTokens.in > 0;
+  if (basedOnActual) {
+    var pricing = _BULK_MODEL_PRICING[model] || _BULK_MODEL_PRICING['claude-sonnet-4-6'];
+    var cpr = (_bulkPreviewMarginalTokens.in * pricing[0] + _bulkPreviewMarginalTokens.out * pricing[1]) / 1000000;
+    cost = Math.round(cpr * n * 10000) / 10000;
+  } else {
+    cost = _estimateBulkCost(n, model, 'standard');
+  }
+  var cls = cost >= BULK_COST_SPLIT ? 'orange' : cost >= BULK_COST_WARN ? 'yellow' : 'ok';
+  var lbl = n === 0
+    ? 'No constructs selected'
+    : (cost < 0.01 ? '< $0.01' : '~$' + cost.toFixed(2)) +
+      ' estimated' + (basedOnActual ? ' (based on preview)' : ' (rough estimate)');
+  return {cost: cost, cls: cls, label: lbl, basedOnActual: basedOnActual};
+}
+
 // Called whenever a checkbox changes or model changes — updates count, cost, run button
 function onBulkPreviewChk(cardId) {
   var card = document.getElementById(cardId);
@@ -4376,29 +4402,12 @@ function onBulkPreviewChk(cardId) {
   }
   var sel   = document.getElementById(cardId + '-model');
   var model = sel ? sel.value : (_bulkPreviewModel || 'claude-sonnet-4-6');
-  // Use actual preview token counts when available; fall back to rough estimates.
-  // The marginal tokens exclude the preview's one-time setup cost (e.g. fetching
-  // the backbone) since later rows reuse that via seeded context instead of
-  // re-fetching it.
-  var cost;
-  var basedOnActual = _bulkPreviewMarginalTokens.in > 0;
-  if (basedOnActual) {
-    var pricing = _BULK_MODEL_PRICING[model] || _BULK_MODEL_PRICING['claude-sonnet-4-6'];
-    var cpr = (_bulkPreviewMarginalTokens.in * pricing[0] + _bulkPreviewMarginalTokens.out * pricing[1]) / 1000000;
-    cost = Math.round(cpr * checked * 10000) / 10000;
-  } else {
-    cost = _estimateBulkCost(checked, model, 'standard');
-  }
-  var cls = cost >= BULK_COST_SPLIT ? 'orange' : cost >= BULK_COST_WARN ? 'yellow' : 'ok';
-  var lbl = checked === 0
-    ? 'No constructs selected'
-    : (cost < 0.01 ? '< $0.01' : '~$' + cost.toFixed(2)) +
-      ' estimated' + (basedOnActual ? ' (based on preview)' : ' (rough estimate)');
+  var result = _bulkComputeCost(checked, model);
   var costEl = document.getElementById(cardId + '-cost');
   if (costEl) {
-    costEl.innerHTML = '<div class="bulk-plan-cost ' + (checked > 0 ? cls : '') + '">' +
+    costEl.innerHTML = '<div class="bulk-plan-cost ' + (checked > 0 ? result.cls : '') + '">' +
       (checked > 0 ? '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg> ' : '') +
-      lbl + '</div>';
+      result.label + '</div>';
   }
 }
 
@@ -4446,14 +4455,33 @@ function approveBulkPreview(cardId) {
       var idx = parseInt(chk.getAttribute('data-idx'), 10);
       if (data.rows[idx]) selectedRows.push(data.rows[idx]);
     });
-    var bc = card.querySelector('.bulk-plan-card');
-    if (bc) bc.innerHTML = '<div style="color:var(--sand-500);font-size:13px"><span class="streaming-cursor"></span> Submitting ' + selectedRows.length + ' construct' + (selectedRows.length === 1 ? '' : 's') + '&hellip;</div>';
   }
 
   if (!selectedRows.length) {
     alert('No constructs selected.');
-    if (card) { var bc2 = card.querySelector('.bulk-plan-card'); if (bc2) bc2.innerHTML = ''; }
     return;
+  }
+
+  // Swap the selection list / model picker / action buttons for a submitting
+  // spinner, but leave the summary, shared-context, and token-usage sections
+  // in place so the card still shows what was reused once the rest of the
+  // batch is running in the background.
+  var statusId = cardId + '-status';
+  if (card) {
+    ['rows-section', 'controls', 'actions'].forEach(function(suffix) {
+      var el = document.getElementById(cardId + '-' + suffix);
+      if (el) el.remove();
+    });
+    var bc = card.querySelector('.bulk-plan-card');
+    if (bc) {
+      var status = document.createElement('div');
+      status.id = statusId;
+      status.style.cssText = 'color:var(--sand-500);font-size:13px';
+      status.innerHTML = '<span class="streaming-cursor"></span> Submitting ' + selectedRows.length + ' construct' + (selectedRows.length === 1 ? '' : 's') + '&hellip;';
+      bc.appendChild(status);
+    }
+    var titleEl = card.querySelector('.bulk-plan-title');
+    if (titleEl) titleEl.textContent = 'Preview complete';
   }
 
   // Build enriched prompts embedding the shared context
@@ -4481,7 +4509,16 @@ function approveBulkPreview(cardId) {
   .then(function(r) { return r.json(); })
   .then(function(data) {
     if (data.error) { alert('Error: ' + data.error); return; }
-    if (card) card.remove();
+    var statusEl = document.getElementById(statusId);
+    if (statusEl) {
+      var result = _bulkComputeCost(selectedRows.length, model);
+      statusEl.innerHTML =
+        '<div style="display:flex;align-items:center;gap:6px;color:var(--brand-aqua);font-size:13px;margin-bottom:6px">' +
+          '<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+          'Submitted ' + selectedRows.length + ' construct' + (selectedRows.length === 1 ? '' : 's') + ' — running in background' +
+        '</div>' +
+        '<div class="bulk-plan-cost ' + result.cls + '">' + result.label + '</div>';
+    }
     var jobId = data.job_id;
     var activeSid = currentSessionId || ('bulk-' + jobId);
     initBatchCards(jobId, data.row_count, data.filename || 'bulk_design.csv', model);
@@ -7451,7 +7488,11 @@ class AgentHandler(SimpleHTTPRequestHandler):
                     preview_sess = _sessions.get(preview_sid)
                     if preview_sess:
                         h = preview_sess.get("history", [])
-                        sample_history = list(h) if h else None
+                        start = preview_sess.get("_preview_history_start", 0)
+                        if h and 0 < start < len(h):
+                            sample_history = list(h[start:])
+                        else:
+                            sample_history = list(h) if h else None
             else:
                 # Legacy path: plan_id lookup (CSV upload flow and old chat flow)
                 preview_expts = []

@@ -463,45 +463,6 @@ def cancel_session(session_id: str):
 
 _anthropic_client: anthropic.Anthropic | None = None
 
-# Tools that resolve reference data (backbone/vector lookups) which gets
-# seeded into every subsequent batch row's history, so later rows don't
-# call them again. Used to keep bulk cost estimates from over-counting the
-# preview's one-time setup cost — see _estimate_marginal_preview_tokens.
-REUSABLE_SETUP_TOOLS = {
-    "get_backbone", "search_addgene", "get_addgene_plasmid",
-    "list_backbones", "get_vector_map",
-}
-
-
-def _estimate_marginal_preview_tokens(turns: list) -> tuple[int, int]:
-    """Project per-row token cost for subsequent batch rows from a preview run.
-
-    `turns` is a list of {"input", "output", "tools"} records, one per API
-    call made while building the preview construct. Summing every turn's
-    tokens (the old behavior) charges later rows for the preview's one-time
-    setup cost (e.g. fetching the backbone) even though that result is
-    already in the seeded history and won't be fetched again. Instead, only
-    count turns after the last reusable-setup tool call — those turns'
-    input_tokens already reflect the loaded-context size that subsequent
-    rows will start from, so they're a much better proxy for ongoing
-    per-row cost.
-    """
-    if not turns:
-        return 0, 0
-    setup_end = -1
-    for i, t in enumerate(turns):
-        if any(name in REUSABLE_SETUP_TOOLS for name in t.get("tools", [])):
-            setup_end = i
-    marginal_turns = turns[setup_end + 1:]
-    if not marginal_turns:
-        # No turns ran after setup (or no setup tool fired) — fall back to
-        # the full total rather than projecting a misleading zero.
-        marginal_turns = turns
-    return (
-        sum(t["input"] for t in marginal_turns),
-        sum(t["output"] for t in marginal_turns),
-    )
-
 
 def _client() -> anthropic.Anthropic:
     global _anthropic_client
@@ -556,7 +517,6 @@ def _emit_tool_result(
             preview_state["in"] = 0
             preview_state["out"] = 0
             preview_state["exports"] = []
-            preview_state["turns"] = []
             session["_preview_state"] = dict(preview_state)
             # Mark where the bulk session begins in the history so batch rows
             # can be seeded with only the preview-relevant turns rather than
@@ -580,13 +540,8 @@ def _emit_tool_result(
         n_remaining = len(payload.get("remaining_rows", []))
         # Attach actual preview token counts so the frontend can show real estimates.
         if preview_state is not None:
-            marginal_in, marginal_out = _estimate_marginal_preview_tokens(
-                preview_state.get("turns", [])
-            )
             payload["preview_tokens_in"]  = preview_state.get("in", 0)
             payload["preview_tokens_out"] = preview_state.get("out", 0)
-            payload["preview_tokens_in_marginal"]  = marginal_in
-            payload["preview_tokens_out_marginal"] = marginal_out
             payload["preview_model"]      = current_model
             payload["preview_exports"]    = preview_state.get("exports", [])
             preview_state["tracking"] = False
@@ -718,7 +673,6 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         "in":       int(_ps.get("in", 0)),
         "out":      int(_ps.get("out", 0)),
         "exports":  list(_ps.get("exports", [])),
-        "turns":    list(_ps.get("turns", [])),
     }
     # Build the system prompt once per turn (not per retry) so that
     # prompt caching works. The prompt is dynamic because it includes
@@ -770,7 +724,6 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                 current_tool_input_json = ""
                 thinking_block_emitted = False
                 tool_results = []
-                current_turn_tools: list = []
                 try:
                     thinking_config = (
                         {"type": "adaptive"}
@@ -835,7 +788,6 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                                         break
                                     tool_input = json.loads(current_tool_input_json) if current_tool_input_json else {}
                                     result_str = _dispatch_tool(current_tool_name, tool_input)
-                                    current_turn_tools.append(current_tool_name)
                                     if current_tool_name == "export_construct":
                                         export_called = True
                                     _emit_tool_result(
@@ -861,14 +813,8 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                         final_message = stream.get_final_message()
                         if final_message and hasattr(final_message, "usage"):
                             if preview_state["tracking"]:
-                                turn_in  = final_message.usage.input_tokens
-                                turn_out = getattr(final_message.usage, "output_tokens", 0)
-                                preview_state["in"]  += turn_in
-                                preview_state["out"] += turn_out
-                                preview_state.setdefault("turns", []).append({
-                                    "input": turn_in, "output": turn_out,
-                                    "tools": list(current_turn_tools),
-                                })
+                                preview_state["in"]  += final_message.usage.input_tokens
+                                preview_state["out"] += getattr(final_message.usage, "output_tokens", 0)
                                 session["_preview_state"] = dict(preview_state)
                             safe_write({
                                 "type": "token_usage",
@@ -4206,18 +4152,14 @@ function showBulkPreviewApprovalCard(event) {
   var n             = remainingRows.length;
   var cardId        = 'bulk-preview-' + Date.now();
 
-  // Capture actual token counts from the preview run. _bulkPreviewTokens is
-  // the full preview cost (shown in the info banner); _bulkPreviewMarginalTokens
-  // excludes the one-time setup cost (e.g. fetching the backbone) that later
-  // rows skip thanks to shared/seeded context, so it's used for the actual
-  // per-row cost projection below.
+  // Use raw preview token counts for both the banner and the cost estimate.
   _bulkPreviewTokens = {
     in:  event.preview_tokens_in  || 0,
     out: event.preview_tokens_out || 0,
   };
   _bulkPreviewMarginalTokens = {
-    in:  event.preview_tokens_in_marginal  || event.preview_tokens_in  || 0,
-    out: event.preview_tokens_out_marginal || event.preview_tokens_out || 0,
+    in:  event.preview_tokens_in  || 0,
+    out: event.preview_tokens_out || 0,
   };
   // Use the model the user picked in the model-picker card (or the session default).
   if (event.preview_model) _bulkPreviewModel = event.preview_model;
@@ -4365,9 +4307,7 @@ function showBulkPreviewApprovalCard(event) {
   if (n > 0) onBulkPreviewChk(cardId);
 }
 
-// Shared cost projection: actual preview tokens when available (using the
-// marginal/post-setup estimate, since later rows skip the preview's one-time
-// setup cost — e.g. fetching the backbone), else a rough complexity-based guess.
+// Shared cost projection: actual preview token totals when available, else a rough complexity-based guess.
 function _bulkComputeCost(n, model) {
   var cost;
   var basedOnActual = _bulkPreviewMarginalTokens.in > 0;
@@ -4379,10 +4319,12 @@ function _bulkComputeCost(n, model) {
     cost = _estimateBulkCost(n, model, 'standard');
   }
   var cls = cost >= BULK_COST_SPLIT ? 'orange' : cost >= BULK_COST_WARN ? 'yellow' : 'ok';
+  var constructWord = n === 1 ? 'construct' : 'constructs';
   var lbl = n === 0
     ? 'No constructs selected'
     : (cost < 0.01 ? '< $0.01' : '~$' + cost.toFixed(2)) +
-      ' estimated' + (basedOnActual ? ' (based on preview)' : ' (rough estimate)');
+      ' for ' + n + ' ' + constructWord +
+      (basedOnActual ? ' (based on preview)' : ' (rough estimate)');
   return {cost: cost, cls: cls, label: lbl, basedOnActual: basedOnActual};
 }
 

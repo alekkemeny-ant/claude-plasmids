@@ -11,8 +11,8 @@ src/                        # Core modules
 ├── user_library.py         # BYOL — load user-provided GenBank files ($PLASMID_USER_LIBRARY)
 ├── ncbi_integration.py     # NCBI Entrez gene search + CDS retrieval
 ├── literature.py           # Unpaywall open-access full-text lookup
-├── server.py               # MCP server (imports from library.py)
-├── tools.py                # Tool definitions + build_mcp_servers() for Agent SDK
+├── server.py               # Standalone stdio MCP server (exposes ALL_TOOLS)
+├── tools.py                # Tool definitions — single source of truth for all interfaces
 └── addgene_integration.py  # Addgene web scraping, GenBank parsing, API client
 
 app/                        # Web UI + agent

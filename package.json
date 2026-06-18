@@ -1,0 +1,16 @@
+{
+  "name": "claude-plasmids-browser-tests",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Playwright e2e tests for the Plasmid Designer web UI",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed",
+    "playwright:install": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^22.0.0"
+  }
+}

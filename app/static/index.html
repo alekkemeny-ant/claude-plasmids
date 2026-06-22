@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plasmid Designer</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23D97757' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714a2.25 2.25 0 00.659 1.591L19 14.5M14.25 3.104c.251.023.501.05.75.082M19 14.5l-2.47 2.47a2.25 2.25 0 01-1.591.659H9.061a2.25 2.25 0 01-1.591-.659L5 14.5m14 0V17a2 2 0 01-2 2H7a2 2 0 01-2-2v-2.5'/%3E%3C/svg%3E">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.bokeh.org/bokeh/release/bokeh-2.4.1.min.js"></script>
+<link href="https://unpkg.com/tabulator-tables@6.3.0/dist/css/tabulator_bootstrap5.min.css" rel="stylesheet">
+<script src="https://unpkg.com/tabulator-tables@6.3.0/dist/js/tabulator.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<script src="https://unpkg.com/klayjs@0.4.1/klay.js"></script>
+<script src="https://unpkg.com/cytoscape-klay@3.1.4/cytoscape-klay.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/viewer.css">
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <div class="header-logo">
+      <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714a2.25 2.25 0 00.659 1.591L19 14.5M14.25 3.104c.251.023.501.05.75.082M19 14.5l-2.47 2.47a2.25 2.25 0 01-1.591.659H9.061a2.25 2.25 0 01-1.591-.659L5 14.5m14 0V17a2 2 0 01-2 2H7a2 2 0 01-2-2v-2.5"/>
+      </svg>
+    </div>
+    <div class="header-title">
+      <h1>Plasmid Designer</h1>
+      <p>Allen Institute - OCTO AI</p>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px">
+    <button class="saved-constructs-btn" id="lib-panel-btn" onclick="toggleLibraryPanel()"
+      data-tooltip="Constructs designed here are saved to a local database on your machine — not committed to GitHub or shared with anyone.">
+      <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+      </svg>
+      Saved Constructs
+    </button>
+    <span class="health-badge offline" id="health-badge">
+      <span class="health-dot"></span>
+      <span id="health-text">Agent Offline</span>
+    </span>
+  </div>
+</div>
+
+<!-- Main layout -->
+<div class="main">
+  <!-- Sessions sidebar -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-toolbar">
+      <button class="sidebar-toggle-btn" onclick="toggleSidebar()" title="Hide sidebar">
+        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+          <path d="M3 6h10M3 12h18M3 18h10"/>
+        </svg>
+      </button>
+      <button class="new-chat-btn" onclick="newChat()">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+          <path d="M12 4v16m8-8H4"/>
+        </svg>
+        New Chat
+      </button>
+    </div>
+    <div class="sessions-list" id="sessions-list">
+      <p class="no-sessions">No conversations yet</p>
+    </div>
+    <div class="user-library-panel" id="user-library-panel" style="display:none">
+      <div style="display:flex;align-items:center;gap:2px;">
+        <button class="user-library-toggle" id="user-library-toggle" onclick="toggleUserLibrary()"
+          style="flex:1;"
+          data-tooltip="Parts available for design — backbones, inserts, and designed constructs loaded from your local library folder.">
+          <span>Your Library</span>
+          <em class="chevron">&#8964;</em>
+        </button>
+        <button class="user-library-refresh-btn" onclick="loadUserLibrary()" title="Refresh library">&#8635;</button>
+      </div>
+      <div class="user-library-body" id="user-library-body"></div>
+    </div>
+  </div>
+
+  <!-- Sidebar reopen button -->
+  <button class="sidebar-reopen-btn" id="sidebar-reopen-btn" onclick="toggleSidebar()" title="Show sidebar">
+    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+      <path d="M3 6h10M3 12h18M3 18h10"/>
+    </svg>
+  </button>
+
+  <!-- Chat panel -->
+  <div class="chat-panel" id="chat-panel">
+    <!-- Drop overlay: shown when any file is dragged over the chat area -->
+    <div class="drop-overlay" id="drop-overlay">
+      <svg width="36" height="36" fill="none" stroke="var(--brand-fig)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+        <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+      </svg>
+      <div class="drop-overlay-label" id="drop-overlay-label">Drop a file</div>
+      <div class="drop-overlay-sub" id="drop-overlay-sub">.gb / .gbk / .fasta — add plasmid to library &nbsp;·&nbsp; .csv — batch design</div>
+    </div>
+    <div class="messages" id="messages">
+      <div class="welcome" id="welcome">
+        <div>
+          <div class="welcome-icon">
+            <svg viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714a2.25 2.25 0 00.659 1.591L19 14.5M14.25 3.104c.251.023.501.05.75.082M19 14.5l-2.47 2.47a2.25 2.25 0 01-1.591.659H9.061a2.25 2.25 0 01-1.591-.659L5 14.5m14 0V17a2 2 0 01-2 2H7a2 2 0 01-2-2v-2.5"/>
+            </svg>
+          </div>
+          <h2>Design an expression plasmid</h2>
+          <p>Describe what you want to build. Claude will retrieve verified sequences,<br>
+          assemble your construct, validate it, and export the result.</p>
+          <p style="font-size:12px;color:var(--sand-300);margin-top:4px;">
+            Drag &amp; drop a <strong>.gb</strong> / <strong>.fasta</strong> file to add a plasmid to your library &nbsp;·&nbsp; drop a <strong>.csv</strong> to batch design.
+          </p>
+          <div class="examples">
+            <button onclick="sendExample(this)">Design an EGFP expression plasmid using pcDNA3.1(+)</button>
+            <button onclick="sendExample(this)">Put mCherry into a mammalian expression vector</button>
+            <button onclick="sendExample(this)">What backbones are available?</button>
+            <button onclick="sendExample(this)">Assemble tdTomato in pcDNA3.1(+) and export as GenBank</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-wrapper">
+        <textarea id="input" placeholder="Describe the plasmid you want to design…" rows="1"
+          oninput="autoResize(this)"></textarea>
+        <div class="input-meta">
+          <select id="model-select" class="model-select">
+            <option value="claude-opus-4-7">Opus 4.7</option>
+            <option value="claude-opus-4-6">Opus 4.6</option>
+            <option value="claude-sonnet-4-6">Sonnet 4.6</option>
+            <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+          </select>
+          <div class="token-indicator" id="token-indicator">
+            <div class="token-bar-track"><div class="token-bar-fill" id="token-bar"></div></div>
+            <span id="token-label"></span>
+          </div>
+        </div>
+        <div id="plasmid-badge" style="display:none;align-items:center;gap:6px;padding:4px 8px;background:var(--sand-100);border:1px solid var(--sand-200);border-radius:6px;font-size:12px;color:var(--sand-700);margin-bottom:4px;">
+          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+          <span id="plasmid-badge-name"></span>
+          <span id="plasmid-badge-status" style="color:var(--sand-400);">analyzing…</span>
+        </div>
+        <div id="csv-badge" style="display:none;align-items:center;gap:6px;padding:4px 8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;font-size:12px;color:#166534;margin-bottom:4px;">
+          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <span id="csv-badge-name"></span>
+          <button onclick="clearPendingCSV()" style="margin-left:4px;background:none;border:none;cursor:pointer;color:#166534;font-size:13px;line-height:1;padding:0" title="Remove CSV">&times;</button>
+        </div>
+        <div class="input-buttons">
+          <button class="attach-btn" id="attach-btn" title="Attach file (.gb/.gbk/.fasta for plasmid library · .csv for bulk design)" onclick="document.getElementById('combined-file-input').click()">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <button class="send-btn" id="send-btn" onclick="sendMessage()">
+            <svg fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+              <path d="M12 19V5M5 12l7-7 7 7"/>
+            </svg>
+          </button>
+          <button class="stop-btn" id="stop-btn" onclick="stopGeneration()" style="display:none">
+            <svg fill="currentColor" viewBox="0 0 16 16">
+              <rect x="3" y="3" width="10" height="10" rx="1.5"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="combined-file-input" accept=".gb,.gbk,.genbank,.fasta,.fa,.seq,.csv" style="display:none" onchange="onCombinedFileChosen(this)">
+  <!-- legacy IDs kept so drag-drop and any other callers still work -->
+  <input type="file" id="batch-csv-input" accept=".csv" style="display:none" onchange="onBatchFileChosen(this)">
+  <input type="file" id="plasmid-file-input" accept=".gb,.gbk,.genbank,.fasta,.fa,.seq" style="display:none" onchange="onPlasmidFileChosen(this)">
+
+</div>
+
+<!-- Saved Constructs full-screen overlay -->
+<div class="library-overlay" id="library-panel" style="display:none">
+  <div class="library-card">
+    <div class="library-panel-header">
+      <div style="display:flex;align-items:center;gap:10px">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+        </svg>
+        <span>Library</span>
+      </div>
+      <div class="lib-tab-bar">
+        <button class="lib-tab active" id="lib-tab-table" onclick="showLibraryTab('table')">&#9776; Table</button>
+        <button class="lib-tab" id="lib-tab-graph" onclick="showLibraryTab('graph')">&#9672; Graph</button>
+        <button class="lib-tab" onclick="refreshLibraryData()">&#8635; Refresh</button>
+        <button class="lib-tab" id="import-lib-btn" style="display:none" onclick="importUserLibrary()">&#8679; Import from Library</button>
+      </div>
+      <button id="lib-remove-btn" onclick="_removeSelected()" style="display:none;
+        padding:5px 14px;border:none;border-radius:6px;cursor:pointer;font-size:12px;
+        font-family:Inter,sans-serif;font-weight:500;background:#E86235;color:#fff;
+        white-space:nowrap;flex-shrink:0">
+        Remove <span id="lib-remove-count">0</span> selected
+      </button>
+      <button class="lib-close" onclick="toggleLibraryPanel()" title="Close">
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div id="lib-table-pane" style="flex:1;overflow:auto;min-height:0">
+      <div id="constructs-table"></div>
+    </div>
+    <div id="lib-graph-pane" style="display:none;flex:1;overflow:hidden;min-height:0;position:relative">
+      <div id="constructs-graph" style="width:100%;height:100%"></div>
+      <div id="cy-tooltip" style="display:none;position:absolute;z-index:100;pointer-events:none;
+        background:white;border:1px solid var(--sand-200);border-radius:8px;
+        padding:10px 13px;font-size:12px;font-family:Inter,sans-serif;
+        box-shadow:0 4px 16px rgba(0,0,0,0.12);max-width:240px;line-height:1.5"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Import library modal -->
+<div id="import-modal" style="display:none;position:fixed;inset:0;z-index:2000;
+  background:rgba(0,0,0,0.35);align-items:center;justify-content:center">
+  <div style="background:#FAFAF8;border-radius:12px;width:min(760px,88vw);max-height:78vh;
+    display:flex;flex-direction:column;box-shadow:0 12px 48px rgba(0,0,0,0.28);overflow:hidden">
+    <div style="padding:16px 20px;border-bottom:1px solid var(--sand-200);display:flex;align-items:center;justify-content:space-between">
+      <strong style="font-size:14px;font-family:Inter,sans-serif">Import from Your Library</strong>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="toggleImportSelectAll()" id="import-select-all-btn"
+          style="font-size:12px;padding:4px 10px;border:1px solid var(--sand-300);border-radius:6px;
+          background:var(--sand-100);cursor:pointer;font-family:Inter,sans-serif">Select all</button>
+        <button onclick="closeImportModal()"
+          style="background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:18px;line-height:1">&#10005;</button>
+      </div>
+    </div>
+    <div style="overflow-y:auto;flex:1">
+      <table id="import-preview-table" style="width:100%;border-collapse:collapse;font-size:12px;font-family:Inter,sans-serif">
+        <thead style="position:sticky;top:0;background:#F5F3ED;z-index:1">
+          <tr>
+            <th style="width:32px;padding:8px 10px;text-align:center;border-bottom:1px solid var(--sand-200)">
+              <input type="checkbox" id="import-check-all" onchange="onCheckAllChange(this)"></th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Name</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Type</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Size</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Category / Enzyme</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Resistance</th>
+            <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--sand-200)">Status</th>
+          </tr>
+        </thead>
+        <tbody id="import-preview-body"></tbody>
+      </table>
+    </div>
+    <div style="padding:12px 20px;border-top:1px solid var(--sand-200);display:flex;align-items:center;gap:10px;justify-content:flex-end">
+      <span id="import-selected-count" style="font-size:12px;color:var(--text-secondary);font-family:Inter,sans-serif;margin-right:auto">0 selected</span>
+      <button onclick="closeImportModal()"
+        style="padding:7px 16px;border:1px solid var(--sand-300);border-radius:8px;background:var(--sand-100);
+        cursor:pointer;font-size:13px;font-family:Inter,sans-serif">Cancel</button>
+      <button id="import-confirm-btn" onclick="confirmImport()"
+        style="padding:7px 16px;border:none;border-radius:8px;background:var(--brand-fig);color:#fff;
+        cursor:pointer;font-size:13px;font-family:Inter,sans-serif;font-weight:500">Import Selected</button>
+    </div>
+  </div>
+</div>
+<script src="/static/viewer.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

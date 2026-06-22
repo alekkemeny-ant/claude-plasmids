@@ -6,7 +6,7 @@ HTTP entry point and request router. Stateful logic is split across:
   - sessions.py  — all in-memory state (sessions, batch jobs, live streams)
   - streaming.py — Anthropic streaming agent loop
   - batch_worker.py — background batch job workers
-  - ui_assets.py — the single-page HTML/CSS/JS interface
+  - static/       — the single-page HTML/CSS/JS interface (served from disk)
   - bulk_planner.py — bulk design planning + cost estimation
 
 Usage:
@@ -50,7 +50,13 @@ from src.library import load_backbones, load_inserts
 from src.plasmid_intake import parse_upload, run_plannotate, build_intake_message
 
 # ── App-level imports ─────────────────────────────────────────────────────────
-from ui_assets import HTML_PAGE
+STATIC_DIR = Path(__file__).parent / "static"
+
+MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css":  "text/css",
+    ".js":   "application/javascript",
+}
 
 from bulk_planner import (
     generate_bulk_plan,
@@ -159,10 +165,26 @@ class AgentHandler(SimpleHTTPRequestHandler):
         path = parsed.path
 
         if path in ("/", "/index.html"):
+            data = (STATIC_DIR / "index.html").read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(HTML_PAGE.encode("utf-8"))
+            self.wfile.write(data)
+
+        elif path.startswith("/static/"):
+            rel = path[len("/static/"):]
+            file_path = STATIC_DIR / rel
+            if file_path.is_file():
+                data = file_path.read_bytes()
+                suffix = file_path.suffix
+                mime = MIME_TYPES.get(suffix, "application/octet-stream")
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self.send_response(404)
+                self.end_headers()
 
         elif path == "/api/health":
             self._send_json({"status": "ok"})

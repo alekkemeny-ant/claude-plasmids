@@ -396,11 +396,10 @@ The `fuse_inserts` tool automatically handles codons at junctions:
 
 ## Golden Gate Assembly
 
-Use this workflow when the user wants to assemble a construct using Type IIS restriction enzyme-based cloning (Golden Gate, Modular Cloning, or the Allen Institute modular expression system).
+Use this workflow when the user wants to assemble a construct using Type IIS restriction enzyme-based cloning (Golden Gate, Modular Cloning, or similar modular expression systems).
 
 ### When to use Golden Gate
 - User explicitly asks for Golden Gate, MoClo, or Type IIS assembly
-- User references Allen Institute modular parts (library prefix AICS_P, AICS_O, AICS_T)
 - Backbone vector is a Golden Gate-ready vector (contains Esp3I/BsaI/BbsI sites flanking a dropout cassette)
 - Parts are stored as `category: "part_in_vector"` in the insert library
 
@@ -408,7 +407,7 @@ Use this workflow when the user wants to assemble a construct using Type IIS res
 
 **Step 1 — Identify the enzyme**
 Ask the user which enzyme they are using, or read it from the backbone metadata (`assembly_enzyme` field). Common choices:
-- **Esp3I / BsmBI** (CGTCTC) — Allen Institute modular system
+- **Esp3I / BsmBI** (CGTCTC) — common modular cloning systems
 - **BsaI** (GGTCTC) — Level 0/1 MoClo
 - **BbsI** (GAAGAC) — some Golden Gate kits
 - **PaqCI** (CACCTGC) — high-fidelity Golden Gate (NEB)
@@ -446,11 +445,6 @@ Use `get_backbone` to retrieve the vector. Confirm it contains the correct enzym
 **Step 3 — Identify the parts**
 For each part the user specifies, use `get_insert` (or `search_inserts` with `category=part_in_vector`) to retrieve the full entry. Each part must have a `plasmid_sequence` field — this is the carrier vector used to cut out the insert.
 
-For Allen Institute modular parts:
-- **Promoters** (AICS_P): overhang pair Alpha→K
-- **ORFs** (AICS_O): overhang pair K→Y
-- **Terminators** (AICS_T): overhang pair Gamma→Delta
-
 **Step 4 — Assemble**
 Call `assemble_golden_gate(backbone_id=..., part_ids=[...], enzyme_name=...)`. The tool:
 1. Digests the backbone at its two Type IIS sites to open the cloning window (discarding the dropout cassette)
@@ -460,14 +454,6 @@ Call `assemble_golden_gate(backbone_id=..., part_ids=[...], enzyme_name=...)`. T
 
 **Step 5 — Validate and export**
 Use `validate_construct` on the assembled sequence, then `export_construct` (GenBank recommended to preserve features).
-
-### Allen Institute Modular System — Overhang Reference
-
-| Part type | Library prefix | Left overhang | Right overhang |
-|-----------|---------------|---------------|----------------|
-| Promoter  | AICS_P | Alpha         | K              |
-| ORF       | AICS_O | K             | Y              |
-| Terminator| AICS_T | Gamma         | Delta          |
 
 ### Compound Construct Names
 
@@ -521,7 +507,7 @@ If a fragment cannot be resolved, ask the user to provide the sequence before co
 "Which Type IIS enzyme would you like to use?
 - **BsaI** (GGTCTC) — standard, most common for de novo Golden Gate
 - **PaqCI** (CACCTGC) — highest ligation fidelity (NEB recommendation for ≥4 fragments)
-- **Esp3I / BsmBI** (CGTCTC) — Allen Institute modular system
+- **Esp3I / BsmBI** (CGTCTC) — common modular cloning systems
 - **BbsI** (GAAGAC) — some commercial kits
 
 I'll default to BsaI if you don't have a preference."
@@ -539,7 +525,7 @@ I'll default to BsaI if you don't have a preference."
 - **Annealing oligos** — complementary top and bottom strand oligos that you mix, heat, and cool to anneal into a ready-to-use double-stranded fragment with sticky ends (no template needed; works best for ≤~500 bp).
 - **gBlocks (synthesis sequences)** — complete annotated sequences with flanking enzyme sites and overhangs, ready to order from IDT or Twist as linear fragments.
 - **Insert cassette (synthesis vendor backbone)** — a fully-defined insert sequence (no ambiguous bases) that you send directly to a synthesis company like Ansa or Twist. The company provides the backbone; you send only the insert cassette. This is the right choice when you're ordering a part-in-vector from a vendor that supplies their own backbone (e.g. Ansa vector library, Twist vectors).
-- **Part-in-vector plasmids** — a full circular plasmid sequence for each fragment (the fragment inserted into a carrier backbone with flanking Type IIS sites), ready to order as whole-plasmid synthesis from Azenta/Genewiz. Equivalent to the Allen Institute 'part_in_vector' format — can be used directly in Golden Gate assembly later. Use this when you want to specify your own carrier backbone.
+- **Part-in-vector plasmids** — a full circular plasmid sequence for each fragment (the fragment inserted into a carrier backbone with flanking Type IIS sites), ready to order as whole-plasmid synthesis from Azenta/Genewiz. Equivalent to the 'part_in_vector' format — can be used directly in Golden Gate assembly later. Use this when you want to specify your own carrier backbone.
 - **All of the above** — if you'd like all options."
 
 If the user chooses **insert cassette**, note: "No backbone is required from the library — you'll provide this sequence to the vendor and they'll insert it into their backbone of choice. If you have the backbone sequence from the vendor's catalog (or once they deliver the vector), you can paste it here and I'll save it to your local library, then construct the full plasmid and export it as a GenBank file."

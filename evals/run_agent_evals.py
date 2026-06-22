@@ -2065,6 +2065,65 @@ AGENT_CASES = [
         ),
         tags=["parts_swap", "terminator_swap", "orientation", "yeast", "reverse_strand"],
     ),
+
+    # ── B1: Bulk design routing (submit_bulk_designs tool) ────────────────
+    AgentTestCase(
+        id="B1-001",
+        name="Bulk routing: three fluorescent proteins in pcDNA3.1",
+        description="Agent should call submit_bulk_designs for a 3-construct request, not assemble immediately",
+        prompt=(
+            "Please design three plasmids for me:\n"
+            "1. EGFP in pcDNA3.1(+), named EGFP_construct\n"
+            "2. mCherry in pcDNA3.1(+), named mCherry_construct\n"
+            "3. sfGFP in pcDNA3.1(+), named sfGFP_construct\n"
+            "Build all three."
+        ),
+        expected_backbone_id="",
+        expected_insert_id="",
+        grading_mode="transcript",
+        transcript_assertions=["EGFP_construct", "mCherry_construct", "sfGFP_construct"],
+        tools_should_not_use=["assemble_construct"],
+        max_tool_calls=8,
+        tags=["bulk", "routing"],
+    ),
+    AgentTestCase(
+        id="B1-002",
+        name="Bulk routing: named rows registered with correct names",
+        description="submit_bulk_designs acknowledgment should include both user-specified construct names",
+        prompt=(
+            "I need to build two plasmids using pcDNA3.1(+):\n"
+            "- A plasmid expressing EGFP under CMV, call it EGFP_CMV\n"
+            "- A plasmid expressing mCherry under CMV, call it mCherry_CMV\n"
+            "Please queue them for bulk design."
+        ),
+        expected_backbone_id="",
+        expected_insert_id="",
+        grading_mode="transcript",
+        transcript_assertions=["EGFP_CMV", "mCherry_CMV"],
+        tools_should_not_use=["assemble_construct"],
+        max_tool_calls=6,
+        tags=["bulk", "routing"],
+    ),
+    AgentTestCase(
+        id="B1-003",
+        name="Bulk routing: agent stops after registering, does not assemble",
+        description="After calling submit_bulk_designs the agent must NOT call assembly tools",
+        prompt=(
+            "Design four constructs, all using Golden Gate into pDONR207:\n"
+            "1. sfGFP (name: sfGFP_GG)\n"
+            "2. mCherry (name: mCherry_GG)\n"
+            "3. EGFP (name: EGFP_GG)\n"
+            "4. TagBFP (name: TagBFP_GG)\n"
+            "All use the same backbone and BbsI enzyme. Go ahead and queue them."
+        ),
+        expected_backbone_id="",
+        expected_insert_id="",
+        grading_mode="transcript",
+        transcript_assertions=["sfGFP_GG", "mCherry_GG", "EGFP_GG", "TagBFP_GG"],
+        tools_should_not_use=["assemble_construct", "assemble_golden_gate"],
+        max_tool_calls=8,
+        tags=["bulk", "routing", "batch_eligible"],
+    ),
 ]
 
 

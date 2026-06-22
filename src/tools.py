@@ -103,6 +103,13 @@ try:
 except ImportError:
     PROTEIN_ANALYSIS_AVAILABLE = False
 
+# Fusion design advisor (combinatorial variant generation + ranking)
+try:
+    from .fusion_designer import design_fusion_variants as _design_fusion_variants
+    FUSION_DESIGNER_AVAILABLE = True
+except ImportError:
+    FUSION_DESIGNER_AVAILABLE = False
+
 # Smart mutations (curated GoF/LoF + deterministic edits)
 try:
     from .mutations import (
@@ -1485,6 +1492,175 @@ async def predict_fusion_sites_tool(args):
 
 
 @tool(
+    "design_fusion_variants",
+    "Analyse a fluorescent protein + target protein pair and return ~5 ranked "
+    "fusion construct designs with rationale. Evaluates FP suitability (pKa, "
+    "oligomerization, compartment compatibility), predicts protein topology "
+    "(signal peptide, MTS, TM helices, GPI anchors), finds internal loop "
+    "insertion sites, and suggests better FP alternatives when issues are found. "
+    "Call this BEFORE fuse_inserts / assemble_construct when the user asks for "
+    "a fluorescent fusion construct, especially when they want options or when "
+    "the target has a known or suspected subcellular localisation. Does NOT "
+    "assemble — returns design plans for the user to choose from.",
+    {
+        "type": "object",
+        "properties": {
+            "fp_name": {
+                "type": "string",
+                "description": "Fluorescent protein name (e.g. 'mCherry', 'mNeonGreen', 'EGFP')",
+            },
+            "target_gene_name": {
+                "type": "string",
+                "description": "Target gene or protein name (e.g. 'CHCHD4', 'H2B', 'LMNA')",
+            },
+            "target_aa_sequence": {
+                "type": "string",
+                "description": "Target protein amino acid sequence (single-letter code). Preferred over dna_sequence.",
+            },
+            "target_dna_sequence": {
+                "type": "string",
+                "description": "Alternative: target CDS as DNA (will be translated in frame 0).",
+            },
+            "fp_aa_sequence": {
+                "type": "string",
+                "description": "FP amino acid sequence (optional; used to infer FP length when the FP is not in the built-in database).",
+            },
+            "known_localization": {
+                "type": "string",
+                "description": (
+                    "Known or expected subcellular localisation of the target protein "
+                    "(e.g. 'mitochondria', 'lysosome', 'ER', 'nucleus'). "
+                    "If provided, it overrides topology-based inference for compartment-specific "
+                    "FP suitability checks."
+                ),
+            },
+        },
+        "required": ["fp_name", "target_gene_name"],
+    },
+)
+async def design_fusion_variants_tool(args):
+    if not FUSION_DESIGNER_AVAILABLE:
+        return _error("Fusion Designer module not available.")
+
+    fp_name = args.get("fp_name", "").strip()
+    target_name = args.get("target_gene_name", "").strip()
+    if not fp_name or not target_name:
+        return _error("Both fp_name and target_gene_name are required.")
+
+    target_aa = args.get("target_aa_sequence") or None
+    target_dna = args.get("target_dna_sequence") or None
+    fp_aa = args.get("fp_aa_sequence") or None
+    localization = args.get("known_localization") or None
+
+    if not target_aa and not target_dna:
+        return _error(
+            "Provide either target_aa_sequence (preferred) or target_dna_sequence. "
+            "Retrieve the sequence with get_insert / fetch_gene first."
+        )
+
+    try:
+        result = _design_fusion_variants(
+            fp_name=fp_name,
+            target_gene_name=target_name,
+            target_aa_sequence=target_aa,
+            target_dna_sequence=target_dna,
+            fp_aa_sequence=fp_aa,
+            known_localization=localization,
+        )
+    except Exception as exc:
+        return _error(f"Fusion design analysis failed: {exc}")
+
+    # Format a readable report for the agent
+    lines: list[str] = []
+
+    # ── FP assessment ──
+    fp_props = result["fp_properties"]
+    fp_assess = result["fp_assessment"]
+    lines.append(f"## Fluorescent Protein: {result['fp_name']}")
+    lines.append(
+        f"- Oligomerization: {fp_props['oligomerization']} | "
+        f"pKa: {fp_props['pka'] if fp_props['pka'] is not None else 'N/A'} | "
+        f"Brightness: {fp_props['brightness']:.2f}× EGFP | "
+        f"Size: ~{fp_props['aa_length']} aa"
+    )
+    if fp_props["strengths"]:
+        lines.append(f"- Strengths: {'; '.join(fp_props['strengths'])}")
+    if fp_props["weaknesses"]:
+        lines.append(f"- Weaknesses: {'; '.join(fp_props['weaknesses'])}")
+
+    lines.append(
+        f"\n**FP Suitability: {fp_assess['verdict'].upper()} ({fp_assess['score']}/100)**"
+    )
+    if fp_assess["issues"]:
+        lines.append("Issues:")
+        for issue in fp_assess["issues"]:
+            lines.append(f"  ⚠ {issue}")
+    if fp_assess["notes"]:
+        for note in fp_assess["notes"]:
+            lines.append(f"  ✓ {note}")
+
+    # ── Alternative suggestions ──
+    alts = result.get("alternatives", [])
+    if alts:
+        lines.append("\n**Alternative FP Suggestions:**")
+        for alt in alts:
+            lines.append(
+                f"  • {alt['canonical_name']} — {alt['reason']} "
+                f"(pKa {alt['pka']}, {alt['brightness']:.2f}× EGFP)"
+            )
+
+    # ── Topology ──
+    topo = result["target_topology"]
+    lines.append(f"\n## Target Protein: {target_name} ({topo['protein_length_aa']} aa)")
+    lines.append(
+        f"- N-terminus: {'accessible' if topo['n_terminal_accessible'] else '** BLOCKED **'} | "
+        f"C-terminus: {'accessible' if topo['c_terminal_accessible'] else '** BLOCKED **'} | "
+        f"TM helices: {topo['tm_count']}"
+    )
+    if topo["inferred_localization"]:
+        lines.append(f"- Inferred localisation: {topo['inferred_localization'].replace('_', ' ')}")
+    for feat in topo["features"]:
+        lines.append(f"  ⚠ [{feat['type'].upper()}] {feat['note']}")
+    for warn in topo.get("warnings", []):
+        lines.append(f"  ⚠ {warn}")
+
+    # Internal sites
+    internal = result.get("internal_sites", [])
+    if internal:
+        lines.append(f"- Internal disordered loops ({len(internal)} found):")
+        for site in internal[:3]:
+            lines.append(
+                f"    Residues {site['start'] + 1}–{site['end']} "
+                f"({site['length']} aa, disorder score {site['mean_disorder']:.2f})"
+            )
+    else:
+        lines.append("- No long disordered internal loops found — terminal fusions preferred.")
+
+    # ── Ranked designs ──
+    lines.append(f"\n## Ranked Fusion Designs")
+    for design in result["designs"]:
+        rank = design["rank"]
+        conf = design["confidence"]
+        lines.append(f"\n### Design #{rank}: {design['name']}")
+        lines.append(f"**Confidence: {conf}** (score {design['score']}/100)")
+        lines.append(f"Orientation: `{design['orientation']}`")
+        lines.append(f"Linker: {design['linker']}")
+        lines.append(f"Linker rationale: {design['linker_rationale']}")
+        lines.append(f"Design rationale: {design['design_rationale']}")
+        if design.get("concerns"):
+            lines.append("Concerns:")
+            for c in design["concerns"]:
+                lines.append(f"  ⚠ {c}")
+
+    lines.append(
+        "\n---\nPresent these designs to the user and ask which they would like to assemble. "
+        "Then use fuse_inserts → assemble_construct → validate_construct → export_construct."
+    )
+
+    return _text("\n".join(lines))
+
+
+@tool(
     "lookup_known_mutations",
     "Look up curated GoF/LoF mutations for common oncogenes and tumor "
     "suppressors (BRAF, KRAS, TP53, EGFR, PTEN, PIK3CA, IDH1/2, etc.). "
@@ -2566,6 +2742,103 @@ async def search_fpbase_tool(args):
 
 
 @tool(
+    "submit_bulk_designs",
+    "Register a list of constructs for bulk design, then proceed to build them yourself in the current chat. "
+    "Call this as soon as the user provides multiple constructs to build. After calling it, YOU will: "
+    "(1) identify shared components (backbone, insertion site, enzyme), "
+    "(2) fetch them ONCE using existing tools, "
+    "(3) build construct 1 as the preview using the normal workflow, "
+    "(4) call complete_bulk_preview with the remaining rows + shared context you discovered. "
+    "Do NOT hand off to a separate bulk planner — do the work yourself in this turn.",
+    {
+        "type": "object",
+        "properties": {
+            "rows": {
+                "type": "array",
+                "description": "One entry per construct. Each entry must have at least 'description' (full design prompt) and optionally 'name'.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name":        {"type": "string", "description": "Construct name/ID"},
+                        "description": {"type": "string", "description": "Complete design instruction for this construct"},
+                    },
+                    "required": ["description"],
+                },
+            },
+        },
+        "required": ["rows"],
+    },
+)
+async def submit_bulk_designs_tool(args):
+    rows = args.get("rows", [])
+    n = len(rows)
+    names = [r.get("name") or f"construct_{i + 1}" for i, r in enumerate(rows)]
+    return _text(
+        f"[BULK_DESIGNS_REGISTERED] {n} construct(s) registered: {', '.join(names)}.\n\n"
+        f"The web UI is showing the user a model selection card so they can choose which model "
+        f"to use for the preview and for all subsequent constructs.\n\n"
+        f"STOP NOW. Write a brief acknowledgment to the user (e.g. 'I've queued your {n} constructs. "
+        f"Please choose a model in the card above and click \"Start Preview\" when ready.') and end your turn.\n\n"
+        f"Do NOT start building anything yet. When the user clicks 'Start Preview', "
+        f"they will send a follow-up message and you should then proceed with the bulk preview workflow "
+        f"(Steps A-C in the system prompt): identify shared components, build construct 1 fully, "
+        f"call complete_bulk_preview."
+    )
+
+
+@tool(
+    "complete_bulk_preview",
+    "Signal that the preview construct (construct 1) is complete and hand the remaining constructs to the web UI. "
+    "Call this AFTER successfully exporting construct 1. Pass the remaining rows plus the shared context you "
+    "discovered so that subsequent batch sessions can skip redundant tool calls (no re-fetching the backbone, "
+    "no re-finding the insertion site, etc.).",
+    {
+        "type": "object",
+        "properties": {
+            "remaining_rows": {
+                "type": "array",
+                "description": "Design descriptions for constructs 2..N (the ones not yet built).",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name":        {"type": "string", "description": "Construct name"},
+                        "description": {"type": "string", "description": "Complete design instruction"},
+                    },
+                    "required": ["description"],
+                },
+            },
+            "shared_context": {
+                "type": "object",
+                "description": "Everything already resolved that subsequent runs can skip.",
+                "properties": {
+                    "backbone_id":           {"type": "string", "description": "Library backbone ID (e.g. 'pcDNA3.1(+)' or 'addgene:12345')"},
+                    "backbone_name":         {"type": "string", "description": "Human-readable backbone name"},
+                    "insertion_site_start":  {"type": "integer", "description": "0-based MCS insertion position"},
+                    "insertion_site_end":    {"type": "integer", "description": "End of replacement region (0 or omit if point insertion)"},
+                    "assembly_method":       {"type": "string", "description": "e.g. 'restriction_cloning' or 'golden_gate'"},
+                    "enzyme":                {"type": "string", "description": "Assembly enzyme if applicable (e.g. 'BbsI')"},
+                    "extra":                 {"type": "string", "description": "Any other relevant context as free text"},
+                },
+            },
+            "preview_summary": {
+                "type": "string",
+                "description": "1-2 sentence summary of what was built and what shared context was found.",
+            },
+        },
+        "required": ["remaining_rows", "shared_context", "preview_summary"],
+    },
+)
+async def complete_bulk_preview_tool(args):
+    import json as _json
+    payload = {
+        "remaining_rows":  args.get("remaining_rows", []),
+        "shared_context":  args.get("shared_context", {}),
+        "preview_summary": args.get("preview_summary", ""),
+    }
+    return _text(f"[BULK_PREVIEW_READY] {_json.dumps(payload)}")
+
+
+@tool(
     "log_experimental_outcome",
     "Record a wet-lab experimental outcome for a construct designed in this "
     "session. The web UI persists this to session memory so future "
@@ -2624,6 +2897,7 @@ ALL_TOOLS = [
     # Phase-2 advanced design tools
     score_construct_confidence_tool,
     predict_fusion_sites_tool,
+    design_fusion_variants_tool,
     lookup_known_mutations_tool,
     apply_mutation_tool,
     fetch_promoter_region_tool,
@@ -2640,6 +2914,9 @@ ALL_TOOLS = [
     fetch_oa_fulltext_tool,
     # FPbase fluorescent protein search
     search_fpbase_tool,
+    # Bulk design handoff
+    submit_bulk_designs_tool,
+    complete_bulk_preview_tool,
     # Troubleshooting / project memory
     log_experimental_outcome_tool,
 ]

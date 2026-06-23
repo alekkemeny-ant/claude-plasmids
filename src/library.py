@@ -1070,7 +1070,7 @@ def annotate_plasmid(plasmid_sequence: str) -> list[dict]:
 
 def find_duplicate_annotations(
     features: list[dict],
-    min_length: int = 100,
+    min_length: int = 1,
     min_pct_identity: float = 90.0,
 ) -> list[dict]:
     """Return feature groups that appear more than once in a pLannotate result.

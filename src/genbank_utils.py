@@ -16,7 +16,7 @@ def parse_genbank_sequence(content: str) -> Optional[str]:
         return None
     origin_section = origin_match.group(1)
     sequence = re.sub(r'[^atcgATCGnN]', '', origin_section).upper()
-    return sequence if len(sequence) > 100 else None
+    return sequence if len(sequence) > 5 else None
 
 
 def parse_genbank_location(location_str: str) -> tuple[int, int]:

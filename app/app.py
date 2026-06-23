@@ -105,6 +105,7 @@ from streaming import (
     TOOLS, _TOOL_HANDLERS,
     _dispatch_tool,
     run_agent_turn_streaming,
+    reset_client,
 )
 
 from batch_worker import start_batch_job, _continue_batch_row
@@ -1294,6 +1295,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
                     elif field in env_vals:
                         del env_vals[field]
             _write_env_file(env_vals)
+            reset_client()  # re-create on next call with the updated key
             self._send_json({"ok": True})
 
         # ── Plasmid library DB ────────────────────────────────────────────

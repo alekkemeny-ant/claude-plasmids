@@ -1415,6 +1415,10 @@ async function sendMessage() {
           case 'tool_result': finishToolBlock(event.tool, event.input || {}, event.content, event.download_content, event.download_filename); break;
           case 'plot_data': addPlasmidPlot(event.plot_json); break;
           case 'token_usage': updateTokenIndicator(event.input_tokens, event.context_window); break;
+          case 'no_api_key':
+            clearPendingCursor();
+            openSettingsForApiKey();
+            break;
           case 'error':
             clearPendingCursor();
             startTextBlock();
@@ -4387,12 +4391,25 @@ const _SETTINGS_FIELDS = [
 ];
 
 async function openSettings() {
+  var notice = document.getElementById('settings-api-key-notice');
+  if (notice) notice.style.display = 'none';
   document.getElementById('settings-overlay').style.display = 'flex';
   await loadSettings();
 }
 
+async function openSettingsForApiKey() {
+  document.getElementById('settings-overlay').style.display = 'flex';
+  await loadSettings();
+  var notice = document.getElementById('settings-api-key-notice');
+  if (notice) notice.style.display = 'block';
+  var keyInput = document.getElementById('setting-ANTHROPIC_API_KEY');
+  if (keyInput) keyInput.focus();
+}
+
 function closeSettings() {
   document.getElementById('settings-overlay').style.display = 'none';
+  var notice = document.getElementById('settings-api-key-notice');
+  if (notice) notice.style.display = 'none';
   _setSettingsStatus('');
 }
 

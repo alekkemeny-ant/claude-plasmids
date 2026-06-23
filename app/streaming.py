@@ -20,6 +20,7 @@ Key design decisions:
 import asyncio
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -116,6 +117,12 @@ def _client() -> anthropic.Anthropic:
     if _anthropic_client is None:
         _anthropic_client = anthropic.Anthropic()
     return _anthropic_client
+
+
+def reset_client():
+    """Reset the cached Anthropic client (call after API key changes)."""
+    global _anthropic_client
+    _anthropic_client = None
 
 
 def _emit_tool_result(
@@ -277,6 +284,11 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
         write_event({"type": "error", "content": "Session not found"})
         return
 
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        write_event({"type": "no_api_key"})
+        write_event({"type": "done"})
+        return
+
     # Guard against concurrent turns on the same session. ThreadingMixIn means
     # two HTTP requests can race: the old turn's history.append(assistant+tool_use)
     # and the new turn's history.append(user_message) interleave, leaving an
@@ -379,7 +391,7 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                     )
                     with _client().messages.stream(
                         model=model,
-                        max_tokens=16000,
+                        max_tokens=32000,
                         system=turn_system_prompt,
                         tools=TOOLS,
                         messages=history,
@@ -470,6 +482,9 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                             })
                     break  # stream succeeded, leave retry loop
 
+                except anthropic.AuthenticationError:
+                    safe_write({"type": "no_api_key"})
+                    break
                 except (anthropic.RateLimitError, anthropic.InternalServerError) as e:
                     if retry_attempt < max_retries:
                         wait_time = 2 ** retry_attempt
@@ -549,6 +564,28 @@ def run_agent_turn_streaming(user_message: str, session_id: str, write_event, mo
                 safe_write({"type": "text_delta", "content": ref_block})
                 safe_write({"type": "text_end"})
             session["last_export_references"] = tracker.to_list()
+
+        # If the model produced only thinking (no text, no tool calls) — typically
+        # because max_tokens was hit during the thinking phase — emit a visible
+        # explanation so the user doesn't see an empty response.
+        only_thinking = (
+            not assistant_text
+            and assistant_blocks
+            and all(b.get("type") == "thinking" for b in assistant_blocks)
+            and not is_cancelled()
+            and sys.exc_info()[1] is None
+        )
+        if only_thinking:
+            fallback = (
+                "I ran out of output tokens while working through this request. "
+                "The request may be too complex or require a very detailed analysis. "
+                "Try breaking it into smaller steps, or ask me a more focused question."
+            )
+            assistant_text = fallback
+            assistant_blocks.append({"type": "text", "content": fallback})
+            safe_write({"type": "text_start"})
+            safe_write({"type": "text_delta", "content": fallback})
+            safe_write({"type": "text_end"})
 
         if assistant_text or assistant_blocks:
             session["display_messages"].append({

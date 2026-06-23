@@ -284,7 +284,13 @@ _load_batch_jobs()
 
 
 def create_session() -> str:
-    """Create a new conversation session."""
+    """Create a new conversation session.
+
+    The session is registered in memory immediately. Persistence to disk is
+    deferred to the end-of-turn _save_sessions() call in run_agent_turn_streaming
+    so the HTTP handler is not blocked by a large sessions-file write before
+    it can send the SSE response headers.
+    """
     sid = str(uuid.uuid4())
     _sessions[sid] = {
         # API message history — replayed each turn for multi-turn context.
@@ -296,7 +302,6 @@ def create_session() -> str:
         "project_name": None,            # user-assigned project label (optional)
         "experimental_outcomes": [],     # list of {status, observation, construct_name, timestamp}
     }
-    _save_sessions()
     return sid
 
 

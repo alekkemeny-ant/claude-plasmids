@@ -263,8 +263,7 @@ def _fetch_dna_via_graphql(slug: str) -> Optional[str]:
 
 def _is_dna(s: str) -> bool:
     """Check if a string looks like a DNA sequence."""
-    if not s or len(s) < 20:
+    if not s:
         return False
     s_clean = s.upper().replace(" ", "").replace("\n", "")
-    valid = set("ACGTN")
-    return all(c in valid for c in s_clean) and len(s_clean) >= 20
+    return bool(s_clean) and all(c in "ACGTN" for c in s_clean)

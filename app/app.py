@@ -117,6 +117,40 @@ LIBRARY_PATH = PROJECT_ROOT / "library"
 DB_PATH = Path(__file__).parent / "constructs.db"
 _init_db(DB_PATH)
 
+# ── Settings (.env) helpers ───────────────────────────────────────────────────
+ENV_FILE = Path(__file__).parent / ".env"
+
+SETTINGS_FIELDS = [
+    "ANTHROPIC_API_KEY",
+    "ADDGENE_API_TOKEN",
+    "NCBI_API_KEY",
+    "NCBI_EMAIL",
+    "UNPAYWALL_EMAIL",
+    "BENCHLING_SUBDOMAIN",
+    "PLASMID_USER_LIBRARY",
+    "PLASMID_ENABLE_PUBMED",
+    "PORT",
+]
+
+def _read_env_file() -> dict:
+    env: dict = {}
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, val = line.partition("=")
+                env[key.strip()] = val.strip()
+    return env
+
+def _write_env_file(settings: dict) -> None:
+    lines = [f"{k}={v}" for k, v in settings.items() if v]
+    ENV_FILE.write_text("\n".join(lines) + ("\n" if lines else ""))
+    for k, v in settings.items():
+        if v:
+            os.environ[k] = v
+        elif k in os.environ:
+            del os.environ[k]
+
 
 def _enrich_parts_from_references(parts: list[dict], references: list[dict]) -> None:
     """Fill in missing source fields on parts using the session's reference list."""
@@ -423,6 +457,30 @@ class AgentHandler(SimpleHTTPRequestHandler):
                 "available": bool(user_lib and Path(user_lib).expanduser().is_dir()),
                 "path": user_lib or None,
             })
+
+        elif path == "/api/settings":
+            env_vals = _read_env_file()
+            result = {f: env_vals.get(f, os.environ.get(f, "")) for f in SETTINGS_FIELDS}
+            self._send_json(result)
+
+        elif path == "/api/settings/pick-folder":
+            import platform
+            import subprocess as _sp
+            if platform.system() == "Darwin":
+                try:
+                    r = _sp.run(
+                        ["osascript", "-e",
+                         'POSIX path of (choose folder with prompt "Select plasmid library folder")'],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    if r.returncode == 0:
+                        self._send_json({"path": r.stdout.strip().rstrip("/")})
+                    else:
+                        self._send_json({"cancelled": True})
+                except Exception as exc:
+                    self._send_json({"error": str(exc)}, 500)
+            else:
+                self._send_json({"error": "Folder picker only supported on macOS"}, 400)
 
         elif path == "/api/db/user-library-preview":
             user_lib_dir = os.environ.get("PLASMID_USER_LIBRARY")
@@ -1223,6 +1281,20 @@ class AgentHandler(SimpleHTTPRequestHandler):
             _sessions.clear()
             _save_sessions()
             self._send_json({"status": "ok"})
+
+        elif path == "/api/settings":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            env_vals = _read_env_file()
+            for field in SETTINGS_FIELDS:
+                if field in body:
+                    val = str(body[field]).strip()
+                    if val:
+                        env_vals[field] = val
+                    elif field in env_vals:
+                        del env_vals[field]
+            _write_env_file(env_vals)
+            self._send_json({"ok": True})
 
         # ── Plasmid library DB ────────────────────────────────────────────
         elif path == "/api/db/constructs":

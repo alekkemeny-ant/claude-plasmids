@@ -38,6 +38,22 @@
       </svg>
       Saved Constructs
     </button>
+    <div class="hamburger-wrapper" id="hamburger-wrapper">
+      <button class="hamburger-btn" id="hamburger-btn" onclick="toggleHamburgerMenu()" title="Menu">
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24">
+          <path d="M4 6h16M4 12h16M4 18h16"/>
+        </svg>
+      </button>
+      <div class="hamburger-menu" id="hamburger-menu" style="display:none">
+        <button class="hamburger-menu-item" onclick="openSettings();closeHamburgerMenu()">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+          </svg>
+          Settings
+        </button>
+      </div>
+    </div>
     <span class="health-badge offline" id="health-badge">
       <span class="health-dot"></span>
       <span id="health-text">Agent Offline</span>
@@ -254,6 +270,98 @@
     </div>
   </div>
 </div>
+<!-- Settings modal -->
+<div class="settings-overlay" id="settings-overlay" style="display:none" onclick="if(event.target===this)closeSettings()">
+  <div class="settings-modal">
+    <div class="settings-header">
+      <h2>Settings</h2>
+      <button class="settings-close-btn" onclick="closeSettings()" title="Close">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="settings-body">
+
+      <div class="settings-section">
+        <h3>API Keys</h3>
+        <div class="settings-field">
+          <label for="setting-ANTHROPIC_API_KEY">Anthropic API Key <span class="settings-required">*</span></label>
+          <div class="settings-field-desc">Required to run the plasmid design agent.</div>
+          <input class="settings-input" id="setting-ANTHROPIC_API_KEY" type="password" autocomplete="off" placeholder="sk-ant-…">
+        </div>
+        <div class="settings-field">
+          <label for="setting-ADDGENE_API_TOKEN">Addgene API Token</label>
+          <div class="settings-field-desc">Enables searching and fetching plasmid sequences from Addgene.</div>
+          <input class="settings-input" id="setting-ADDGENE_API_TOKEN" type="password" autocomplete="off" placeholder="Optional">
+        </div>
+        <div class="settings-field">
+          <label for="setting-NCBI_API_KEY">NCBI API Key</label>
+          <div class="settings-field-desc">Increases NCBI Entrez rate limit from 3 to 10 requests/second.</div>
+          <input class="settings-input" id="setting-NCBI_API_KEY" type="password" autocomplete="off" placeholder="Optional">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Email Addresses</h3>
+        <div class="settings-field">
+          <label for="setting-NCBI_EMAIL">NCBI Email</label>
+          <div class="settings-field-desc">Required by NCBI Entrez API to identify your requests.</div>
+          <input class="settings-input" id="setting-NCBI_EMAIL" type="email" placeholder="you@example.com">
+        </div>
+        <div class="settings-field">
+          <label for="setting-UNPAYWALL_EMAIL">Unpaywall Email</label>
+          <div class="settings-field-desc">Used to fetch open-access literature via Unpaywall.</div>
+          <input class="settings-input" id="setting-UNPAYWALL_EMAIL" type="email" placeholder="you@example.com">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Library</h3>
+        <div class="settings-field">
+          <label for="setting-PLASMID_USER_LIBRARY">User Library Path</label>
+          <div class="settings-field-desc">Folder containing your GenBank (.gb / .gbk) files for use as backbones and inserts.</div>
+          <div class="settings-path-row">
+            <input class="settings-input" id="setting-PLASMID_USER_LIBRARY" type="text" placeholder="/path/to/your/library">
+            <button class="settings-browse-btn" id="browse-library-btn" onclick="browseLibraryFolder()">
+              <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" style="margin-right:4px"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+              Browse
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Integrations</h3>
+        <div class="settings-field">
+          <label for="setting-BENCHLING_SUBDOMAIN">Benchling Subdomain</label>
+          <div class="settings-field-desc">Your Benchling organization subdomain (e.g. <code>mylab</code> for mylab.benchling.com).</div>
+          <input class="settings-input" id="setting-BENCHLING_SUBDOMAIN" type="text" placeholder="mylab">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Advanced</h3>
+        <div class="settings-field settings-field-row">
+          <label class="settings-toggle-label">
+            <input type="checkbox" id="setting-PLASMID_ENABLE_PUBMED">
+            <span>Enable PubMed literature search</span>
+          </label>
+        </div>
+        <div class="settings-field">
+          <label for="setting-PORT">Server Port</label>
+          <div class="settings-field-desc">Port the local server listens on. Restart the server after changing.</div>
+          <input class="settings-input settings-input-sm" id="setting-PORT" type="number" min="1024" max="65535" placeholder="8000" style="width:100px">
+        </div>
+      </div>
+
+    </div>
+    <div class="settings-footer">
+      <span class="settings-status" id="settings-status"></span>
+      <button class="settings-cancel-btn" onclick="closeSettings()">Cancel</button>
+      <button class="settings-save-btn" onclick="saveSettings()">Save Settings</button>
+    </div>
+  </div>
+</div>
+
 <script src="/static/viewer.js"></script>
 <script src="/static/app.js"></script>
 </body>

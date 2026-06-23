@@ -4361,3 +4361,105 @@ function saveAllBatchToLocal(jobId, btn) {
     btn.disabled = false;
   });
 }
+
+// ── Hamburger menu ──
+function toggleHamburgerMenu() {
+  const menu = document.getElementById('hamburger-menu');
+  if (!menu) return;
+  menu.style.display = menu.style.display === 'none' ? '' : 'none';
+}
+
+function closeHamburgerMenu() {
+  const menu = document.getElementById('hamburger-menu');
+  if (menu) menu.style.display = 'none';
+}
+
+document.addEventListener('click', function(e) {
+  const wrapper = document.getElementById('hamburger-wrapper');
+  if (wrapper && !wrapper.contains(e.target)) closeHamburgerMenu();
+});
+
+// ── Settings modal ──
+const _SETTINGS_FIELDS = [
+  'ANTHROPIC_API_KEY', 'ADDGENE_API_TOKEN', 'NCBI_API_KEY',
+  'NCBI_EMAIL', 'UNPAYWALL_EMAIL', 'BENCHLING_SUBDOMAIN',
+  'PLASMID_USER_LIBRARY', 'PORT',
+];
+
+async function openSettings() {
+  document.getElementById('settings-overlay').style.display = 'flex';
+  await loadSettings();
+}
+
+function closeSettings() {
+  document.getElementById('settings-overlay').style.display = 'none';
+  _setSettingsStatus('');
+}
+
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/settings');
+    const d = await r.json();
+    for (const f of _SETTINGS_FIELDS) {
+      const el = document.getElementById('setting-' + f);
+      if (el) el.value = d[f] || '';
+    }
+    const pubmed = document.getElementById('setting-PLASMID_ENABLE_PUBMED');
+    if (pubmed) pubmed.checked = d['PLASMID_ENABLE_PUBMED'] === '1';
+  } catch (e) {
+    _setSettingsStatus('Failed to load settings', 'err');
+  }
+}
+
+async function saveSettings() {
+  const body = {};
+  for (const f of _SETTINGS_FIELDS) {
+    const el = document.getElementById('setting-' + f);
+    if (el) body[f] = el.value.trim();
+  }
+  const pubmed = document.getElementById('setting-PLASMID_ENABLE_PUBMED');
+  if (pubmed) body['PLASMID_ENABLE_PUBMED'] = pubmed.checked ? '1' : '';
+
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) {
+      checkHealth();
+      _checkUserLibrary();
+      closeSettings();
+    } else {
+      _setSettingsStatus('Failed to save', 'err');
+    }
+  } catch (e) {
+    _setSettingsStatus('Error: ' + e.message, 'err');
+  }
+}
+
+function _setSettingsStatus(msg, cls) {
+  const el = document.getElementById('settings-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'settings-status' + (cls ? ' ' + cls : '');
+}
+
+async function browseLibraryFolder() {
+  const btn = document.getElementById('browse-library-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/settings/pick-folder');
+    const d = await r.json();
+    if (d.path) {
+      const el = document.getElementById('setting-PLASMID_USER_LIBRARY');
+      if (el) el.value = d.path;
+    } else if (d.error) {
+      alert(d.error);
+    }
+  } catch (e) {
+    alert('Could not open folder picker: ' + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}

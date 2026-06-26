@@ -529,22 +529,32 @@ Agent evals send natural language prompts through the full Claude agent loop and
 
 ```bash
 python -m evals.run_agent_evals
-python -m evals.run_agent_evals --case A1-001 -v
+python -m evals.run_agent_evals --case AS-001 -v
 python -m evals.run_agent_evals --model sonnet
 ```
 
-39 cases across 8 categories:
+68 cases across 18 series:
 
-| Category | Prefix | Description |
+| Series | Prefix | Description |
 |---|---|---|
-| Explicit backbone + insert | A1 | Both named directly — baseline correctness |
-| Alias / name resolution | A2 | Common aliases and variant spellings |
-| Natural language | A3 | Underspecified requests; agent must infer |
-| Specific insert types | A4 | Luciferase, epitope tags, tdTomato |
-| Multi-step workflow | A5 | Full 5-step: retrieve, assemble, validate, export |
-| NCBI gene retrieval | A6 | Species disambiguation, family disambiguation, alt names |
-| Protein tagging / fusions | A7 | N/C-terminal tags, NCBI + fusion, custom linkers |
-| Negative / balanced | A8 | Verifies agent does NOT over-trigger tools |
+| Explicit Assembly | AS | Both components named directly — baseline correctness |
+| Name / Alias Resolution | NR | Common aliases and variant spellings |
+| Natural Language | NL | Underspecified requests; agent must infer components |
+| Insert Types | IT | Luciferase, epitope tags, large inserts |
+| Workflow | WF | Full pipeline: retrieve, assemble, validate, export |
+| Gene Retrieval | GR | NCBI retrieval, species disambiguation, alt gene names |
+| Fusion Design | FU | N/C-terminal tags, NCBI + fusion, custom linkers |
+| Negative / Balanced | NE | Verifies agent does NOT over-trigger tools |
+| Disambiguation | DI | Species, gene family, variant selection, conflict detection, FPbase routing |
+| Confidence Score | CS | Design confidence scoring, cryptic signal detection |
+| Bespoke Promoter | BP | Non-standard promoter detection, user-paste, upstream fetch |
+| Intelligent Fusion | IF | Disorder-based internal fusion site prediction |
+| Mutation Design | MU | Curated GoF/LoF lookup, deterministic codon editing |
+| Troubleshooting | TR | Diagnose lab failures, propose remediation |
+| Golden Gate | GG | GG assembly, compound construct name parsing |
+| Extract / Download | EX | Addgene download, CDS extraction, GenBank export |
+| Parts Swap | SW | Annotation-driven cassette swap, linker swap, terminator swap |
+| Bulk Design | BK | Multi-construct routing to submit_bulk_designs |
 
 ### Verification rubric
 

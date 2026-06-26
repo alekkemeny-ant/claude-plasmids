@@ -38,7 +38,6 @@ from .assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
     find_mcs_insertion_point,
-    export_construct as _export_construct,
     clean_sequence,
     DEFAULT_FUSION_LINKER,
 )

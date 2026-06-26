@@ -18,7 +18,7 @@ import re
 import os
 from pathlib import Path
 from typing import Optional, Dict, List, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from urllib.parse import urljoin, quote
 import logging
 
@@ -272,6 +272,7 @@ class AddgeneClient:
     def _parse_api_response(self, data: Dict) -> AddgenePlasmid:
         """Parse official API response into AddgenePlasmid."""
         cloning = data.get("cloning") or {}
+
         return AddgenePlasmid(
             addgene_id=str(data.get("id", "")),
             name=data.get("name"),

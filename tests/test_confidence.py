@@ -7,8 +7,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from confidence import (
-    ConfidenceCheck,
-    ConfidenceReport,
     check_cai,
     check_cryptic_polya,
     check_cryptic_splice,

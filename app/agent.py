@@ -35,7 +35,7 @@ from claude_agent_sdk import (
     ToolResultBlock,
     PermissionResultAllow,
 )
-from src.tools import build_mcp_servers, set_tracker, get_tracker
+from src.tools import build_mcp_servers, set_tracker
 from src.references import ReferenceTracker
 
 # Load system prompt

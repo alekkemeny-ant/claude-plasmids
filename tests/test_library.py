@@ -18,7 +18,6 @@ from library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
-    design_construct,
 )
 
 

@@ -43,7 +43,6 @@ from .library import (
 from .assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
-    find_mcs_insertion_point,
     resolve_insertion_point,
     clean_sequence,
     validate_dna,
@@ -77,13 +76,6 @@ try:
     GENOMIC_UPSTREAM_AVAILABLE = True
 except ImportError:
     GENOMIC_UPSTREAM_AVAILABLE = False
-
-# Bespoke promoter detection
-try:
-    from .library import is_known_promoter as _is_known_promoter  # noqa: F401
-    PROMOTER_DETECTION_AVAILABLE = True
-except ImportError:
-    PROMOTER_DETECTION_AVAILABLE = False
 
 # ── Phase-2 advanced design modules ──
 # Design Confidence Score

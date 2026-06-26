@@ -19,7 +19,6 @@ from assembler import (
     _excise_insert,
     assemble_golden_gate,
     reverse_complement,
-    clean_sequence,
 )
 
 

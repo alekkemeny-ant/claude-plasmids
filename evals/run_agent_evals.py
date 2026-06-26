@@ -11,7 +11,7 @@ production agent (app/agent.py), so evals test the real system.
 
 Usage:
     python -m evals.run_agent_evals                     # Run all agent eval cases
-    python -m evals.run_agent_evals --case A1-001       # Run a single case
+    python -m evals.run_agent_evals --case AS-001       # Run a single case
     python -m evals.run_agent_evals --verbose           # Show full agent trace
     python -m evals.run_agent_evals --model sonnet      # Use a different model
 """
@@ -50,7 +50,7 @@ from claude_agent_sdk import (
     PermissionResultAllow,
 )
 from claude_agent_sdk.types import UserMessage
-from src.tools import build_mcp_servers, create_plasmid_tools, ALL_TOOL_NAMES
+from src.tools import build_mcp_servers
 from src.library import (
     get_backbone_by_id,
     get_insert_by_id,
@@ -133,9 +133,9 @@ class AgentTestCase:
 
 
 AGENT_CASES = [
-    # ── A1: Explicit backbone + insert (pcDNA3.1(+) baseline) ─────────
+    # ── AS: Explicit Assembly ───────────────────────────────────────────
     AgentTestCase(
-        id="A1-001",
+        id="AS-001",
         name="Explicit EGFP in pcDNA3.1(+)",
         prompt="Design an EGFP expression plasmid using pcDNA3.1(+) as the backbone. Assemble the construct and give me the final sequence.",
         description="Straightforward request with both backbone and insert named explicitly.",
@@ -146,7 +146,7 @@ AGENT_CASES = [
         tags=["explicit", "mammalian", "fluorescent_protein"],
     ),
     AgentTestCase(
-        id="A1-002",
+        id="AS-002",
         name="Explicit mCherry in pcDNA3.1(+)",
         prompt="Put mCherry into pcDNA3.1(+) and assemble the construct. Return the assembled sequence.",
         description="Direct request with both components specified.",
@@ -157,7 +157,7 @@ AGENT_CASES = [
         tags=["explicit", "mammalian", "fluorescent_protein"],
     ),
     AgentTestCase(
-        id="A1-003",
+        id="AS-003",
         name="EGFP in pUC19",
         prompt="Assemble EGFP into pUC19. Give me the complete construct sequence.",
         description="Bacterial backbone with a fluorescent protein insert.",
@@ -167,9 +167,9 @@ AGENT_CASES = [
         expected_total_size=3406,
         tags=["explicit", "bacterial", "fluorescent_protein"],
     ),
-    # ── A1: Explicit — new backbone coverage ──────────────────────────
+    # ── AS: Additional backbones ─────────────────────────────────────
     AgentTestCase(
-        id="A1-004",
+        id="AS-004",
         name="EGFP in pBABE-puro",
         prompt="Assemble EGFP into pBABE-puro. Give me the assembled sequence.",
         description="Retroviral expression vector. Tests a non-pcDNA mammalian backbone.",
@@ -180,7 +180,7 @@ AGENT_CASES = [
         tags=["explicit", "mammalian", "fluorescent_protein", "retroviral"],
     ),
     AgentTestCase(
-        id="A1-005",
+        id="AS-005",
         name="EGFP in pGEX-4T-1",
         prompt="Insert EGFP into pGEX-4T-1 and assemble the construct. Return the sequence.",
         description="Bacterial GST-fusion vector. Tests tac promoter backbone.",
@@ -191,7 +191,7 @@ AGENT_CASES = [
         tags=["explicit", "bacterial", "fluorescent_protein"],
     ),
     AgentTestCase(
-        id="A1-006",
+        id="AS-006",
         name="Luciferase in pAAV-CMV",
         prompt="Assemble firefly luciferase into the pAAV-CMV vector. Output the assembled sequence.",
         description="AAV gene therapy backbone with a reporter insert.",
@@ -202,7 +202,7 @@ AGENT_CASES = [
         tags=["explicit", "mammalian", "reporter", "aav"],
     ),
     AgentTestCase(
-        id="A1-007",
+        id="AS-007",
         name="EGFP in pLKO.1-puro",
         prompt="Put EGFP into pLKO.1-puro and assemble. Return the final sequence.",
         description="Lentiviral vector. Tests a larger backbone (7050 bp) with U6 promoter.",
@@ -213,7 +213,7 @@ AGENT_CASES = [
         tags=["explicit", "mammalian", "fluorescent_protein", "lentiviral"],
     ),
     AgentTestCase(
-        id="A1-008",
+        id="AS-008",
         name="mCherry in pEGFP-N1",
         prompt="Insert mCherry into the MCS of pEGFP-N1 and assemble the construct. Return the sequence.",
         description="C-terminal EGFP fusion vector with mCherry at MCS. Tests pEGFP-N1 backbone.",
@@ -224,7 +224,7 @@ AGENT_CASES = [
         tags=["explicit", "mammalian", "fluorescent_protein"],
     ),
     AgentTestCase(
-        id="A1-009",
+        id="AS-009",
         name="EGFP in pcDNA3",
         prompt="Assemble EGFP into pcDNA3. Return the assembled construct sequence.",
         description="Older pcDNA3 vector (not pcDNA3.1). Agent must not confuse with pcDNA3.1.",
@@ -234,9 +234,9 @@ AGENT_CASES = [
         expected_total_size=6173,
         tags=["explicit", "mammalian", "fluorescent_protein"],
     ),
-    # ── A2: Alias / name resolution ───────────────────────────────────
+    # ── NR: Name / Alias Resolution ────────────────────────────────────
     AgentTestCase(
-        id="A2-001",
+        id="NR-001",
         name="Alias: 'eGFP' resolution",
         prompt="Insert eGFP into pcDNA3.1+ and assemble the construct. Output the raw sequence.",
         description="Uses common aliases: 'eGFP' for EGFP, 'pcDNA3.1+' for pcDNA3.1(+).",
@@ -247,7 +247,7 @@ AGENT_CASES = [
         tags=["alias", "name_resolution", "mammalian"],
     ),
     AgentTestCase(
-        id="A2-002",
+        id="NR-002",
         name="Alias: 'GFP' resolution",
         prompt="I need a GFP expression plasmid in pcDNA3.1 plus. Assemble and return the sequence.",
         description="Uses 'GFP' (should resolve to EGFP) and 'pcDNA3.1 plus'.",
@@ -258,7 +258,7 @@ AGENT_CASES = [
         tags=["alias", "name_resolution", "mammalian"],
     ),
     AgentTestCase(
-        id="A2-003",
+        id="NR-003",
         name="Alias: 'pBABE puro' resolution",
         prompt="Clone mCherry into pBABE puro and assemble. Give me the final sequence.",
         description="Uses 'pBABE puro' alias for pBABE-puro.",
@@ -269,7 +269,7 @@ AGENT_CASES = [
         tags=["alias", "name_resolution", "mammalian", "retroviral"],
     ),
     AgentTestCase(
-        id="A2-004",
+        id="NR-004",
         name="Alias: 'pGEX' resolution",
         prompt="Insert Renilla luciferase into pGEX and assemble. Return the construct.",
         description="Uses 'pGEX' alias for pGEX-4T-1.",
@@ -280,7 +280,7 @@ AGENT_CASES = [
         tags=["alias", "name_resolution", "bacterial", "reporter"],
     ),
     AgentTestCase(
-        id="A2-005",
+        id="NR-005",
         name="Alias: 'pcDNA3.1-' resolution",
         prompt="Put EGFP into pcDNA3.1- and assemble. Return the assembled DNA sequence.",
         description="Uses 'pcDNA3.1-' alias for pcDNA3.1(-).",
@@ -290,9 +290,9 @@ AGENT_CASES = [
         expected_total_size=6148,  # pcDNA3.1(-) 5428bp + EGFP 720bp
         tags=["alias", "name_resolution", "mammalian"],
     ),
-    # ── A3: Natural language / underspecified ──────────────────────────
+    # ── NL: Natural Language ─────────────────────────────────────────────
     AgentTestCase(
-        id="A3-001",
+        id="NL-001",
         name="Natural language: mammalian GFP",
         prompt=(
             "I want to express a green fluorescent protein in mammalian cells. "
@@ -309,7 +309,7 @@ AGENT_CASES = [
         tags=["natural_language", "mammalian", "fluorescent_protein"],
     ),
     AgentTestCase(
-        id="A3-002",
+        id="NL-002",
         name="Natural language: bacterial reporter",
         prompt=(
             "I need a luciferase reporter plasmid for E. coli. "
@@ -334,7 +334,7 @@ AGENT_CASES = [
         ),
     ),
     AgentTestCase(
-        id="A3-003",
+        id="NL-003",
         name="Natural language: retroviral red FP",
         prompt=(
             "I'm doing retroviral transduction and need a red fluorescent protein marker. "
@@ -354,9 +354,9 @@ AGENT_CASES = [
             "is exactly right for retroviral + puromycin. Proceed with assembly."
         ),
     ),
-    # ── A4: Specific insert types ─────────────────────────────────────
+    # ── IT: Insert Types ─────────────────────────────────────────────────
     AgentTestCase(
-        id="A4-001",
+        id="IT-001",
         name="Luciferase reporter",
         prompt="Assemble a firefly luciferase reporter construct in pcDNA3.1(+). Return the sequence.",
         description="Tests a larger insert (1653 bp luciferase).",
@@ -367,7 +367,7 @@ AGENT_CASES = [
         tags=["explicit", "mammalian", "reporter"],
     ),
     AgentTestCase(
-        id="A4-002",
+        id="IT-002",
         name="FLAG tag insert",
         prompt="Add a FLAG tag to pcDNA3.1(+). Assemble and output the construct.",
         description="Very short insert (24 bp FLAG tag).",
@@ -384,7 +384,7 @@ AGENT_CASES = [
         ),
     ),
     AgentTestCase(
-        id="A4-003",
+        id="IT-003",
         name="HA tag in pcDNA3.1(-)",
         prompt="Clone an HA tag into pcDNA3.1(-) and assemble the construct. Give me the sequence.",
         description="Short epitope tag in pcDNA3.1(-) backbone. (+)/(-) refers to MCS direction, not insert orientation.",
@@ -400,7 +400,7 @@ AGENT_CASES = [
         ),
     ),
     AgentTestCase(
-        id="A4-004",
+        id="IT-004",
         name="tdTomato large insert",
         prompt="Assemble tdTomato into pBABE-puro and return the sequence.",
         description="Large tandem dimer insert (1431 bp) in a retroviral vector.",
@@ -410,9 +410,9 @@ AGENT_CASES = [
         expected_total_size=6517,
         tags=["explicit", "mammalian", "fluorescent_protein", "retroviral"],
     ),
-    # ── A5: Multi-step workflow ────────────────────────────────────────
+    # ── WF: Workflow (multi-step) ─────────────────────────────────────────
     AgentTestCase(
-        id="A5-001",
+        id="WF-001",
         name="GenBank export workflow",
         prompt=(
             "Design an EGFP expression plasmid using pcDNA3.1(+). "
@@ -429,7 +429,7 @@ AGENT_CASES = [
         tags=["workflow", "mammalian", "fluorescent_protein"],
     ),
     AgentTestCase(
-        id="A5-002",
+        id="WF-002",
         name="Full workflow: pBABE-puro + mCherry validated",
         prompt=(
             "Design and assemble a mCherry expression construct in pBABE-puro. "
@@ -446,7 +446,7 @@ AGENT_CASES = [
         tags=["workflow", "mammalian", "fluorescent_protein", "retroviral"],
     ),
     AgentTestCase(
-        id="A5-003",
+        id="WF-003",
         name="Full workflow: pGEX-4T-1 + EGFP validated",
         prompt=(
             "I need an EGFP-GST fusion construct for bacterial expression. "
@@ -462,7 +462,7 @@ AGENT_CASES = [
         expected_total_size=5689,
         tags=["workflow", "bacterial", "fluorescent_protein"],
     ),
-    # ── A6: NCBI Gene Retrieval (Allen Institute sample prompts) ─────────
+    # ── GR: Gene Retrieval (NCBI) ────────────────────────────────────────
     # These are the exact prompts from the Allen Institute reference doc.
     # They test NCBI gene retrieval, species disambiguation, gene family
     # disambiguation, variant disambiguation, and alternative name resolution.
@@ -472,7 +472,7 @@ AGENT_CASES = [
     # Disambiguation cases (A6-002 through A6-006) may ask clarifying questions
     # rather than immediately assembling — scoring should account for this.
     AgentTestCase(
-        id="A6-001",
+        id="GR-001",
         name="Allen: sfGFP in pcDNA3.1(+)",
         prompt=(
             "Using pcDNA3.1(+) as a backbone, design a plasmid to express "
@@ -488,7 +488,7 @@ AGENT_CASES = [
         tags=["ncbi", "mammalian", "fluorescent_protein", "allen_sample", "smart_skip"],
     ),
     AgentTestCase(
-        id="A6-002",
+        id="GR-002",
         name="Allen: MyD88 species disambiguation",
         prompt="Design a vector to allow expression of MyD88 in RAW 264 cells",
         description=(
@@ -511,7 +511,7 @@ AGENT_CASES = [
         ),
     ),
     AgentTestCase(
-        id="A6-003",
+        id="GR-003",
         name="Allen: TRAF gene family disambiguation",
         prompt="Design a vector to allow transient overexpression of TRAF in Raw 264.7",
         description=(
@@ -533,7 +533,7 @@ AGENT_CASES = [
         ),
     ),
     AgentTestCase(
-        id="A6-004",
+        id="GR-004",
         name="Allen: TRAF by full name (alternative name resolution)",
         prompt=(
             "Design a vector to allow transient overexpression of TNF receptor "
@@ -556,7 +556,7 @@ AGENT_CASES = [
         ),
     ),
     AgentTestCase(
-        id="A6-005",
+        id="GR-005",
         name="Allen: RFP variant disambiguation",
         prompt="Design an expression vector for expression of RFP in human cells",
         description=(
@@ -577,7 +577,7 @@ AGENT_CASES = [
         ),
     ),
     AgentTestCase(
-        id="A6-006",
+        id="GR-006",
         name="Allen: SERPINE1/PAI-1 alternative name",
         prompt=(
             "Design a plasmid to express PAI-1 in HEK293 cells using pcDNA3.1(+). "
@@ -598,7 +598,7 @@ AGENT_CASES = [
         ),
     ),
     AgentTestCase(
-        id="A6-007",
+        id="GR-007",
         name="NL backbone: mammalian vector with neomycin resistance",
         prompt=(
             "I need a mammalian expression vector with neomycin resistance to "
@@ -616,9 +616,9 @@ AGENT_CASES = [
         expected_total_size=6148,
         tags=["natural_language", "mammalian", "backbone_selection", "allen_sample"],
     ),
-    # ── A7: Protein Tagging / Fusions ─────────────────────────────────
+    # ── FU: Fusion Design ────────────────────────────────────────────────
     AgentTestCase(
-        id="A7-001",
+        id="FU-001",
         name="Fusion: N-terminal FLAG-EGFP",
         prompt=(
             "Add an N-terminal FLAG tag to EGFP in pcDNA3.1(+). "
@@ -656,7 +656,7 @@ AGENT_CASES = [
         ],
     ),
     AgentTestCase(
-        id="A7-002",
+        id="FU-002",
         name="Fusion: C-terminal mCherry-HA",
         prompt=(
             "Express a C-terminal HA-tagged mCherry in pcDNA3.1(+). "
@@ -693,7 +693,7 @@ AGENT_CASES = [
         ],
     ),
     AgentTestCase(
-        id="A7-003",
+        id="FU-003",
         name="Fusion: H2B-EGFP (NCBI + fusion)",
         prompt=(
             "Create a mammalian expression plasmid for a fusion of H2B to eGFP, "
@@ -730,7 +730,7 @@ AGENT_CASES = [
         ),
     ),
     AgentTestCase(
-        id="A7-004",
+        id="FU-004",
         name="Fusion: H2B-EGFP with user-specified custom linker",
         prompt=(
             "Create a mammalian expression plasmid for H2B-eGFP. "
@@ -782,7 +782,7 @@ AGENT_CASES = [
         ),
     ),
     AgentTestCase(
-        id="A7-005",
+        id="FU-005",
         name="Fusion: H2B-EGFP (NCBI + fusion), relaxed natural language",
         prompt=(
             "Create a mammalian expression plasmid for H2B-eGFP, "
@@ -818,13 +818,13 @@ AGENT_CASES = [
             "mammalian expression — pcDNA3.1(+) is fine."
         ),
     ),
-    # ── A8: Negative / balanced cases (blog Step 3) ───────────────────
+    # ── NE: Negative / Balanced Cases ─────────────────────────────────────
     # Per the blog: "Test both the cases where a behavior should occur and
     # where it shouldn't. One-sided evals create one-sided optimization."
     # These test that the agent does NOT over-trigger NCBI or fuse_inserts
     # when the insert is already in the local library.
     AgentTestCase(
-        id="A8-001",
+        id="NE-001",
         name="Negative: EGFP should NOT trigger NCBI",
         prompt=(
             "Put EGFP into pcDNA3.1(+) and assemble the construct. "
@@ -842,7 +842,7 @@ AGENT_CASES = [
         tools_should_not_use=["search_gene", "fetch_gene"],
     ),
     AgentTestCase(
-        id="A8-002",
+        id="NE-002",
         name="Negative: mCherry should NOT trigger NCBI",
         prompt=(
             "Assemble mCherry into pcDNA3.1(+). Return the sequence."
@@ -858,7 +858,7 @@ AGENT_CASES = [
         tools_should_not_use=["search_gene", "fetch_gene"],
     ),
     AgentTestCase(
-        id="A8-003",
+        id="NE-003",
         name="Negative: simple EGFP should NOT fuse",
         prompt=(
             "Design an EGFP expression plasmid using pcDNA3.1(+). "
@@ -877,13 +877,13 @@ AGENT_CASES = [
     ),
 
     # ══════════════════════════════════════════════════════════════════
-    # P1: Phase 1 Acceptance Prompts (Allen Institute Reference Doc)
+    # DI: Disambiguation
     # ══════════════════════════════════════════════════════════════════
-    # These 7 prompts are the acceptance criteria for Phase 1 completion.
-    # Each exercises a specific disambiguation or routing behavior.
+    # Tests species inference, gene family resolution, variant selection,
+    # backbone conflict detection, and FPbase routing.
 
     AgentTestCase(
-        id="P1-SP1",
+        id="DI-001",
         name="sfGFP in pcDNA3.1(+) for HEK293",
         prompt=(
             "Design an expression vector for Super Folder GFP (sfGFP) "
@@ -901,7 +901,7 @@ AGENT_CASES = [
     ),
 
     AgentTestCase(
-        id="P1-SP2",
+        id="DI-002",
         name="MyD88 in RAW 264 cells (species + backbone inference)",
         prompt="Design an expression vector for MyD88 in RAW 264 cells.",
         description=(
@@ -922,7 +922,7 @@ AGENT_CASES = [
     ),
 
     AgentTestCase(
-        id="P1-SP3",
+        id="DI-003",
         name="TRAF transient overexpression in Raw 264.7 (family disambiguation)",
         prompt=(
             "Design a vector for TRAF transient overexpression in Raw 264.7 cells."
@@ -944,7 +944,7 @@ AGENT_CASES = [
     ),
 
     AgentTestCase(
-        id="P1-SP4",
+        id="DI-004",
         name="TNF receptor associated factor long-name recognition",
         prompt=(
             "Design a vector for TNF receptor associated factor "
@@ -967,7 +967,7 @@ AGENT_CASES = [
     ),
 
     AgentTestCase(
-        id="P1-SP5",
+        id="DI-005",
         name="RFP in human cells (FP variant disambiguation)",
         prompt="Design an expression vector for RFP in human cells.",
         description=(
@@ -985,7 +985,7 @@ AGENT_CASES = [
     ),
 
     AgentTestCase(
-        id="P1-SP6",
+        id="DI-006",
         name="eGFP driven by SV40 in pcDNA3.1(+) (promoter conflict)",
         prompt=(
             "Design an expression vector for eGFP (driven by SV40) "
@@ -1007,7 +1007,7 @@ AGENT_CASES = [
     ),
 
     AgentTestCase(
-        id="P1-SP7",
+        id="DI-007",
         name="mRuby in HEK293 (FPbase routing, no hallucination, fail-closed)",
         prompt=(
             "Design an expression vector for mRuby in HEK293 cells, "
@@ -1038,25 +1038,11 @@ AGENT_CASES = [
         tools_should_not_use=["search_gene"],  # must NOT try NCBI Gene
     ),
 
-    # ══════════════════════════════════════════════════════════════════
-    # P2: Phase 2 Advanced Design Features (Anthropic-assigned)
-    # ══════════════════════════════════════════════════════════════════
-    # These cases exercise the 5 Anthropic-assigned features from the
-    # Allen Institute Epics & Prioritization doc:
-    #   - Design Confidence Score (cryptic signals, CAI, Kozak, etc.)
-    #   - Bespoke Promoters (detect non-standard, offer 3 options, no loop)
-    #   - Intelligent Fusion Design (disorder-based internal fusion sites)
-    #   - Smart Mutation Design (curated GoF/LoF lookup + deterministic edit)
-    #   - Troubleshooting Mode (diagnose failure → propose remediation)
-    #
-    # Most of these are TRANSCRIPT-assertion evals (did the agent say/do
-    # the right thing?), not sequence-correctness evals. expected_backbone_id
-    # and expected_insert_id are still required by the schema but the key
-    # grading signal is transcript_assertions + tool usage.
+    # (Advanced features — CS, BP, IF, MU, TR — follow below)
 
-    # ── P2-DCS: Design Confidence Score ────────────────────────────────
+    # ── CS: Confidence Score ──────────────────────────────────────────────
     AgentTestCase(
-        id="P2-DCS1",
+        id="CS-001",
         name="Confidence score surfaces cryptic polyA warning",
         prompt=(
             "I have a custom CDS I want to express in HEK293 cells using "
@@ -1096,7 +1082,7 @@ AGENT_CASES = [
     ),
 
     AgentTestCase(
-        id="P2-DCS2",
+        id="CS-002",
         name="Confidence score on clean CDS returns high score",
         prompt=(
             "I want to express EGFP in HEK293 using pcDNA3.1(+). Before "
@@ -1116,9 +1102,9 @@ AGENT_CASES = [
         user_persona="Looks good, please proceed with assembly.",
     ),
 
-    # ── P2-BP: Bespoke Promoters ───────────────────────────────────────
+    # ── BP: Bespoke Promoter ──────────────────────────────────────────────
     AgentTestCase(
-        id="P2-BP1",
+        id="BP-001",
         name="p65 promoter reporter — detect bespoke, offer options, no loop",
         prompt=(
             "Design a p65 promoter reporter construct for stable expression "
@@ -1158,7 +1144,7 @@ AGENT_CASES = [
     ),
 
     AgentTestCase(
-        id="P2-BP2",
+        id="BP-002",
         name="IFNβ promoter — user pastes sequence",
         prompt=(
             "I want to build an IFNβ promoter reporter. I have the IFNβ "
@@ -1192,9 +1178,9 @@ AGENT_CASES = [
         ),
     ),
 
-    # ── P2-IF: Intelligent Fusion Design ───────────────────────────────
+    # ── IF: Intelligent Fusion (internal sites) ───────────────────────────
     AgentTestCase(
-        id="P2-IF1",
+        id="IF-001",
         name="Internal fusion site for buried-terminus protein",
         prompt=(
             "I want to tag human TP53 with EGFP for live-cell imaging in "
@@ -1227,9 +1213,9 @@ AGENT_CASES = [
         ),
     ),
 
-    # ── P2-SM: Smart Mutation Design ───────────────────────────────────
+    # ── MU: Mutation Design ───────────────────────────────────────────────
     AgentTestCase(
-        id="P2-SM1",
+        id="MU-001",
         name="Constitutively active BRAF — curated V600E lookup",
         prompt=(
             "I want to express a constitutively active human BRAF in "
@@ -1258,7 +1244,7 @@ AGENT_CASES = [
     ),
 
     AgentTestCase(
-        id="P2-SM2",
+        id="MU-002",
         name="Loss-of-function PTEN — curated + premature stop fallback",
         prompt=(
             "I need a kinase-dead PTEN (loss of function) for a rescue "
@@ -1284,9 +1270,9 @@ AGENT_CASES = [
         ),
     ),
 
-    # ── P2-TM: Troubleshooting Mode ────────────────────────────────────
+    # ── TR: Troubleshooting ───────────────────────────────────────────────
     AgentTestCase(
-        id="P2-TM1",
+        id="TR-001",
         name="Troubleshooting — no expression, agent diagnoses cryptic polyA",
         prompt=(
             "I previously designed a pcDNA3.1(+)-myGene construct with you "
@@ -1335,7 +1321,7 @@ AGENT_CASES = [
     ),
 
     AgentTestCase(
-        id="P2-TM2",
+        id="TR-002",
         name="Troubleshooting — fusion misfolding, agent suggests internal site",
         prompt=(
             "Follow-up on a fusion design: I made a C-terminal EGFP fusion "
@@ -1367,9 +1353,9 @@ AGENT_CASES = [
         ),
     ),
 
-    # ── A9: Golden Gate assembly (Allen Institute modular system) ─────────
+    # ── GG: Golden Gate Assembly ──────────────────────────────────────────
     AgentTestCase(
-        id="A9-001",
+        id="GG-001",
         name="Golden Gate: X0001 backbone + three AICS parts (explicit IDs)",
         prompt=(
             "Using Golden Gate assembly, design a vector using the backbone X0001 "
@@ -1401,7 +1387,7 @@ AGENT_CASES = [
         tags=["golden_gate", "allen_institute", "modular_system", "multi_part"],
     ),
     AgentTestCase(
-        id="A9-002",
+        id="GG-002",
         name="Golden Gate: compound construct name (ABC_XYZ-XXYYY_LMN_OhP)",
         prompt=(
             "Using Golden Gate assembly, design the following vector: ABC_XYZ-XXYYY_LMN_OhP."
@@ -1443,9 +1429,9 @@ AGENT_CASES = [
         ),
     ),
 
-    # ── A10: Insert extraction from Addgene plasmids ──────────────────
+    # ── EX: Extract / Download from Addgene ───────────────────────────────
     AgentTestCase(
-        id="A10-001",
+        id="EX-001",
         name="Extract mCerulean CDS from Addgene #27796",
         prompt=(
             "Download the plasmid 27796 from addgene and extract the mCerulean "
@@ -1485,7 +1471,7 @@ AGENT_CASES = [
         tags=["addgene", "extraction", "fluorescent_protein", "single_insert"],
     ),
     AgentTestCase(
-        id="A10-002",
+        id="EX-002",
         name="Download Addgene #244170 and export as GenBank",
         prompt="Download the plasmid 244170 and export as a genbank file",
         description=(
@@ -1511,7 +1497,7 @@ AGENT_CASES = [
         tags=["addgene", "export", "genbank", "whole_plasmid"],
     ),
     AgentTestCase(
-        id="A10-003",
+        id="EX-003",
         name="mCerulean-His transient overexpression in mammalian vector",
         prompt=(
             "Design a mammalian expression vector for transient overexpression of "
@@ -1544,9 +1530,9 @@ AGENT_CASES = [
         max_tool_calls=25,
         tags=["addgene", "extraction", "fusion", "mammalian", "his_tag"],
     ),
-    # ── A11: Parts swap — annotation-driven, multi-turn, duplicate-marker check ──
+    # ── SW: Parts Swap ────────────────────────────────────────────────────
     AgentTestCase(
-        id="A11-001",
+        id="SW-001",
         name="CMV-GFP to EF1s-Nluc-P2A-copGFP-T2A-Puro parts swap (annotation-driven)",
         prompt=(
             "Starting with plasmid #17448 from Addgene, swap the first cassette "
@@ -1792,9 +1778,9 @@ AGENT_CASES = [
         ),
         tags=["addgene", "parts_swap", "annotation_driven", "multi_turn", "simulated_user"],
     ),
-    # ── A11-002: Linker swap — (GGGGS)5 → GSAGSAAGSGEF in pSH-Csy4-T2A-SpRFN ──
+    # ── SW-002: Linker swap — (GGGGS)5 → GSAGSAAGSGEF ──────────────────────
     AgentTestCase(
-        id="A11-002",
+        id="SW-002",
         name="Replace (GGGGS)5 linker with GSAGSAAGSGEF in pSH-Csy4-T2A-SpRFN",
         prompt=(
             "Starting with the base plasmid pSH-Csy4-T2A-SpRFN, replace its 25 amino "
@@ -1841,9 +1827,9 @@ AGENT_CASES = [
         max_tool_calls=30,
         tags=["linker_swap", "parts_swap", "user_library", "crispr"],
     ),
-    # ── A11-003: Linker swap — fokIR↔Cas9 VQR junction → GSAGSAAGSGEF ──
+    # ── SW-003: Linker swap — fokIR↔Cas9 VQR junction → GSAGSAAGSGEF ──────
     AgentTestCase(
-        id="A11-003",
+        id="SW-003",
         name="Replace fokIR–Cas9 VQR linker with GSAGSAAGSGEF in pSH-Csy4-T2A-SpRFN",
         prompt=(
             "Starting with the base plasmid pSH-Csy4-T2A-SpRFN, replace the linker "
@@ -1889,9 +1875,9 @@ AGENT_CASES = [
         max_tool_calls=35,
         tags=["linker_swap", "parts_swap", "user_library", "crispr", "domain_junction"],
     ),
-    # ── A11-004: Terminator swap across opposite strand orientations ───────────
+    # ── SW-004: Terminator swap — opposite strand orientations ────────────
     AgentTestCase(
-        id="A11-004",
+        id="SW-004",
         name="CYC1 ↔ ADH1 terminator swap in pCEV-G1-Km (opposite strand orientations)",
         prompt=(
             "Starting from the Plasmid pCEV-G1-Km, there are two expression cassettes. "
@@ -2066,9 +2052,9 @@ AGENT_CASES = [
         tags=["parts_swap", "terminator_swap", "orientation", "yeast", "reverse_strand"],
     ),
 
-    # ── B1: Bulk design routing (submit_bulk_designs tool) ────────────────
+    # ── BK: Bulk Design Routing ───────────────────────────────────────────
     AgentTestCase(
-        id="B1-001",
+        id="BK-001",
         name="Bulk routing: three fluorescent proteins in pcDNA3.1",
         description="Agent should call submit_bulk_designs for a 3-construct request, not assemble immediately",
         prompt=(
@@ -2087,7 +2073,7 @@ AGENT_CASES = [
         tags=["bulk", "routing"],
     ),
     AgentTestCase(
-        id="B1-002",
+        id="BK-002",
         name="Bulk routing: named rows registered with correct names",
         description="submit_bulk_designs acknowledgment should include both user-specified construct names",
         prompt=(
@@ -2105,7 +2091,7 @@ AGENT_CASES = [
         tags=["bulk", "routing"],
     ),
     AgentTestCase(
-        id="B1-003",
+        id="BK-003",
         name="Bulk routing: agent stops after registering, does not assemble",
         description="After calling submit_bulk_designs the agent must NOT call assembly tools",
         prompt=(

@@ -17,12 +17,10 @@ graph acyclic.
 import json
 import logging
 import os
-import shutil
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

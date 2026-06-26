@@ -12,10 +12,8 @@ from src.gg_denovo import (
     _design_annealing_oligos,
     _design_gblock,
     _design_insert_cassette,
-    _design_part_in_vector,
     select_overhangs,
     design_golden_gate_oligos,
-    AnnealingOligo,
 )
 from src.assembler import GG_ENZYMES, reverse_complement
 from src.library import get_backbone_by_id

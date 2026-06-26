@@ -15,10 +15,8 @@ from typing import Optional
 import os, sys
 
 try:
-    from assembler import reverse_complement as rc
     from assembler import validate_dna
 except ModuleNotFoundError:
-    from src.assembler import reverse_complement as rc
     from src.assembler import validate_dna
 
 # Library path
@@ -30,11 +28,11 @@ logger = logging.getLogger(__name__)
 # Try relative import first (when loaded as a package), then fall back to
 # absolute import (when src/ is on sys.path directly, as app.py does).
 try:
-    from .addgene_integration import AddgeneClient, AddgeneLibraryIntegration
+    from .addgene_integration import AddgeneClient
     ADDGENE_AVAILABLE = True
 except ImportError:
     try:
-        from addgene_integration import AddgeneClient, AddgeneLibraryIntegration
+        from addgene_integration import AddgeneClient
         ADDGENE_AVAILABLE = True
     except ImportError:
         ADDGENE_AVAILABLE = False

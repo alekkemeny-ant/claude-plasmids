@@ -24,7 +24,6 @@ import os
 import sys
 import threading
 import time
-from typing import Optional
 
 import anthropic
 
@@ -38,7 +37,6 @@ from src.tools import (
 from src.references import ReferenceTracker
 
 from sessions import (
-    _sessions,
     _cancelled_sessions,
     _active_turns,
     _session_live_streams,

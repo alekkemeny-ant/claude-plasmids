@@ -6,9 +6,9 @@ Tests the core library functions without requiring MCP.
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from library import (
+from src.library import (
     load_backbones,
     load_inserts,
     search_backbones,
@@ -18,6 +18,7 @@ from library import (
     validate_dna_sequence,
     format_backbone_summary,
     format_insert_summary,
+    find_duplicate_annotations,
 )
 
 
@@ -157,6 +158,32 @@ def test_mcs_info():
     print(f"  ✓ pET-28a(+) MCS: {mcs['start']}-{mcs['end']}")
 
 
+def test_find_duplicate_annotations():
+    """find_duplicate_annotations flags true duplicates but ignores partial hits."""
+    print("\nTesting duplicate annotation detection...")
+
+    def _feat(name, length, fragment=False, ftype="promoter", pct=100.0):
+        return {"name": name, "type": ftype, "length": length,
+                "pct_identity": pct, "fragment": fragment}
+
+    # A full-length feature plus a short partial hit of the same reference is
+    # NOT a duplicate (mirrors pLannotate's SV40 promoter 330 bp + 22 bp fragment).
+    features = [
+        _feat("SV40 promoter", 330, fragment=False),
+        _feat("SV40 promoter", 22, fragment=True),
+    ]
+    assert find_duplicate_annotations(features) == []
+    print("  ✓ full-length + fragment of same feature not flagged")
+
+    # Two genuine full-length copies ARE a duplicate.
+    dupes = find_duplicate_annotations([
+        _feat("EGFP", 720, fragment=False, ftype="CDS"),
+        _feat("EGFP", 720, fragment=False, ftype="CDS"),
+    ])
+    assert len(dupes) == 1 and dupes[0]["count"] == 2
+    print("  ✓ two full-length copies flagged as duplicate")
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -171,7 +198,8 @@ def main():
         test_validate_sequence()
         test_format_output()
         test_mcs_info()
-        
+        test_find_duplicate_annotations()
+
         print("\n" + "=" * 60)
         print("ALL TESTS PASSED ✓")
         print("=" * 60)

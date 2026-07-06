@@ -12,100 +12,64 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
-import os, sys
 
-try:
-    from assembler import validate_dna
-except ModuleNotFoundError:
-    from src.assembler import validate_dna
+from src.assembler import validate_dna
 
-# Library path
-LIBRARY_PATH = Path(__file__).parent.parent / "library"
+# Library path (src/library/ -> src/ -> repo root -> library/ data dir)
+LIBRARY_PATH = Path(__file__).parent.parent.parent / "library"
 
 logger = logging.getLogger(__name__)
 
 # Optional Addgene integration (gracefully degrades if not available)
-# Try relative import first (when loaded as a package), then fall back to
-# absolute import (when src/ is on sys.path directly, as app.py does).
 try:
-    from .addgene_integration import AddgeneClient
+    from src.addgene_integration import AddgeneClient
     ADDGENE_AVAILABLE = True
 except ImportError:
-    try:
-        from addgene_integration import AddgeneClient
-        ADDGENE_AVAILABLE = True
-    except ImportError:
-        ADDGENE_AVAILABLE = False
+    ADDGENE_AVAILABLE = False
 
 # Optional NCBI integration
 try:
-    from .ncbi_integration import (
+    from src.ncbi_integration import (
         fetch_gene_sequence as _ncbi_fetch_gene,
         search_gene as _ncbi_search_gene,
     )
     NCBI_AVAILABLE = True
 except ImportError:
-    try:
-        from ncbi_integration import (
-            fetch_gene_sequence as _ncbi_fetch_gene,
-            search_gene as _ncbi_search_gene,
-        )
-        NCBI_AVAILABLE = True
-    except ImportError:
-        NCBI_AVAILABLE = False
+    NCBI_AVAILABLE = False
 
 # Optional user library (BYOL — bring your own library)
 try:
-    from .user_library import load_user_backbones, load_user_inserts
+    from src.library.user import load_user_backbones, load_user_inserts
     USER_LIBRARY_AVAILABLE = True
 except ImportError:
-    try:
-        from user_library import load_user_backbones, load_user_inserts
-        USER_LIBRARY_AVAILABLE = True
-    except ImportError:
-        USER_LIBRARY_AVAILABLE = False
+    USER_LIBRARY_AVAILABLE = False
 
 # Vendor backbone library (Ansa, Twist, etc. — saved via save_vendor_backbone tool)
 try:
-    from .vendor_backbone import load_vendor_backbones
+    from src.library.vendor import load_vendor_backbones
     VENDOR_BACKBONE_AVAILABLE = True
 except ImportError:
-    try:
-        from vendor_backbone import load_vendor_backbones
-        VENDOR_BACKBONE_AVAILABLE = True
-    except ImportError:
-        VENDOR_BACKBONE_AVAILABLE = False
+    VENDOR_BACKBONE_AVAILABLE = False
 
 # Optional custom annotation DB (BYOA — bring your own annotations)
 try:
-    from .custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
+    from src.custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
     _CUSTOM_ANNOTATIONS_AVAILABLE = True
 except ImportError:
-    try:
-        from custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
-        _CUSTOM_ANNOTATIONS_AVAILABLE = True
-    except ImportError:
-        _CUSTOM_ANNOTATIONS_AVAILABLE = False
+    _CUSTOM_ANNOTATIONS_AVAILABLE = False
 
 if _CUSTOM_ANNOTATIONS_AVAILABLE:
     setup_custom_annotations()
 
 # Optional FPbase integration (fluorescent proteins — engineered, not in NCBI Gene)
 try:
-    from .fpbase_integration import (
+    from src.fpbase_integration import (
         fetch_fpbase_sequence as _fpbase_fetch,
         looks_like_fp_name as _looks_like_fp,
     )
     FPBASE_AVAILABLE = True
 except ImportError:
-    try:
-        from fpbase_integration import (
-            fetch_fpbase_sequence as _fpbase_fetch,
-            looks_like_fp_name as _looks_like_fp,
-        )
-        FPBASE_AVAILABLE = True
-    except ImportError:
-        FPBASE_AVAILABLE = False
+    FPBASE_AVAILABLE = False
 
 
 # ── Read-only mode (for evals / parallel-safe operation) ───────────────
@@ -1004,6 +968,8 @@ def annotate_plasmid(plasmid_sequence: str) -> list[dict]:
       - strand      : 1 (forward) or -1 (reverse) (int)
       - origin_spanning : True if the feature wraps around position 0 (bool)
       - pct_identity : % identity to the database reference (float, 0–100)
+      - fragment    : True if this is a partial hit covering only part of the
+                      reference feature (pLannotate's fragment flag) (bool)
       - description : free-text description from the pLannotate database (str)
 
     Coordinates are 0-based, end is exclusive (Python slice convention).
@@ -1013,21 +979,15 @@ def annotate_plasmid(plasmid_sequence: str) -> list[dict]:
     Returns an empty list if pLannotate is not installed or finds nothing.
     """
     import re as _re
-    import os, sys
     plasmid_sequence = _re.sub(r'\s', '', plasmid_sequence.upper())
 
+    from src.genbank_utils import run_plannotate_annotate
+
     try:
-        from plannotate.annotate import annotate
+        df = run_plannotate_annotate(plasmid_sequence, linear=False)
     except ImportError:
         logger.error("pLannotate is not installed. Run: conda install -c bioconda plannotate")
         return []
-
-    conda_bin = str(Path(sys.executable).parent)
-    if conda_bin not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
-
-    try:
-        df = annotate(plasmid_sequence, linear=False)
     except Exception as e:
         logger.error(f"annotate_plasmid: pLannotate failed: {e}")
         return []
@@ -1059,6 +1019,7 @@ def annotate_plasmid(plasmid_sequence: str) -> list[dict]:
             "strand":         strand,
             "origin_spanning": origin_spanning,
             "pct_identity":   round(float(row.get("pident", 0)), 1),
+            "fragment":       bool(row.get("fragment", False)),
             "description":    str(row.get("Description", "")),
         })
 
@@ -1077,6 +1038,10 @@ def find_duplicate_annotations(
     that are long enough and identity-matched enough to be unambiguous — this
     avoids false positives from short repeated regulatory sequences (e.g. LoxP).
 
+    Partial hits (pLannotate's fragment flag) are excluded: a construct with one
+    full-length feature plus a short fragment of the same reference is not a real
+    duplicate (e.g. the 330 bp SV40 promoter plus a 22 bp partial match).
+
     Each returned dict has:
       name:      canonical feature name (str)
       type:      feature type (str)
@@ -1093,7 +1058,8 @@ def find_duplicate_annotations(
         f for f in features
         if (f.get("length", 0) >= min_length
             and f.get("pct_identity", 0) >= min_pct_identity
-            and f.get("type", "") in CHECKED_TYPES)
+            and f.get("type", "") in CHECKED_TYPES
+            and not f.get("fragment", False))
     ]
 
     groups: dict[str, list[dict]] = defaultdict(list)
@@ -1154,22 +1120,16 @@ def swap_feature(
         error            : human-readable error string
     """
     import re as _re
-    import os, sys
 
     plasmid_sequence = _re.sub(r'\s', '', plasmid_sequence.upper())
     replacement_sequence = _re.sub(r'\s', '', replacement_sequence.upper())
 
+    from src.genbank_utils import run_plannotate_annotate
+
     try:
-        from plannotate.annotate import annotate
+        df = run_plannotate_annotate(plasmid_sequence, linear=False)
     except ImportError:
         return {"error": "pLannotate is not installed. Run: conda install -c bioconda plannotate"}
-
-    conda_bin = str(Path(sys.executable).parent)
-    if conda_bin not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
-
-    try:
-        df = annotate(plasmid_sequence, linear=False)
     except Exception as e:
         return {"error": f"pLannotate annotation failed: {e}"}
 
@@ -1275,22 +1235,16 @@ def extract_inserts_from_plasmid(plasmid_sequence: str, insert_names: list) -> l
             f"If you passed a cache key, resolve it to a sequence first."
         )
 
+    from src.genbank_utils import run_plannotate_annotate
+
     try:
-        from plannotate.annotate import annotate
+        df = run_plannotate_annotate(plasmid_sequence, linear=False)
     except ImportError:
         logger.error(
             "pLannotate is not installed. Cannot annotate plasmid to extract inserts. "
             "Run: conda install -c bioconda plannotate"
         )
         return []
-
- 
-    conda_bin = str(Path(sys.executable).parent)
-    if conda_bin not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
-
-    try:
-        df = annotate(plasmid_sequence, linear=False)
     except Exception as e:
         logger.error(f"extract_inserts_from_plasmid: pLannotate annotation failed: {e}")
         raise RuntimeError(f"pLannotate failed to annotate the plasmid sequence: {e}") from e
@@ -1416,23 +1370,16 @@ def extract_insert_from_plasmid(
         }
 
     # ── pLannotate annotation: find feature by name ───────────────────────
+    from src.genbank_utils import run_plannotate_annotate
+
     try:
-        from plannotate.annotate import annotate
+        df = run_plannotate_annotate(plasmid_sequence, linear=False)
     except ImportError:
         logger.error(
             "pLannotate is not installed. Cannot annotate plasmid to extract insert. "
             "Run: conda install -c bioconda plannotate"
         )
         return None
-
-    # Ensure conda env bin dir is on PATH so pLannotate can find blastn/cmscan
-    import os, sys
-    conda_bin = str(Path(sys.executable).parent)
-    if conda_bin not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
-
-    try:
-        df = annotate(plasmid_sequence, linear=False)
     except Exception as e:
         logger.error(f"extract_insert_from_plasmid: pLannotate annotation failed: {e}")
         raise RuntimeError(f"pLannotate failed to annotate the plasmid sequence: {e}") from e

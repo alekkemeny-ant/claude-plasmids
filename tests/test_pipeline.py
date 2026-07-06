@@ -28,14 +28,14 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from assembler import (
+from src.assembler import (
     assemble_construct,
     export_construct,
     find_mcs_insertion_point,
     clean_sequence,
 )
-from library import get_backbone_by_id, get_insert_by_id
-from addgene_integration import fetch_addgene_sequence
+from src.library import get_backbone_by_id, get_insert_by_id
+from src.addgene_integration import fetch_addgene_sequence
 from evals.rubric import score_construct, RubricResult
 from evals.test_cases import (
     TIER_1_CASES,

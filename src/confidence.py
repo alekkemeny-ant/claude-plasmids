@@ -18,10 +18,7 @@ from typing import Optional
 
 # Dual-import: src/tools.py imports this as a package (`src.confidence`),
 # tests/ and app/app.py import it flat (`confidence`) via sys.path hack.
-try:
-    from .codon_tables import HUMAN_CODON_W
-except ImportError:
-    from codon_tables import HUMAN_CODON_W
+from src.codon_tables import HUMAN_CODON_W
 
 
 @dataclass

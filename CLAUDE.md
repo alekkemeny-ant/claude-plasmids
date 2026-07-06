@@ -4,14 +4,20 @@ Claude-powered plasmid designer built as a collaboration between Anthropic and t
 
 ## Architecture
 
+Imports use a single convention: `from src.X import ...` (absolute, `src`
+is a package). No bare `from X import` and `src/` is not on `sys.path`.
+
 ```
-src/                        # Core modules
+src/                        # Core modules (a package — src/__init__.py)
 ├── assembler.py            # Deterministic sequence assembly engine
-├── library.py              # Backbone/insert library search + Addgene/NCBI fallback
-├── user_library.py         # BYOL — load user-provided GenBank files ($PLASMID_USER_LIBRARY)
+├── library/                # Library package (facade re-exports its public API)
+│   ├── __init__.py         # Public API: from src.library import load_backbones, ...
+│   ├── core.py             # Built-in library search/get + Addgene/NCBI/FPbase fallback
+│   ├── user.py             # BYOL — user GenBank files ($PLASMID_USER_LIBRARY)
+│   └── vendor.py           # Vendor backbones (Ansa, Twist, ...) -> vendor_backbones.json
 ├── ncbi_integration.py     # NCBI Entrez gene search + CDS retrieval
 ├── literature.py           # Unpaywall open-access full-text lookup
-├── server.py               # MCP server (imports from library.py)
+├── server.py               # MCP server (imports from src.library)
 ├── tools.py                # Tool definitions + build_mcp_servers() for Agent SDK
 └── addgene_integration.py  # Addgene web scraping, GenBank parsing, API client
 
@@ -20,9 +26,10 @@ app/                        # Web UI + agent
 ├── agent.py                # Claude Agent SDK agent loop
 └── system_prompt.md        # Agent system prompt (5-step workflow)
 
-library/                    # JSON data (curated + auto-cached)
+library/                    # JSON DATA (distinct from the src/library/ code package)
 ├── backbones.json          # Curated backbones + auto-cached Addgene fetches
-└── inserts.json            # Inserts: fluorescent proteins, reporters, epitope tags, NCBI genes
+├── inserts.json            # Inserts: fluorescent proteins, reporters, epitope tags, NCBI genes
+└── vendor_backbones.json   # Vendor-supplied backbones saved via save_vendor_backbone
 
 evals/                      # Evaluation infrastructure
 ├── rubric.py               # Allen Institute verification rubric (~32 weighted checks)

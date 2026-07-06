@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-VENDOR_BACKBONES_PATH = Path(__file__).parent.parent / "library" / "vendor_backbones.json"
+VENDOR_BACKBONES_PATH = Path(__file__).parent.parent.parent / "library" / "vendor_backbones.json"
 
 
 def _slugify(text: str) -> str:
@@ -54,10 +54,7 @@ def save_vendor_backbone(
     If an entry with the same ID already exists it is updated in place.
     Returns the saved entry (including its `vendor:` ID).
     """
-    try:
-        from .assembler import clean_sequence
-    except ImportError:
-        from assembler import clean_sequence
+    from src.assembler import clean_sequence
 
     clean_seq = clean_sequence(sequence)
     if not clean_seq:
@@ -68,10 +65,7 @@ def save_vendor_backbone(
     backbone_id = f"vendor:{company_slug}-{name_slug}"
 
     # Auto-detect placeholder region (N-runs or gap annotations)
-    try:
-        from .plasmid_intake import find_placeholder_region
-    except ImportError:
-        from plasmid_intake import find_placeholder_region
+    from src.plasmid_intake import find_placeholder_region
 
     placeholder = find_placeholder_region(clean_seq, [])
 

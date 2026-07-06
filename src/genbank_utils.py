@@ -54,16 +54,40 @@ _PLANNOTATE_MISSING_MSG = (
     "(plannotate is not on PyPI)"
 )
 
+
+def run_plannotate_annotate(sequence: str, linear: bool = False):
+    """Run pLannotate's ``annotate()`` with its noisy ResourceWarning suppressed.
+
+    pLannotate leaks unclosed temp-file handles inside ``annotate()`` (a
+    third-party bug). We silence *only* that warning here — at the single shared
+    call site — so ResourceWarning stays meaningful for our own code. Also
+    ensures the active conda bin dir is on PATH so pLannotate finds its BLAST
+    executables.
+
+    Returns the raw pLannotate DataFrame. Raises ImportError if pLannotate is
+    not installed, so callers can fall back exactly as before.
+    """
+    import os as _os
+    import sys as _sys
+    import warnings as _warnings
+
+    if annotate is None:  # module-level import failed → pLannotate unavailable
+        raise ImportError(_PLANNOTATE_MISSING_MSG)
+
+    conda_bin = str(Path(_sys.executable).parent)
+    if conda_bin not in _os.environ.get("PATH", ""):
+        _os.environ["PATH"] = conda_bin + _os.pathsep + _os.environ.get("PATH", "")
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", ResourceWarning)
+        return annotate(sequence, linear=linear)
+
 # Optional custom annotation DB (BYOA — bring your own annotations)
 try:
-    from .custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
+    from src.custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
     _CUSTOM_ANNOTATIONS_AVAILABLE = True
 except ImportError:
-    try:
-        from custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
-        _CUSTOM_ANNOTATIONS_AVAILABLE = True
-    except ImportError:
-        _CUSTOM_ANNOTATIONS_AVAILABLE = False
+    _CUSTOM_ANNOTATIONS_AVAILABLE = False
 
 if _CUSTOM_ANNOTATIONS_AVAILABLE:
     setup_custom_annotations()
@@ -289,10 +313,7 @@ def export_plasmid_genbank(
 
     # Annotate enzyme recognition sites
     if enzyme_name:
-        try:
-            from .assembler import GG_ENZYMES
-        except ImportError:
-            from assembler import GG_ENZYMES
+        from src.assembler import GG_ENZYMES
         if enzyme_name in GG_ENZYMES:
             rec_site = GG_ENZYMES[enzyme_name]["recognition"]
             for site, strand in [(rec_site, 1), (_rc(rec_site), -1)]:
@@ -442,7 +463,7 @@ def format_as_genbank(
             provenance=provenance,
         )
 
-    df = annotate(sequence, linear=linear)
+    df = run_plannotate_annotate(sequence, linear=linear)
     if _CUSTOM_ANNOTATIONS_AVAILABLE:
         custom_df = query_custom_db(sequence)
         if custom_df is not None:
@@ -559,12 +580,19 @@ def get_plasmid_plot_json(df, linear: bool = False) -> str:
     # (qlen=0 → 0/0=NaN; any NaN in position cols → propagates through trig).
     _pos_cols = [c for c in ("qstart", "qend", "qlen") if c in df.columns]
     if _pos_cols:
+        import numpy as _np
+        import pandas as _pd
+
+        # Empty (no-hit) DataFrames carry object-dtype columns, on which
+        # np.isfinite raises TypeError — coerce positions to numeric first.
+        for _c in _pos_cols:
+            df[_c] = _pd.to_numeric(df[_c], errors="coerce")
         df = df.dropna(subset=_pos_cols)
         if "qlen" in df.columns:
             df = df[df["qlen"] > 0]
         # Verify rstart/rend will be finite for all remaining rows.
         from math import pi as _pi
-        import numpy as _np
+
         _rs = (df["qstart"] / df["qlen"]) * 2 * _pi
         _re = (df["qend"] / df["qlen"]) * 2 * _pi
         df = df[_np.isfinite(_rs) & _np.isfinite(_re)]
@@ -595,7 +623,7 @@ def export_genbank_with_plot(
     """
     if not _PLANNOTATE_AVAILABLE:
         raise RuntimeError(_PLANNOTATE_MISSING_MSG)
-    df = annotate(sequence, linear=linear)
+    df = run_plannotate_annotate(sequence, linear=linear)
     if _CUSTOM_ANNOTATIONS_AVAILABLE:
         custom_df = query_custom_db(sequence)
         if custom_df is not None:

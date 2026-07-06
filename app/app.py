@@ -300,7 +300,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
                         return
 
         elif path == "/api/user-library":
-            from src.user_library import load_user_designed_constructs
+            from src.library import load_user_designed_constructs
             all_bb = load_backbones()["backbones"]
             bb = [b for b in all_bb if b.get("source") == "user_library"]
             vendor_bb = [b for b in all_bb if b.get("source") == "vendor"]
@@ -481,7 +481,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
             if not user_lib_dir or not Path(user_lib_dir).expanduser().is_dir():
                 self._send_json({"error": "PLASMID_USER_LIBRARY not set"}, 400)
                 return
-            from src.user_library import load_user_backbones, load_user_inserts, GENBANK_EXTENSIONS
+            from src.library import load_user_backbones, load_user_inserts, GENBANK_EXTENSIONS
             items = []
             for bb in load_user_backbones():
                 lp = bb.get("local_path")
@@ -1373,7 +1373,7 @@ class AgentHandler(SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(content_length)) if content_length else {}
             filter_paths = set(body.get("local_paths") or [])
 
-            from src.user_library import load_user_backbones, load_user_inserts, GENBANK_EXTENSIONS
+            from src.library import load_user_backbones, load_user_inserts, GENBANK_EXTENSIONS
 
             imported = 0
             skipped = 0

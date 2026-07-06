@@ -14,10 +14,7 @@ from typing import Optional
 
 # GenBank formatting/export lives in genbank_utils; imported here so
 # export_construct can produce GenBank output.
-try:
-    from .genbank_utils import format_as_genbank
-except ImportError:
-    from genbank_utils import format_as_genbank
+from src.genbank_utils import format_as_genbank
 
 
 logger = logging.getLogger(__name__)

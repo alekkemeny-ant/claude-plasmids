@@ -17,7 +17,7 @@ import itertools
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .assembler import GG_ENZYMES, find_gg_sites, reverse_complement, clean_sequence, find_mcs_insertion_point
+from src.assembler import GG_ENZYMES, find_gg_sites, reverse_complement, clean_sequence, find_mcs_insertion_point
 
 
 # ── Overhang pool ─────────────────────────────────────────────────────────────

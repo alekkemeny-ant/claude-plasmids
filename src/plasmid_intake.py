@@ -6,7 +6,6 @@ and produce a structured chat message for the agent intake workflow.
 from __future__ import annotations
 
 import re
-import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -51,10 +50,7 @@ def parse_upload(content: str, filename: str) -> dict:
 
 
 def _parse_genbank(content: str, filename: str) -> dict:
-    try:
-        from .genbank_utils import parse_genbank, is_circular
-    except ImportError:
-        from genbank_utils import parse_genbank, is_circular
+    from src.genbank_utils import parse_genbank, is_circular
 
     parsed = parse_genbank(content)
     if not parsed:
@@ -174,10 +170,8 @@ def run_plannotate(sequence: str, min_pident: float = 90.0) -> list[dict]:
     Each feature: {name, description, type, start, end, strand, match_pct}
     """
     try:
-        from plannotate.annotate import annotate
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            df = annotate(sequence, linear=False)
+        from src.genbank_utils import run_plannotate_annotate
+        df = run_plannotate_annotate(sequence, linear=False)
 
         if df is None or df.empty:
             return []

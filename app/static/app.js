@@ -1378,6 +1378,19 @@ async function sendMessage() {
       signal: abortController.signal,
     });
 
+    if (!resp.ok) {
+      // The response is a JSON error, not an SSE stream. The common case is a
+      // 404 for a stale session_id after the server was restarted (sessions are
+      // in-memory). Surface it instead of silently failing, and reset the stale
+      // session so the next message starts a fresh conversation.
+      let errMsg = 'Request failed (' + resp.status + ').';
+      try { const j = await resp.json(); if (j && j.error) errMsg = j.error; } catch (e) {}
+      if (resp.status === 404) saveSessionId(null);
+      clearPendingCursor();
+      startTextBlock();
+      appendTextDelta('Error: ' + errMsg);
+      endTextBlock();
+    } else {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -1451,6 +1464,7 @@ async function sendMessage() {
         if (streamDone) break;
       }
       if (streamDone) break;
+    }
     }
   } catch (err) {
     if (err.name !== 'AbortError') {

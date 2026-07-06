@@ -949,10 +949,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=output)]
 
     elif name == "export_construct":
-        from .assembler import (
-            format_as_fasta,
-            format_as_genbank,
-        )
+        from .assembler import format_as_fasta
+        from .genbank_utils import format_as_genbank
 
         sequence = clean_sequence(arguments["sequence"])
         fmt = arguments["output_format"]

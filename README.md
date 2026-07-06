@@ -358,8 +358,7 @@ src/                          # Core modules
 ├── restriction_utils.py      # Enzyme site checking + silent mutations
 ├── gg_denovo.py              # Golden Gate oligo design (de novo)
 ├── vendor_backbone.py        # Vendor backbone import + library saving
-├── genbank_export.py         # GenBank with pLannotate plot
-├── genbank_utils.py          # GenBank parsing utilities
+├── genbank_utils.py          # GenBank parsing, formatting, export & annotation plot
 ├── custom_annotations.py     # BYOL custom annotation BLAST integration
 ├── literature.py             # Unpaywall open-access full-text lookup
 ├── plasmid_intake.py         # File upload parsing + pLannotate intake

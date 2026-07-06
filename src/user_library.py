@@ -37,19 +37,17 @@ from disk before appending).
 import csv
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any
 
 try:
-    from .genbank_utils import parse_genbank
+    from .genbank_utils import parse_genbank, is_circular, GENBANK_EXTENSIONS
 except ImportError:
-    from genbank_utils import parse_genbank
+    from genbank_utils import parse_genbank, is_circular, GENBANK_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
 USER_PREFIX = "user:"
-GENBANK_EXTENSIONS = (".gb", ".gbk", ".genbank")
 
 
 def _user_library_dir() -> Path | None:
@@ -62,12 +60,6 @@ def _user_library_dir() -> Path | None:
         logger.warning(f"PLASMID_USER_LIBRARY={raw} is not a directory; ignoring")
         return None
     return path
-
-
-def _is_circular(content: str) -> bool:
-    """Return True if the GenBank LOCUS line declares the topology as circular."""
-    m = re.search(r'^LOCUS\s+\S.*?(circular|linear)', content, re.MULTILINE | re.IGNORECASE)
-    return bool(m and m.group(1).lower() == "circular")
 
 
 def _load_insert_csv(path: Path) -> dict[str, dict[str, str]]:
@@ -247,7 +239,7 @@ def _parse_file_to_entry(
 
     base_id = parsed["locus_name"] or path.stem
     entry_id = f"{USER_PREFIX}{base_id}"
-    circular = _is_circular(content)
+    circular = is_circular(content)
 
     entry: dict[str, Any] = {
         "id": entry_id,

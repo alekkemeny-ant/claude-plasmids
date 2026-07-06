@@ -52,16 +52,15 @@ def parse_upload(content: str, filename: str) -> dict:
 
 def _parse_genbank(content: str, filename: str) -> dict:
     try:
-        from .genbank_utils import parse_genbank
+        from .genbank_utils import parse_genbank, is_circular
     except ImportError:
-        from genbank_utils import parse_genbank
+        from genbank_utils import parse_genbank, is_circular
 
     parsed = parse_genbank(content)
     if not parsed:
         raise ValueError("Could not parse GenBank file — no valid sequence found.")
 
-    m = re.search(r'^LOCUS\s+\S+.+?(circular|linear)', content, re.MULTILINE | re.IGNORECASE)
-    topology = m.group(1).lower() if m else "unknown"
+    topology = "circular" if is_circular(content) else "linear"
 
     return {
         "filename": filename,

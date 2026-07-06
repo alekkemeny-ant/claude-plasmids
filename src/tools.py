@@ -48,7 +48,6 @@ from .assembler import (
     validate_dna,
     reverse_complement,
     format_as_fasta,
-    format_as_genbank,
     DEFAULT_FUSION_LINKER as _DEFAULT_FUSION_LINKER,
     assemble_golden_gate as _assemble_golden_gate,
     GG_ENZYMES,
@@ -58,7 +57,11 @@ from .vendor_backbone import (
     save_vendor_backbone as _save_vendor_backbone,
     update_vendor_backbone_mcs as _update_vendor_backbone_mcs,
 )
-from .genbank_export import export_plasmid_genbank as _export_genbank, BIOPYTHON_AVAILABLE as _BIOPYTHON_AVAILABLE
+from .genbank_utils import (
+    export_plasmid_genbank as _export_genbank,
+    BIOPYTHON_AVAILABLE as _BIOPYTHON_AVAILABLE,
+    format_as_genbank,
+)
 
 # NCBI integration (optional)
 try:
@@ -142,7 +145,7 @@ except ImportError:
 
 # GenBank-with-plot export (optional — requires pLannotate, conda-only)
 try:
-    from .assembler import export_genbank_with_plot as _export_genbank_with_plot
+    from .genbank_utils import export_genbank_with_plot as _export_genbank_with_plot
     PLOT_EXPORT_AVAILABLE = True
 except ImportError:
     PLOT_EXPORT_AVAILABLE = False

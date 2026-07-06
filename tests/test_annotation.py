@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from assembler import _PLANNOTATE_AVAILABLE
+from genbank_utils import _PLANNOTATE_AVAILABLE
 
 if not _PLANNOTATE_AVAILABLE:
     pytest.skip(
@@ -25,7 +25,7 @@ if not _PLANNOTATE_AVAILABLE:
 
 import pandas as pd  # noqa: E402
 
-from assembler import (  # noqa: E402
+from genbank_utils import (  # noqa: E402
     _build_annotated_record,
     export_genbank_with_plot,
     format_as_genbank,
@@ -197,7 +197,7 @@ class TestFormatAsGenbank:
     def _genbank(self, sequence=SIMPLE_SEQ, name="test", insert_name="GFP",
                  backbone_name="pTest", insert_position=0, insert_length=0,
                  reverse_complement_insert=False):
-        with patch("assembler.annotate", return_value=_empty_df()):
+        with patch("genbank_utils.annotate", return_value=_empty_df()):
             return format_as_genbank(
                 sequence=sequence, name=name, backbone_name=backbone_name,
                 insert_name=insert_name, insert_position=insert_position,
@@ -244,8 +244,8 @@ class TestGetPlasmidPlotJson:
         if df is None:
             df = _empty_df()
         mock_plot = MagicMock()
-        with patch("assembler.get_bokeh", return_value=mock_plot), \
-             patch("assembler.json_item", return_value={"doc": {"roots": []}, "version": "2.4.1"}):
+        with patch("genbank_utils.get_bokeh", return_value=mock_plot), \
+             patch("genbank_utils.json_item", return_value={"doc": {"roots": []}, "version": "2.4.1"}):
             return get_plasmid_plot_json(df, linear=False)
 
     def test_returns_string(self):
@@ -264,8 +264,8 @@ class TestGetPlasmidPlotJson:
     def test_sizing_mode_set_on_plot(self):
         """Verify stretch_width sizing is applied to the plot before serialization."""
         mock_plot = MagicMock()
-        with patch("assembler.get_bokeh", return_value=mock_plot), \
-             patch("assembler.json_item", return_value={}):
+        with patch("genbank_utils.get_bokeh", return_value=mock_plot), \
+             patch("genbank_utils.json_item", return_value={}):
             get_plasmid_plot_json(_empty_df())
         assert mock_plot.sizing_mode == "stretch_width"
 
@@ -279,9 +279,9 @@ class TestExportGenbankWithPlot:
     def _export(self, sequence=SIMPLE_SEQ, name="test", insert_name="GFP",
                 backbone_name="pTest", insert_position=0, insert_length=0):
         mock_plot = MagicMock()
-        with patch("assembler.annotate", return_value=_empty_df()), \
-             patch("assembler.get_bokeh", return_value=mock_plot), \
-             patch("assembler.json_item", return_value={"doc": {}}):
+        with patch("genbank_utils.annotate", return_value=_empty_df()), \
+             patch("genbank_utils.get_bokeh", return_value=mock_plot), \
+             patch("genbank_utils.json_item", return_value={"doc": {}}):
             return export_genbank_with_plot(
                 sequence=sequence, name=name, backbone_name=backbone_name,
                 insert_name=insert_name, insert_position=insert_position,
@@ -308,9 +308,9 @@ class TestExportGenbankWithPlot:
     def test_annotate_called_once(self):
         """pLannotate should only run once even though output is used twice."""
         mock_plot = MagicMock()
-        with patch("assembler.annotate", return_value=_empty_df()) as mock_annotate, \
-             patch("assembler.get_bokeh", return_value=mock_plot), \
-             patch("assembler.json_item", return_value={"doc": {}}):
+        with patch("genbank_utils.annotate", return_value=_empty_df()) as mock_annotate, \
+             patch("genbank_utils.get_bokeh", return_value=mock_plot), \
+             patch("genbank_utils.json_item", return_value={"doc": {}}):
             export_genbank_with_plot(sequence=SIMPLE_SEQ, name="test")
         mock_annotate.assert_called_once()
 

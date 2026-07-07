@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Tests for src/references.py — Reference and ReferenceTracker."""
 
-import pytest
-
-from src.references import Reference, ReferenceTracker
+from src.references import ReferenceTracker
 
 
 # ---------------------------------------------------------------------------

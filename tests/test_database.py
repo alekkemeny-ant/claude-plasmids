@@ -1,8 +1,6 @@
 """Tests for app/database.py — SQLite plasmid library."""
 
-import json
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest

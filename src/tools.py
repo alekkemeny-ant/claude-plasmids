@@ -21,8 +21,8 @@ from typing import Any, Optional
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
-from .references import ReferenceTracker
-from .library import (
+from src.references import ReferenceTracker
+from src.library import (
     search_backbones as _search_backbones,
     search_inserts as _search_inserts,
     search_all_sources as _search_all_sources,
@@ -40,30 +40,34 @@ from .library import (
     extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
     infer_species_from_cell_line,
 )
-from .assembler import (
+from src.assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
-    find_mcs_insertion_point,
     resolve_insertion_point,
     clean_sequence,
     validate_dna,
     reverse_complement,
     format_as_fasta,
-    format_as_genbank,
     DEFAULT_FUSION_LINKER as _DEFAULT_FUSION_LINKER,
+)
+from src.golden_gate.assembly import (
     assemble_golden_gate as _assemble_golden_gate,
     GG_ENZYMES,
 )
-from .gg_denovo import design_golden_gate_oligos as _design_gg_denovo
-from .vendor_backbone import (
+from src.golden_gate.denovo import design_golden_gate_oligos as _design_gg_denovo
+from src.library import (
     save_vendor_backbone as _save_vendor_backbone,
     update_vendor_backbone_mcs as _update_vendor_backbone_mcs,
 )
-from .genbank_export import export_plasmid_genbank as _export_genbank, BIOPYTHON_AVAILABLE as _BIOPYTHON_AVAILABLE
+from src.utils.genbank_utils import (
+    export_plasmid_genbank as _export_genbank,
+    BIOPYTHON_AVAILABLE as _BIOPYTHON_AVAILABLE,
+    format_as_genbank,
+)
 
 # NCBI integration (optional)
 try:
-    from .ncbi_integration import (
+    from src.integrations.ncbi_integration import (
         search_gene as _search_gene_fn,
         fetch_gene_sequence as _fetch_gene_fn,
     )
@@ -73,29 +77,22 @@ except ImportError:
 
 # Genomic upstream fetch for bespoke promoters (newer, may not exist)
 try:
-    from .ncbi_integration import fetch_genomic_upstream as _fetch_genomic_upstream
+    from src.integrations.ncbi_integration import fetch_genomic_upstream as _fetch_genomic_upstream
     GENOMIC_UPSTREAM_AVAILABLE = True
 except ImportError:
     GENOMIC_UPSTREAM_AVAILABLE = False
 
-# Bespoke promoter detection
-try:
-    from .library import is_known_promoter as _is_known_promoter  # noqa: F401
-    PROMOTER_DETECTION_AVAILABLE = True
-except ImportError:
-    PROMOTER_DETECTION_AVAILABLE = False
-
 # ── Phase-2 advanced design modules ──
 # Design Confidence Score
 try:
-    from .confidence import compute_confidence, format_confidence_report
+    from src.analysis.confidence import compute_confidence, format_confidence_report
     CONFIDENCE_AVAILABLE = True
 except ImportError:
     CONFIDENCE_AVAILABLE = False
 
 # Protein analysis (disorder-based fusion sites)
 try:
-    from .protein_analysis import (
+    from src.analysis.protein_analysis import (
         translate as _translate_dna,
         find_fusion_sites as _find_fusion_sites,
     )
@@ -105,14 +102,14 @@ except ImportError:
 
 # Fusion design advisor (combinatorial variant generation + ranking)
 try:
-    from .fusion_designer import design_fusion_variants as _design_fusion_variants
+    from src.analysis.fusion_designer import design_fusion_variants as _design_fusion_variants
     FUSION_DESIGNER_AVAILABLE = True
 except ImportError:
     FUSION_DESIGNER_AVAILABLE = False
 
 # Smart mutations (curated GoF/LoF + deterministic edits)
 try:
-    from .mutations import (
+    from src.analysis.mutations import (
         lookup_known_mutations as _lookup_known_mutations,
         apply_point_mutation as _apply_point_mutation,
         design_premature_stop as _design_premature_stop,
@@ -124,7 +121,7 @@ except ImportError:
 
 # Addgene integration (optional)
 try:
-    from .addgene_integration import (
+    from src.integrations.addgene_integration import (
         search_addgene as _search_addgene_fn,
         fetch_addgene_sequence_with_metadata as _fetch_addgene_sequence_with_metadata_fn,
         AddgeneLibraryIntegration,
@@ -136,28 +133,28 @@ except ImportError:
 # Literature integration (optional — requires `requests`, which is a core dep,
 # but gate anyway for symmetry with other optional integrations)
 try:
-    from .literature import fetch_oa_fulltext as _fetch_oa_fulltext
+    from src.integrations.literature import fetch_oa_fulltext as _fetch_oa_fulltext
     LITERATURE_AVAILABLE = True
 except ImportError:
     LITERATURE_AVAILABLE = False
 
 # FPbase integration (optional)
 try:
-    from .fpbase_integration import search_fpbase as _search_fpbase_fn
+    from src.integrations.fpbase_integration import search_fpbase as _search_fpbase_fn
     FPBASE_AVAILABLE = True
 except ImportError:
     FPBASE_AVAILABLE = False
 
 # GenBank-with-plot export (optional — requires pLannotate, conda-only)
 try:
-    from .assembler import export_genbank_with_plot as _export_genbank_with_plot
+    from src.utils.genbank_utils import export_genbank_with_plot as _export_genbank_with_plot
     PLOT_EXPORT_AVAILABLE = True
 except ImportError:
     PLOT_EXPORT_AVAILABLE = False
 
 # Restriction enzyme site checking and silent mutation (optional)
 try:
-    from .restriction_utils import (
+    from src.utils.restriction_utils import (
         check_re_sites as _check_re_sites,
         design_silent_mutation as _design_silent_mutation,
     )
@@ -1351,7 +1348,7 @@ async def fuse_inserts_tool(args):
         sequences.append({"sequence": seq, "name": name, "type": seq_type})
         # Track which non-first protein sequences have an ATG to be removed
         if i > 0 and seq_type == "protein":
-            from .assembler import clean_sequence as _clean_seq
+            from src.assembler import clean_sequence as _clean_seq
             if _clean_seq(seq)[:3] == "ATG":
                 atg_removals.append(name or f"sequence_{i}")
 

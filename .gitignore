@@ -40,3 +40,9 @@ library/backbones.json
 
 # pytest
 .pytest_cache/
+
+# coverage.py
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

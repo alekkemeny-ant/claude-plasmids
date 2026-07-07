@@ -10,16 +10,15 @@ Covers:
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from assembler import (
+from src.assembler import reverse_complement
+from src.golden_gate.assembly import (
     GG_ENZYMES,
     GoldenGateResult,
     find_gg_sites,
     _excise_insert,
     assemble_golden_gate,
-    reverse_complement,
-    clean_sequence,
 )
 
 
@@ -457,7 +456,7 @@ class TestAssembleGoldenGate:
         assert _RIGHT_OH in result.junction_overhangs
 
     def test_assembled_sequence_is_valid_dna(self):
-        from assembler import validate_dna
+        from src.assembler import validate_dna
         result = assemble_golden_gate(
             backbone_plasmid_seq=_make_backbone_a(),
             parts=[_make_part()],

@@ -24,10 +24,10 @@ import re
 import sys
 from pathlib import Path
 
-# Allow importing from src/
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# Allow importing the `src` package from the repo root
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from assembler import clean_sequence, validate_dna, reverse_complement
+from src.assembler import clean_sequence, validate_dna, reverse_complement
 
 
 # ── Severity weights ───────────────────────────────────────────────────
@@ -908,14 +908,14 @@ def score_construct(
     _dup_features = construct_annotations
     if _dup_features is None:
         try:
-            from library import annotate_plasmid as _annotate_rubric
+            from src.library import annotate_plasmid as _annotate_rubric
             _dup_features = _annotate_rubric(construct_seq)
         except Exception:
             _dup_features = None
 
     if _dup_features is not None:
         try:
-            from library import find_duplicate_annotations as _find_dups
+            from src.library import find_duplicate_annotations as _find_dups
             _duplicates = _find_dups(_dup_features)
         except Exception:
             _duplicates = []

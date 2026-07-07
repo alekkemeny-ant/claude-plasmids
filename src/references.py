@@ -8,7 +8,7 @@ library.  Produces a formatted "References" section for the final
 construct summary.
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 

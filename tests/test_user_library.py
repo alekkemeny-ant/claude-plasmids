@@ -27,7 +27,7 @@ def no_user_library(monkeypatch):
 # ── user_library module ──
 
 def test_load_user_backbones_finds_fixture(user_library_env):
-    from src.user_library import load_user_backbones
+    from src.library import load_user_backbones
     entries = load_user_backbones()
     assert len(entries) == 1
     bb = entries[0]
@@ -40,7 +40,7 @@ def test_load_user_backbones_finds_fixture(user_library_env):
 
 
 def test_load_user_inserts_finds_fixture(user_library_env):
-    from src.user_library import load_user_inserts
+    from src.library import load_user_inserts
     entries = load_user_inserts()
     assert len(entries) == 1
     ins = entries[0]
@@ -51,13 +51,13 @@ def test_load_user_inserts_finds_fixture(user_library_env):
 
 
 def test_load_user_backbones_empty_when_unset(no_user_library):
-    from src.user_library import load_user_backbones
+    from src.library import load_user_backbones
     assert load_user_backbones() == []
 
 
 def test_load_user_backbones_empty_when_dir_missing(monkeypatch):
     monkeypatch.setenv("PLASMID_USER_LIBRARY", "/nonexistent/path/xyz")
-    from src.user_library import load_user_backbones
+    from src.library import load_user_backbones
     assert load_user_backbones() == []
 
 
@@ -73,7 +73,7 @@ def test_filename_stem_fallback_when_no_locus(user_library_env, tmp_path, monkey
         "//\n"
     )
     monkeypatch.setenv("PLASMID_USER_LIBRARY", str(tmp_path))
-    from src.user_library import load_user_backbones
+    from src.library import load_user_backbones
     entries = load_user_backbones()
     assert len(entries) == 1
     assert entries[0]["id"] == "user:noLocus"
@@ -85,7 +85,7 @@ def test_non_genbank_files_ignored(tmp_path, monkeypatch):
     (subdir / "readme.txt").write_text("not a genbank file")
     (subdir / "data.json").write_text("{}")
     monkeypatch.setenv("PLASMID_USER_LIBRARY", str(tmp_path))
-    from src.user_library import load_user_backbones
+    from src.library import load_user_backbones
     assert load_user_backbones() == []
 
 
@@ -107,7 +107,7 @@ def test_library_load_backbones_no_merge_when_unset(no_user_library):
 
 def test_builtin_loader_never_includes_user(user_library_env):
     """Critical cache-isolation invariant: _load_builtin_* must NOT merge."""
-    from src.library import _load_builtin_backbones, _load_builtin_inserts
+    from src.library.core import _load_builtin_backbones, _load_builtin_inserts
     bb = _load_builtin_backbones()
     ins = _load_builtin_inserts()
     assert not any(b["id"].startswith("user:") for b in bb["backbones"])
@@ -131,7 +131,7 @@ def test_search_backbones_finds_user_entry(user_library_env):
 # ── CSV metadata overlay ──
 
 def test_insert_csv_enriches_name_and_aliases(user_library_env):
-    from src.user_library import load_user_inserts
+    from src.library import load_user_inserts
     ins = load_user_inserts()[0]
     # name comes from CSV Description column
     assert ins["name"] == "MyGene-Test-Insert"
@@ -158,7 +158,7 @@ def test_insert_csv_aliases_from_compound_id(tmp_path, monkeypatch):
     csv_text = "id\tDescription\nLAB_P001_MyPromoter-Kozak\tMyPromoter-Kozak Description\n"
     (tmp_path / "inserts_description.csv").write_text(csv_text)
     monkeypatch.setenv("PLASMID_USER_LIBRARY", str(tmp_path))
-    from src.user_library import load_user_inserts
+    from src.library import load_user_inserts
     entries = load_user_inserts()
     assert len(entries) == 1
     aliases = entries[0]["aliases"]
@@ -167,7 +167,7 @@ def test_insert_csv_aliases_from_compound_id(tmp_path, monkeypatch):
 
 
 def test_insert_csv_sets_enzyme_and_overhangs(user_library_env):
-    from src.user_library import load_user_inserts
+    from src.library import load_user_inserts
     ins = load_user_inserts()[0]
     assert ins["assembly_enzyme"] == "Esp3I"
     assert ins["overhang_l"] == "CACC"
@@ -175,7 +175,7 @@ def test_insert_csv_sets_enzyme_and_overhangs(user_library_env):
 
 
 def test_insert_csv_size_stored_as_insert_size_bp(user_library_env):
-    from src.user_library import load_user_inserts
+    from src.library import load_user_inserts
     ins = load_user_inserts()[0]
     # insert_size_bp (from CSV) is the excised insert size — distinct from
     # size_bp (from GenBank), which is the full file sequence length.
@@ -185,14 +185,14 @@ def test_insert_csv_size_stored_as_insert_size_bp(user_library_env):
 
 
 def test_insert_csv_sets_selection_and_category(user_library_env):
-    from src.user_library import load_user_inserts
+    from src.library import load_user_inserts
     ins = load_user_inserts()[0]
     assert ins["bacterial_resistance"] == "AmpR"
     assert ins["category"] == "insert"
 
 
 def test_backbone_csv_enriches_metadata(user_library_env):
-    from src.user_library import load_user_backbones
+    from src.library import load_user_backbones
     bb = load_user_backbones()[0]
     assert bb["bacterial_resistance"] == "KanR"
     assert bb["mammalian_selection"] == "PuroR"
@@ -206,7 +206,7 @@ def test_backbone_csv_enriches_metadata(user_library_env):
 
 
 def test_backbone_csv_builds_description(user_library_env):
-    from src.user_library import load_user_backbones
+    from src.library import load_user_backbones
     bb = load_user_backbones()[0]
     desc = bb["description"]
     assert "KanR" in desc
@@ -235,7 +235,7 @@ def test_csv_absent_loads_genbank_only(tmp_path, monkeypatch):
     subdir.mkdir()
     (subdir / "myGene.gbk").write_text(_MINIMAL_INSERT_GB)
     monkeypatch.setenv("PLASMID_USER_LIBRARY", str(tmp_path))
-    from src.user_library import load_user_inserts
+    from src.library import load_user_inserts
     entries = load_user_inserts()
     assert len(entries) == 1
     assert entries[0]["name"] == "myGene"      # falls back to locus name
@@ -263,8 +263,8 @@ def test_csv_row_with_no_matching_gb_is_skipped(tmp_path, monkeypatch, caplog):
     csv_text = "id\tDescription\nrealPart\tReal Part\nghostPart\tGhost Part\n"
     (tmp_path / "inserts_description.csv").write_text(csv_text)
     monkeypatch.setenv("PLASMID_USER_LIBRARY", str(tmp_path))
-    with caplog.at_level(logging.WARNING, logger="src.user_library"):
-        from src.user_library import load_user_inserts
+    with caplog.at_level(logging.WARNING, logger="src.library.user"):
+        from src.library import load_user_inserts
         entries = load_user_inserts()
     assert len(entries) == 1
     assert any("ghostPart" in r.message for r in caplog.records)

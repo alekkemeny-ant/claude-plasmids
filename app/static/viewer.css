@@ -1,0 +1,180 @@
+/* ── Ori-style inline sequence viewer ──────────────────────────────────── */
+.viewer-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border: 1px solid var(--brand-aqua-20);
+  background: var(--brand-aqua-10); border-radius: 8px;
+  color: var(--brand-aqua-dark); font-size: 12px; font-weight: 500;
+  cursor: pointer; font-family: inherit; line-height: 1.2;
+}
+.viewer-btn:hover { background: var(--brand-aqua-20); border-color: var(--brand-aqua); }
+.viewer-btn svg { flex-shrink: 0; }
+
+.oriv-panel {
+  margin-top: 8px; padding: 0; width: 100%; max-width: 920px;
+  border: 1px solid var(--sand-200, #e5e4df); border-radius: 12px;
+  overflow: hidden; background: var(--sand-50, #faf9f6);
+}
+.oriv-head {
+  display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center;
+  padding: 10px 14px; border-bottom: 1px solid var(--sand-200, #e5e4df);
+  background: #fff;
+}
+.oriv-title { font-size: 13px; font-weight: 700; color: var(--sand-900, #2b2a26); }
+.oriv-meta { font-size: 11px; color: var(--sand-500, #87867f); display: flex; gap: 10px; flex-wrap: wrap; }
+.oriv-meta b { font-weight: 600; color: var(--sand-700, #555); }
+.oriv-resist {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--brand-aqua-dark, #0E6B54); font-weight: 600;
+  background: var(--brand-aqua-10, rgba(36,178,131,0.1));
+  padding: 1px 8px 1px 6px; border-radius: 999px;
+}
+.oriv-resist svg { flex-shrink: 0; opacity: 0.85; }
+.oriv-spacer { flex: 1 1 auto; }
+
+.oriv-search-wrap { display: inline-flex; align-items: center; gap: 4px; }
+.oriv-search {
+  width: 200px; padding: 5px 9px; font-size: 12px;
+  border: 1px solid var(--sand-300, #d6d5cf); border-radius: 7px;
+  background: #fff; color: var(--sand-900, #2b2a26); font-family: inherit;
+}
+.oriv-search:focus { outline: none; border-color: var(--brand-aqua); box-shadow: 0 0 0 2px var(--brand-aqua-10); }
+.oriv-count { font-size: 11px; color: var(--sand-500, #87867f); min-width: 44px; text-align: center; }
+.oriv-nav {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; border: 1px solid var(--sand-300, #d6d5cf);
+  background: #fff; border-radius: 6px; cursor: pointer; color: var(--sand-700, #555);
+}
+.oriv-nav:hover:not(:disabled) { border-color: var(--brand-aqua); color: var(--brand-aqua-dark); }
+.oriv-nav:disabled { opacity: 0.4; cursor: default; }
+.oriv-toggle {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
+  color: var(--sand-600, #6b6a64); cursor: pointer; user-select: none;
+}
+.oriv-toggle input { accent-color: var(--brand-aqua); }
+.oriv-mini-btn {
+  font-size: 11px; padding: 4px 9px; border: 1px solid var(--sand-300, #d6d5cf);
+  background: #fff; border-radius: 6px; cursor: pointer; color: var(--sand-700, #555);
+  font-family: inherit;
+}
+.oriv-mini-btn:hover { border-color: var(--brand-aqua); color: var(--brand-aqua-dark); }
+.oriv-icon-btn { display: inline-flex; align-items: center; gap: 5px; }
+.oriv-icon-btn svg { flex-shrink: 0; }
+
+/* expand-to-overlay */
+.oriv-backdrop {
+  position: fixed; inset: 0; background: rgba(25, 24, 22, 0.5);
+  z-index: 9997; opacity: 0; transition: opacity 0.25s ease; display: none;
+}
+.oriv-backdrop.show { opacity: 1; }
+.oriv-panel.oriv-expanded {
+  position: fixed; top: 3vh; left: 50%; transform: translateX(-50%);
+  width: min(1500px, 94vw); max-width: 94vw; height: 94vh; max-height: 94vh;
+  z-index: 9998; display: flex; flex-direction: column;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.34);
+  animation: oriv-expand-in 0.26s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.oriv-panel.oriv-expanded .oriv-head,
+.oriv-panel.oriv-expanded .oriv-legend { flex: 0 0 auto; }
+.oriv-panel.oriv-expanded .oriv-seq { flex: 1 1 auto; max-height: none; }
+@keyframes oriv-expand-in {
+  from { transform: translateX(-50%) scale(0.965); opacity: 0; }
+  to   { transform: translateX(-50%) scale(1); opacity: 1; }
+}
+
+.oriv-legend {
+  display: flex; flex-wrap: wrap; gap: 5px 7px; padding: 9px 14px;
+  border-bottom: 1px solid var(--sand-200, #e5e4df); background: #fff; max-height: 92px; overflow-y: auto;
+}
+.oriv-legend:empty { display: none; }
+.oriv-chip {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px 2px 6px;
+  font-size: 11px; border-radius: 999px; border: 1px solid var(--sand-200, #e5e4df);
+  background: var(--sand-50, #faf9f6); color: var(--sand-800, #3b3a36); cursor: pointer; max-width: 240px;
+}
+.oriv-chip:hover { border-color: var(--brand-aqua); }
+.oriv-chip .dot { width: 9px; height: 9px; border-radius: 3px; flex-shrink: 0; }
+.oriv-chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oriv-chip .rg { color: var(--sand-500, #87867f); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+
+.oriv-seq {
+  padding: 14px 10px; max-height: 480px; overflow: auto;
+  background: var(--sand-50, #faf9f6);
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.2;
+}
+.oriv-row { display: flex; align-items: flex-start; margin-bottom: 11px; }
+.oriv-track-row { margin-bottom: 2px; }
+.oriv-pos {
+  flex: 0 0 auto; width: 6ch; text-align: right; padding-right: 10px;
+  color: var(--sand-500, #87867f); user-select: none; font-variant-numeric: tabular-nums;
+  line-height: 1.55;
+}
+.oriv-stack { display: block; }
+.oriv-line { display: block; white-space: pre; }
+.oriv-fwd { line-height: 1.55; }
+.oriv-base { display: inline-block; width: 1ch; text-align: center; color: var(--sand-900, #2b2a26); }
+.oriv-cbase { display: inline-block; width: 1ch; text-align: center; color: var(--sand-400, #a5a49d); }
+.oriv-comp { line-height: 1.55; }
+.oriv-rule-ticks { line-height: 1.0; color: var(--sand-300, #cfcec8); }
+.oriv-rule-nums { line-height: 1.1; color: var(--sand-500, #87867f); margin-top: 4px; }
+.oriv-track { position: relative; margin-bottom: 0; }
+/* ORF / translation track: one chevron per codon */
+.oriv-aa-track { position: relative; height: 15px; margin: 3px 0; }
+.oriv-aa {
+  position: absolute; top: 0; height: 14px; line-height: 14px; text-align: center;
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 10px; font-weight: 700; overflow: hidden; box-sizing: border-box; cursor: default;
+}
+.oriv-aa-fwd { clip-path: polygon(0 0, calc(100% - 5px) 0, 100% 50%, calc(100% - 5px) 100%, 0 100%, 5px 50%); }
+.oriv-aa-rev { clip-path: polygon(100% 0, 5px 0, 0 50%, 5px 100%, 100% 100%, calc(100% - 5px) 50%); }
+.oriv-aa-stop { font-weight: 800; }
+.oriv-feat-bar, .oriv-aa { cursor: context-menu; }
+/* right-click copy menu */
+.oriv-menu {
+  position: fixed; z-index: 10000; min-width: 184px; padding: 4px;
+  background: #fff; border: 1px solid var(--sand-200, #e5e4df); border-radius: 9px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.17);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+}
+.oriv-menu-head {
+  font-size: 11px; font-weight: 700; color: var(--sand-700, #555);
+  padding: 5px 9px 7px; border-bottom: 1px solid var(--sand-200, #e5e4df); margin-bottom: 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 300px;
+}
+.oriv-menu-item {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  padding: 7px 9px; font-size: 12px; color: var(--sand-800, #3b3a36);
+  border-radius: 6px; cursor: pointer; font-family: inherit;
+}
+.oriv-menu-item:hover { background: var(--brand-aqua-10); color: var(--brand-aqua-dark); }
+.oriv-feat-bar {
+  position: absolute; height: 14px; line-height: 14px; box-sizing: border-box;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.01em;
+  padding: 0 5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  cursor: default; box-shadow: 0 1px 2px rgba(0,0,0,0.10);
+}
+
+.oriv-hit { background: #fde68a !important; box-shadow: 0 1px 0 0 #f59e0b inset; border-radius: 2px; }
+.oriv-hit.active { background: #f97316 !important; color: #fff !important; }
+.oriv-flash { animation: oriv-flash-kf 1.1s ease-out; }
+@keyframes oriv-flash-kf {
+  0%   { box-shadow: 0 0 0 2px var(--brand-aqua) inset; }
+  100% { box-shadow: 0 0 0 0 transparent inset; }
+}
+.oriv-empty { padding: 20px 14px; font-size: 12px; color: var(--sand-500, #87867f); }
+
+/* hover tooltip: feature name(s) at a base */
+.oriv-tip {
+  position: fixed; z-index: 9999; pointer-events: none; max-width: 320px;
+  padding: 7px 9px; border-radius: 8px;
+  background: var(--sand-900, #2b2a26); color: #fff;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 11.5px; line-height: 1.35; box-shadow: 0 4px 14px rgba(0,0,0,0.22);
+}
+.oriv-tip-pos { font-size: 10px; opacity: 0.7; margin-bottom: 3px; font-variant-numeric: tabular-nums; }
+.oriv-tip-row { display: flex; align-items: center; gap: 7px; padding: 1px 0; }
+.oriv-tip-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.oriv-tip-nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 190px; }
+.oriv-tip-ty { opacity: 0.7; margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.oriv-tip-more { font-size: 10px; opacity: 0.6; margin-top: 2px; }

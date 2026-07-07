@@ -4,15 +4,15 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
-from restriction_utils import (
+from src.utils.restriction_utils import (
     check_re_sites,
     design_silent_mutation,
     find_extra_sites_in_sequence,
 )
-from assembler import reverse_complement
+from src.assembler import reverse_complement
 
 # Esp3I recognition: CGTCTC (forward), GAGACG (RC)
 ESP3I_REC = "CGTCTC"
@@ -213,7 +213,7 @@ class TestDesignSilentMutation:
             assert "dna_position" in change
             assert change["original_codon"] != change["new_codon"]
             # AA must be preserved
-            from restriction_utils import _CODON_TABLE
+            from src.utils.restriction_utils import _CODON_TABLE
             assert _CODON_TABLE[change["original_codon"]] == _CODON_TABLE[change["new_codon"]]
 
     def test_site_spanning_codon_boundary(self):

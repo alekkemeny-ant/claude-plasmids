@@ -1,16 +1,33 @@
 # Plasmid Designer
 
-A Claude-native agentic tool for designing expression plasmids. Built as a collaboration between Anthropic and the Allen Institute.
+A Claude-native agentic tool for designing expression plasmids. Takes a natural language description of what you want to build and returns a complete, annotated, validated plasmid construct in GenBank format.
 
-The tool takes a backbone vector, insert gene, and optional parameters as input, and outputs a complete, validated plasmid construct sequence. Claude handles orchestration (understanding user intent, selecting tools, validating results) while all sequence operations are deterministic — no LLM ever generates DNA.
+Claude handles orchestration — understanding intent, selecting tools, validating results — while all sequence operations are deterministic. No LLM ever generates DNA.
+
+---
+
+## Table of Contents
+
+- [Setup](#setup)
+- [Running the App](#running-the-app)
+- [How to Use It Effectively](#how-to-use-it-effectively)
+- [Modes and Features](#modes-and-features)
+- [Architecture](#architecture)
+- [Backbone and Insert Library](#backbone-and-insert-library)
+- [Bring Your Own Library (BYOL)](#bring-your-own-library-byol)
+- [Custom Annotations](#custom-annotations)
+- [Batch Design](#batch-design)
+- [Tests and Evals](#tests-and-evals)
+
+---
 
 ## Setup
 
-pLannotate (used for GenBank annotation) is only available via conda/bioconda and requires Python <3.13. The project uses a conda environment instead of a plain venv.
+### Prerequisites
+
+pLannotate (used for GenBank annotation) is only available via conda/bioconda and requires Python <3.13. The project uses a conda environment.
 
 ### 1. Create the conda environment
-
-This installs all Python dependencies (including pLannotate and everything in `requirements.txt`) in one step:
 
 ```bash
 cd claude-plasmids
@@ -18,9 +35,11 @@ conda env create -f environment.yml
 conda activate claude-plasmids
 ```
 
+This installs all Python dependencies — including pLannotate and everything in `requirements.txt` — in one step.
+
 ### 2. Download pLannotate annotation databases
 
-One-time download (~1–2 GB) required for GenBank annotation:
+One-time download (~1–2 GB). Required for GenBank export and feature annotation:
 
 ```bash
 plannotate setupdb
@@ -28,295 +47,419 @@ plannotate setupdb
 
 ### 3. Configure your API key
 
-Create a `.env` file in the `app/` directory:
+**Option A — settings menu (easiest):** Start the app and open **Settings** (gear icon, top-right). Paste your key in the *Anthropic API Key* field and click Save. The key is written to `app/.env` automatically.
+
+**Option B — `.env` file:** Create `app/.env` before starting:
 
 ```bash
 echo "ANTHROPIC_API_KEY=sk-ant-..." > app/.env
-export "ANTHROPIC_API_KEY=sk-ant-..." > app/.env
 ```
 
-You can get an API key at https://console.anthropic.com.
+Get an API key at https://console.anthropic.com.
 
-### Optional capabilities
+> The app will open without a key, but sending a message will prompt you to add one via Settings.
 
-Additional env vars enable optional data sources:
+### 4. Optional capabilities
 
-| Env var | Effect | Availability |
-|---|---|---|
-| `ADDGENE_API_TOKEN` | Addgene developer API token. Required for automatic plasmid sequence retrieval from Addgene. Without this, sequences cannot be fetched automatically — users must manually upload GenBank files for any plasmid not already in the local library. See [Addgene API key setup](#addgene-api-key) below. | CLI + Web UI |
-| `PLASMID_USER_LIBRARY` | Path to a directory of user-provided GenBank files (`backbones/*.gb`, `inserts/*.gb`, `annotations/*.gb`). Backbone/insert entries appear with `user:` ID prefix. Annotation files extend pLannotate with custom feature recognition. | CLI + Web UI |
-| `BENCHLING_SUBDOMAIN` | Your Benchling workspace subdomain. Enables read+write access via Benchling's remote MCP. | CLI only¹ |
-| `PLASMID_ENABLE_PUBMED` | Default `1`. Set `0` to disable PubMed MCP (literature search + PMC full text). | CLI only¹ |
-| `UNPAYWALL_EMAIL` | Your email. Enables `fetch_oa_fulltext` for open-access papers outside PMC. | CLI + Web UI |
+Additional environment variables enable optional data sources. Set them in the **Settings** menu or in `app/.env`:
 
-### Addgene API key
+| Variable | Effect |
+|---|---|
+| `ADDGENE_API_TOKEN` | Addgene developer API token. Required for automatic sequence retrieval from Addgene. Without it, you must manually upload GenBank files for plasmids not in the local library. Tokens available at [addgene.org/tools/api](https://www.addgene.org/tools/api/). |
+| `PLASMID_USER_LIBRARY` | Path to a directory of user-provided GenBank files (`backbones/*.gb`, `inserts/*.gb`, `annotations/*.gb`). Entries appear with a `user:` ID prefix. |
+| `UNPAYWALL_EMAIL` | Your email. Enables `fetch_oa_fulltext` for open-access papers via Unpaywall. |
+| `BENCHLING_SUBDOMAIN` | Your Benchling workspace subdomain. Enables Benchling read/write via MCP. CLI agent only. |
+| `PLASMID_ENABLE_PUBMED` | Default `1`. Set `0` to disable PubMed MCP (literature search + PMC full text). CLI agent only. |
 
-The Addgene API token enables automatic retrieval of plasmid sequences directly from [Addgene's developer API](https://api.developers.addgene.org). Without it, the tool cannot fetch sequences for plasmids not already in the local library — you will need to manually download GenBank files from Addgene and upload them via the `PLASMID_USER_LIBRARY` mechanism.
+> The web UI uses the Anthropic API directly and cannot attach external MCP servers. Benchling and PubMed tools are only available via `python app/agent.py` or the evals harness.
 
-**To set up:**
+---
 
-1. Obtain an API token from the [Addgene developer portal](https://www.addgene.org/tools/api/).
-2. Add it to your `.env` file:
+## Running the App
 
-```bash
-ADDGENE_API_TOKEN=your-token-here
-```
-
-The token is automatically picked up at startup. No restart is required if you add it while the server is not running.
-
-¹ The web UI uses the raw Anthropic API (not the Agent SDK) and cannot attach external MCP servers. Benchling and PubMed tools are only available via `python app/agent.py` or the evals harness.
-
-### 4. Start the web UI
+### Web UI
 
 ```bash
 python app/app.py --reload
 # Open http://localhost:8000
 ```
 
-The `--reload` flag watches for file changes and automatically restarts the server, so edits to source files, the system prompt, or library JSON take effect immediately.
+The `--reload` flag watches for file changes and restarts automatically — useful during development. Drop it for production.
 
-To run without auto-reload (e.g., in production):
+### CLI agent
 
 ```bash
-python app/app.py
+python app/agent.py
 ```
+
+The CLI agent uses the Claude Agent SDK and supports external MCP servers (Benchling, PubMed).
+
+---
+
+## How to Use It Effectively
+
+### Basic prompts
+
+The simplest prompts work best. You don't need to specify technical details — the agent will ask for what it needs.
+
+```
+Put EGFP into pcDNA3.1(+)
+Design a plasmid to express human TP53 in HEK293 cells
+Add an N-terminal FLAG tag to EGFP in pcDNA3.1(+)
+I want to express a green fluorescent protein in mammalian cells
+Express a C-terminal HA-tagged mCherry in pcDNA3.1(+)
+Make a kinase-dead BRAF construct
+```
+
+### What the agent always does
+
+Every design runs a five-step workflow:
+1. **Clarify** — resolve backbone, insert, and any special requirements
+2. **Retrieve sequences** — from the curated library, Addgene, NCBI, or your files
+3. **Assemble** — deterministic string splicing at the MCS position
+4. **Validate** — backbone preservation, insert integrity, reading frame, start/stop codons, biological sanity
+5. **Export** — annotated GenBank file with provenance in the COMMENT field
+
+### Specifying backbones
+
+Name the backbone directly (`pcDNA3.1(+)`, `pLKO.1`, `pAAV-CMV`) or describe what you need:
+- `"mammalian expression, constitutive, strong"` → selects CMV-driven backbone
+- `"lentiviral, stable integration"` → selects a lentiviral transfer vector
+- `"bacterial, IPTG-inducible"` → selects pET-series or similar
+
+### Specifying inserts
+
+- **Fluorescent proteins**: use standard names (`EGFP`, `mCherry`, `mNeonGreen`, `tdTomato`). The agent routes FP-like names through FPbase automatically.
+- **Genes from NCBI**: say `human TP53`, `mouse Myc`, or just `TP53` and the agent will ask for species if ambiguous.
+- **Gene family disambiguation**: if you say `TRAF` or `H2B`, the agent will present all members and ask which one.
+- **Alternative gene names**: `PAI-1` resolves to `SERPINE1`, `eIF4e` resolves to the standard symbol, etc.
+
+### Tips for complex requests
+
+- **Fusion tags**: be explicit about terminus — "N-terminal FLAG on EGFP" or "mCherry with a C-terminal HA tag"
+- **Linkers**: for protein-protein fusions (not epitope tags), the agent uses `(GGGGS)×4` by default and will ask if you prefer something else
+- **Replacements**: "replace the CMV promoter with EF1α" triggers a feature-swap workflow, not a new assembly
+- **Uploading files**: drag a `.gb`, `.gbk`, or `.fasta` file into the chat — the agent annotates it and asks what you'd like to do with it
+
+---
+
+## Modes and Features
+
+### Standard plasmid design (MCS cloning)
+
+The default mode. Insert a gene into a backbone at the multiple cloning site. The agent resolves sequences from the curated library, Addgene, or NCBI, then splices them deterministically.
+
+Works for: fluorescent protein reporters, epitope-tagged proteins, any CDS from NCBI Gene.
+
+---
+
+### Protein tagging and fusions
+
+Handles N-terminal tags, C-terminal tags, and multi-domain fusions with automatic codon management at every junction:
+
+- Stop codons are removed from non-terminal parts
+- ATG is retained for small epitope tags (FLAG, HA, Myc, His6, V5)
+- ATG is removed from non-first protein partners in a fusion
+- Kozak sequences are inserted at the start
+
+Default linker for protein-protein fusions: `(GGGGS)×4`. Custom linkers accepted.
+
+```
+Add a FLAG tag to the N-terminus of EGFP in pcDNA3.1(+)
+Express H2B-mNeonGreen with a 7x GGGGS linker in pcDNA3.1(+)
+Make a C-terminally HA-tagged mCherry
+```
+
+---
+
+### Combinatorial fluorescent fusion design
+
+When you ask for a fluorescent fusion, the agent runs `design_fusion_variants` before assembling. This analyses:
+
+- **FP suitability** — pKa compatibility with target compartment (e.g., EGFP fails in lysosomes), oligomerization state, brightness
+- **Protein topology** — signal peptides, mitochondrial targeting sequences, transmembrane helices, GPI anchors; each feature may block one terminus
+- **Internal loop sites** — disordered regions in the target protein as candidate internal insertion sites
+- **Alternative FP suggestions** — if your requested FP has a known issue with the target compartment
+
+Returns ~5 ranked designs for you to choose from before assembly begins.
+
+```
+I want to tag CHCHD4 with mCherry to see where it localizes
+Design a fusion to label the ER membrane with EGFP
+```
+
+---
+
+### Golden Gate assembly
+
+For Type IIS enzyme-based cloning (Golden Gate, MoClo). The agent:
+
+1. Identifies the enzyme (BsaI, Esp3I/BsmBI, BbsI, PaqCI)
+2. Checks every insert for enzyme recognition sites — and if found in a CDS, offers to design a silent mutation to remove it
+3. Assembles parts from their carrier vectors, discarding the dropout cassette (mCherry/ccdB)
+4. Validates and exports
+
+```
+Assemble EGFP into my pDONR backbone using Golden Gate with BsaI
+```
+
+---
+
+### Golden Gate oligo design (de novo)
+
+When you have raw sequences and want to design a Golden Gate assembly from scratch, the agent designs the primer/oligo set. Supported output formats:
+
+| Format | Description |
+|---|---|
+| PCR primers | Forward/reverse primers per fragment with enzyme sites in tails |
+| Annealing oligos | Top/bottom oligo pairs — no digestion step; best for ≤500 bp fragments |
+| gBlocks | Synthesis sequences with flanking enzyme sites |
+| Insert cassette | Complete insert for submission to a synthesis vendor (Ansa, Twist) |
+| Part-in-vector | Full circular plasmid per fragment for whole-plasmid synthesis (Azenta/Genewiz) |
+
+```
+Design Golden Gate oligos for a 3-fragment assembly using BsaI
+I need to clone EGFP and mCherry into pDONR using PaqCI — give me annealing oligos
+```
+
+---
+
+### Vendor backbone import
+
+Import and save backbones from synthesis vendors (Ansa, Twist, Azenta, etc.) by uploading the GenBank file or pasting the sequence. The agent:
+
+1. Detects the enzyme and insertion site automatically where possible
+2. Saves the backbone to the library under a `vendor:` ID
+3. Optionally builds the complete part-in-vector plasmids and exports them
+
+---
+
+### Feature swapping (promoter and terminator replacements)
+
+Replace any annotated feature in a plasmid — promoter, terminator, CDS, or regulatory element — by name. The agent uses pLannotate to locate the feature and handles orientation automatically. For promoter swaps, it checks for adjacent enhancers (CMV enhancer + CMV promoter) and swaps both together.
+
+```
+Replace the CMV promoter in pcDNA3.1(+) with EF1α
+Swap the BGH polyA for SV40 polyA
+```
+
+---
+
+### Internal loop insertion
+
+When both termini of a target protein are blocked by signal peptides, transmembrane helices, or targeting sequences, the agent predicts disordered internal loops as candidate insertion sites and offers the top candidates for selection.
+
+---
+
+### Smart mutation design
+
+Introduces GoF or LoF point mutations into any CDS. Has a curated database of well-validated mutations for common oncogenes and tumor suppressors (BRAF, KRAS, TP53, EGFR, PIK3CA, IDH1/2, PTEN, AKT1, MYC, RB1, FBXW7, CTNNB1, NRAS).
+
+- **Point mutation**: swaps exactly one codon using the Kazusa human codon-usage table
+- **Premature stop (LoF)**: inserts a stop codon at a specified fractional position
+
+```
+Make BRAF V600E in pcDNA3.1(+)
+Design a kinase-dead version of EGFR
+Give me a TP53 dominant-negative (R175H) construct
+```
+
+---
+
+### Bespoke promoter design
+
+When you request a promoter that is not in the standard set, the agent asks which approach you prefer:
+
+1. Search Addgene for published constructs
+2. Paste the promoter sequence directly
+3. Fetch the native upstream region (~2 kb upstream of TSS) from NCBI
+
+---
+
+### Plasmid file upload intake
+
+Drag a `.gb`, `.gbk`, or `.fasta` file into the chat. The agent:
+
+1. Annotates the plasmid with pLannotate
+2. Infers the plasmid type (backbone, part-in-vector, expression plasmid)
+3. Walks through a short Q&A to collect metadata (vendor, enzyme, insertion point, name)
+4. Saves it to the appropriate library location
+
+After saving, you can immediately use the plasmid in a new design.
+
+---
+
+### Bulk design
+
+Design multiple plasmids at once by uploading a CSV of descriptions. The bulk workflow builds a preview of the first construct for your approval, then processes the remaining rows automatically.
+
+See the [Batch Design](#batch-design) section for CSV format and CLI instructions.
+
+---
+
+### Literature-assisted design
+
+When you reference a paper, the agent searches PubMed for the citation, scans the Methods section for plasmid names and Addgene IDs, and routes them through the normal design workflow. Requires `PLASMID_ENABLE_PUBMED=1` (default) in the CLI agent.
+
+```
+The plasmid I want is described in PMID 31819157 — can you find and export it?
+```
+
+---
+
+### Troubleshooting mode
+
+When you describe a failed experiment, the agent:
+
+1. Acknowledges the prior attempt and observed outcome
+2. Diagnoses the likely cause (no expression, wrong size, mislocalization, toxicity)
+3. Re-scores the insert with the Design Confidence Score
+4. Proposes 1–3 concrete changes
+5. Logs the new outcome when you report results
+
+```
+I assembled EGFP in pcDNA3.1(+) last week but got no fluorescence. The cells survived and the plasmid was present on Western.
+```
+
+---
+
+### Design Confidence Score
+
+Before finalizing any construct, the agent can compute a 0–100 confidence score for the insert that checks:
+
+- Cryptic polyadenylation signals
+- Cryptic splice sites
+- Codon Adaptation Index (CAI) for human expression
+- Kozak context
+- GC content extremes
+- Homopolymer runs
+- Promoter count in the backbone
+
+Scores below 70 are flagged with a recommendation; scores below 50 prompt a redesign suggestion.
+
+---
 
 ## Architecture
 
 ```
-src/
-├── assembler.py           # Deterministic sequence assembly engine + fusion support
-├── library.py             # Backbone/insert library search + Addgene/NCBI auto-fallback
-├── ncbi_integration.py    # NCBI Entrez gene search + CDS retrieval (Biopython)
-├── server.py              # MCP server with 18 tools (imports from library.py)
-├── tools.py               # Standalone tool definitions for agent loop
-└── addgene_integration.py # Addgene web scraping, GenBank feature parsing, API client
+src/                          # Core modules
+├── assembler.py              # Deterministic sequence assembly engine
+├── library.py                # Library search + Addgene/NCBI auto-fallback
+├── user_library.py           # BYOL — load user-provided GenBank files
+├── ncbi_integration.py       # NCBI Entrez gene search + CDS retrieval
+├── addgene_integration.py    # Addgene API client + GenBank parsing
+├── fpbase_integration.py     # FPbase fluorescent protein database
+├── tools.py                  # All tool definitions + build_mcp_servers()
+├── server.py                 # MCP server (wraps tools.py)
+├── fusion_designer.py        # Combinatorial FP fusion ranking
+├── protein_analysis.py       # Disorder prediction, topology analysis
+├── confidence.py             # Design Confidence Score engine
+├── mutations.py              # Curated GoF/LoF DB + codon-swap engine
+├── restriction_utils.py      # Enzyme site checking + silent mutations
+├── gg_denovo.py              # Golden Gate oligo design (de novo)
+├── vendor_backbone.py        # Vendor backbone import + library saving
+├── genbank_utils.py          # GenBank parsing, formatting, export & annotation plot
+├── custom_annotations.py     # BYOL custom annotation BLAST integration
+├── literature.py             # Unpaywall open-access full-text lookup
+├── plasmid_intake.py         # File upload parsing + pLannotate intake
+├── references.py             # Provenance tracking for export
+└── codon_tables.py           # Kazusa human codon-usage table
 
-app/
-├── app.py                 # Web UI + SSE streaming server
-├── agent.py               # Claude Agent SDK agent loop
-└── system_prompt.md       # Agent system prompt (5-step workflow)
+app/                          # Web UI + agent
+├── app.py                    # HTTP server (SSE streaming, file upload)
+├── agent.py                  # Claude Agent SDK agent loop
+├── sessions.py               # In-memory session and job state
+├── streaming.py              # Anthropic streaming agent loop
+├── batch_worker.py           # Background batch job workers
+├── bulk_planner.py           # Bulk design planning + cost estimation
+├── database.py               # Constructs SQLite database
+└── system_prompt.md          # Agent system prompt
 
-library/
-├── backbones.json         # Curated backbones + auto-cached Addgene fetches (grows over time)
-└── inserts.json           # Inserts: fluorescent proteins, reporters, epitope tags, NCBI genes
+library/                      # JSON data (curated + auto-cached)
+├── backbones.json            # Curated backbones + Addgene cache
+├── inserts.json              # Fluorescent proteins, reporters, epitope tags
+└── vendor_backbones.json     # Vendor backbone registry
 
-evals/
-├── rubric.py              # Allen Institute verification rubric (~32 weighted checks, 6 sections)
-├── test_cases.py          # 27 benchmark cases across 3 tiers
-├── simulated_user.py      # Simulated user for multi-turn disambiguation evals
-├── llm_judge.py           # LLM-as-judge grading for transcript quality
-└── run_agent_evals.py     # End-to-end agent eval runner (39 cases, Claude Agent SDK)
+evals/                        # Evaluation infrastructure
+├── rubric.py                 # Weighted scoring rubric (~32 checks, 6 sections)
+├── test_cases.py             # Benchmark cases across 3 pipeline tiers
+├── run_agent_evals.py        # End-to-end agent eval runner
+├── simulated_user.py         # Simulated user for multi-turn evals
+└── llm_judge.py              # LLM-as-judge for transcript quality
 
-tests/
-├── test_assembler.py      # Assembly engine tests (22 tests)
-├── test_library.py        # Library function tests (7 tests)
-└── test_pipeline.py       # Pipeline integration tests (27 cases, rubric-scored)
-
-requirements.txt             # Python dependencies
+tests/                        # Test suite
+├── test_assembler.py         # Assembly engine
+├── test_library.py           # Library functions
+├── test_pipeline.py          # Pipeline integration (rubric-scored)
+├── test_user_library.py      # BYOL tests
+├── test_annotation.py        # pLannotate annotation tests
+├── test_gg_denovo.py         # Golden Gate oligo design
+├── test_golden_gate.py       # GG assembly
+├── test_mutations.py         # Mutation design
+└── ...                       # Additional unit tests
 ```
 
-## How It Works
+### Key design principle
 
-1. **User describes what they want** — e.g., "Put EGFP into pcDNA3.1(+)"
-2. **Claude retrieves sequences** — from the curated library first, auto-fetching from Addgene (with GenBank feature parsing) if not found locally
-3. **Deterministic assembly** — insert spliced into backbone at MCS position (string operations, not LLM generation)
-4. **Validation** — rubric-based checks (backbone preserved, insert intact, correct orientation, reading frame, start/stop codons)
-5. **Export + Download** — raw sequence, FASTA, or GenBank format with annotations; browser download button for exported files
+Every nucleotide in the output comes from a verified source: the curated library JSON, Addgene (via API), NCBI RefSeq (via Biopython/Entrez), or a sequence the user provides directly. The assembly engine is deterministic string splicing. Claude never generates, guesses, or hallucinates DNA sequences.
 
-## Key Design Principle
+---
 
-Every nucleotide in the output comes from a verified source (library JSON, Addgene, GenBank, or user input). The assembly engine is deterministic string splicing. Claude never generates DNA sequences.
+## Backbone and Insert Library
 
-## Running Tests
+### Backbone library
 
-```bash
-# All tests (unit + integration + pipeline), excluding slow pLannotate BLAST tests
-python -m pytest tests/ -v -m "not slow"
+21+ curated backbones including:
+- **Mammalian**: pcDNA3.1(+), pcDNA3.1(−), pCMV, pEGFP-N1, pCAGGS
+- **Lentiviral**: pLKO.1-puro, pBABE-puro, pHAGE
+- **AAV**: pAAV-CMV
+- **Bacterial**: pUC19, pGEX-4T-1, pET-28a, pBR322
+- **Yeast/insect**: pPICZ, pFastBac
 
-# Include slow tests (requires plannotate setupdb)
-python -m pytest tests/ -v
+When a backbone is not found locally, it is auto-fetched from Addgene (requires `ADDGENE_API_TOKEN`), its GenBank file is parsed for sequence and features (promoters, resistance genes, origins, polyA signals, MCS), and the result is cached in `backbones.json` for all future lookups.
 
-# Annotation tests only
-python -m pytest tests/test_annotation.py -v -m "not slow"
+### Insert library
 
-# Pipeline tests only (rubric-scored assembly cases)
-python -m pytest tests/test_pipeline.py -v
+Curated inserts in `library/inserts.json`:
+- **Fluorescent proteins**: EGFP, mCherry, mNeonGreen, mTurquoise2, tdTomato, mRuby3, iRFP713, and more
+- **Reporters**: firefly luciferase, Renilla luciferase, NanoLuc, β-galactosidase, Cre recombinase
+- **Epitope tags**: FLAG, HA, Myc, His6, V5, Strep-II, AVI, SNAP, HALO
 
-# Single pipeline case
-python -m pytest tests/test_pipeline.py -v -k "T1_001"
+Any gene not in the curated library is automatically retrieved from NCBI Gene + RefSeq via Biopython.
 
-# Pipeline tests by tier
-python -m pytest tests/test_pipeline.py -v -k "tier1"
-python -m pytest tests/test_pipeline.py -v -k "tier2"
-python -m pytest tests/test_pipeline.py -v -k "tier3"
-```
+---
 
-## Running Evals
+## Bring Your Own Library (BYOL)
 
-Evals send natural language prompts through the full Claude agent loop and score the output. Requires `ANTHROPIC_API_KEY` in `app/.env`.
-
-```bash
-python -m evals.run_agent_evals
-python -m evals.run_agent_evals --case A1-001 -v
-python -m evals.run_agent_evals --model sonnet
-```
-
-## Test Tiers
-
-### Pipeline tests
-
-Pipeline tests (`tests/test_pipeline.py`) run the assembly engine directly against 27 benchmark cases:
-
-| Tier | Cases | Description |
-|------|-------|-------------|
-| 1 | 16 | Library sequences provided directly (baseline correctness) |
-| 2 | 7 | Backbone/insert resolved by alias from library (name resolution) |
-| 3 | 4 | Addgene ground truth comparison (end-to-end validation) |
-
-### Agent evals
-
-Agent evals (`evals/run_agent_evals.py`) send natural language prompts through the full Claude agent loop and score output with the Allen Institute rubric. 39 cases across 8 categories:
-
-| Category | ID Prefix | Cases | Description |
-|----------|-----------|-------|-------------|
-| Explicit backbone + insert | A1 | 9 | Both backbone and insert named directly (e.g., "Put EGFP into pcDNA3.1(+)"). Baseline correctness across multiple backbones. |
-| Alias / name resolution | A2 | 5 | Common aliases and variant spellings (e.g., "eGFP", "GFP", "pGEX", "pcDNA3.1-"). Tests fuzzy matching. |
-| Natural language | A3 | 3 | Underspecified requests where the agent must infer backbone and insert (e.g., "I want a green fluorescent protein in mammalian cells"). May have multiple valid answers via `alternative_expected`. |
-| Specific insert types | A4 | 4 | Non-standard inserts: large reporters (luciferase, 1653 bp), small epitope tags (FLAG 24 bp, HA 27 bp), tandem dimers (tdTomato). |
-| Multi-step workflow | A5 | 3 | Full 5-step workflow: retrieve, assemble, validate, export. Agent must call multiple tools in sequence. |
-| NCBI gene retrieval | A6 | 7 | Genes not in the local library — agent must use NCBI Entrez. Includes species disambiguation, gene family disambiguation, alternative name resolution (PAI-1 → SERPINE1), and natural language backbone selection. Multi-turn cases use `user_persona` with a simulated user. |
-| Protein tagging / fusions | A7 | 5 | N-terminal and C-terminal tag fusions (FLAG-EGFP, mCherry-HA), NCBI + fusion (H2B-EGFP with default and custom linkers). Tests `fuse_inserts` tool, start/stop codon management, and Kozak sequence handling. Uses `expected_insert_sequence` for ground truth. |
-| Negative / balanced | A8 | 3 | Tests that the agent does NOT over-trigger tools. E.g., EGFP (in local library) should not call NCBI; plain EGFP should not call `fuse_inserts`. Uses `tools_should_not_use` assertions. |
-
-## Verification Rubric
-
-The rubric implements the Allen Institute's weighted scoring system across 6 sections:
-
-| Section | Checks | What it validates |
-|---------|--------|-------------------|
-| Input Validation | Backbone/insert valid DNA, start/stop codons, reading frame | Source sequences are correct |
-| Construct Assembly | Insert found, correct position, correct orientation, backbone preserved | Assembly engine correctness |
-| Construct Integrity | Full-length output, total size, key features preserved | Structural completeness |
-| Biological Sanity | Promoter upstream, polyA downstream, markers intact, origins intact, Kozak context | Biological validity |
-| Output Verification | GenBank format, parseable, sequence match, LOCUS size, annotations | Export quality |
-| Output Quality | Ground truth comparison (Addgene) | End-to-end accuracy |
-
-Severity weights: **Critical** = 2 pts, **Major** = 1 pt, **Minor** = 0.5 pts, **Info** = 0 pts. A case passes if there are no Critical failures and the weighted score is >= 90%.
-
-## Current Results
-
-- **64 tests passing** (31 unit/integration + 33 pipeline), 1 skipped (pET-28a has no sequence)
-- **22/22** Tier 1+2 pipeline tests at 100%
-- **4/4** Tier 3 Addgene ground truth tests at 100%
-- Primary benchmark (pcDNA3.1(+) + EGFP): **30.0/30.0 pts** across 25 scored checks
-
-## Phased Development Roadmap
-
-| Phase | Scope | Status |
-|-------|-------|--------|
-| **Phase 1** | Single plasmid design for mammalian cells: assembly engine, validation rubric, Addgene integration, NCBI gene retrieval, protein tagging/fusions, web UI, evals | In progress |
-| **Phase 2** | Multi-plasmid systems, lentiviral packaging vectors, CRISPR guide RNA design, codon optimization | Planned |
-| **Phase 3** | Advanced workflows: restriction enzyme cloning simulation, primer design, gateway cloning, Gibson assembly | Planned |
-
-## Completed Sprint Goals
-
-- **NCBI Gene Retrieval** — Users say "human TP53" and get the correct CDS sequence from NCBI RefSeq
-- **Protein Tagging / Fusions** — N-terminal/C-terminal tag fusions (e.g., FLAG-EGFP) with automatic start/stop codon management
-- **Natural Language Backbone Selection** — Autonomous backbone selection based on expression context (organism, promoter, selection)
-- **Gene Name Disambiguation** — Ambiguous gene names (TRAF -> TRAF1-7), alternative names (SERPINE1 = PAI-1), species disambiguation
-- **Multi-turn Disambiguation Evals** — Simulated user for testing agent clarification workflows
-
-## Sample Prompts
-
-```
-"Put EGFP into pcDNA3.1(+)"
-"Design a plasmid to express human TP53 in HEK293 cells"
-"Add an N-terminal FLAG tag to EGFP in pcDNA3.1(+)"
-"I want to express a green fluorescent protein in mammalian cells"
-"Design a vector to allow expression of MyD88 in RAW 264 cells"
-"Express a C-terminal HA-tagged mCherry in pcDNA3.1(+)"
-```
-
-## MCP Server
-
-The MCP server (`src/server.py`) exposes 18 tools for Claude to use:
-
-- `search_backbones` / `get_backbone` — search and retrieve backbone vectors
-- `search_inserts` / `get_insert` — search and retrieve insert sequences
-- `search_addgene` / `fetch_addgene_sequence_with_metadata` / `import_addgene_to_library` — Addgene integration
-- `search_gene` / `fetch_gene` — NCBI gene search + CDS retrieval
-- `fuse_inserts` — protein tagging / fusion CDS assembly
-- `validate_sequence` — DNA validation (valid chars, GC content, codons)
-- `assemble_construct` — deterministic sequence assembly
-- `export_construct` — format as raw/FASTA/GenBank
-- `validate_construct` — rubric-style validation report
-- `get_insertion_site` — MCS position info
-- `design_construct` — metadata and size estimates
-
-To use as a standalone MCP server:
-
-```bash
-python -m src.server
-```
-
-## Backbone Library
-
-21 curated backbones including pcDNA3.1(+/-), pUC19, pEGFP-N1, pGEX-4T-1, pBABE-puro, pAAV-CMV, pLKO.1-puro, pCDNA3, and more. When a backbone isn't found locally, it is automatically fetched from Addgene — the GenBank file is parsed for sequence, feature annotations (promoters, resistance genes, origins, polyA signals, MCS), and cached in `backbones.json` for future fast lookups. Backbones with feature annotations get full biological sanity checks in the rubric.
-
-## Custom Annotations
-
-The custom annotation system lets you extend pLannotate's feature recognition with your own sequences — useful for lab-private constructs or recently-published sequences not yet in any public database.
-
-### Setup
-
-Place annotated GenBank files in an `annotations/` subdirectory of your `PLASMID_USER_LIBRARY`:
+Point `PLASMID_USER_LIBRARY` at a directory of GenBank files:
 
 ```
 $PLASMID_USER_LIBRARY/
-    backbones/          ← existing BYOL backbones
-    inserts/            ← existing BYOL inserts
-    annotations/        ← custom annotation GenBank files (NEW)
-        my_promoter.gb
-        new_fluorophore.gb
-        ...
+    backbones/        ← backbone vectors (.gb or .gbk)
+    inserts/          ← insert sequences (.gb or .gbk)
+    annotations/      ← custom annotation files for pLannotate
 ```
 
-Each GenBank file can contain one or more annotated features. Any feature with a `/label`, `/gene`, or `/product` qualifier is extracted and becomes a BLAST target. The feature type (CDS, promoter, misc_feature, etc.) and label are preserved in the annotation output.
+User library entries appear in search results with a `user:` ID prefix and are treated identically to curated entries. The BYOL path is read-only at startup — add files to the directory and restart to make them available.
 
-### How it works
+---
 
-On startup, the app automatically:
+## Custom Annotations
+
+Extend pLannotate's feature recognition with your own sequences — useful for lab-private constructs or recently-published sequences not yet in any public database.
+
+Place annotated GenBank files in `$PLASMID_USER_LIBRARY/annotations/`. Each file can contain one or more annotated features. Any feature with a `/label`, `/gene`, or `/product` qualifier is extracted and becomes a local BLAST target.
+
+On startup the app:
 1. Scans `annotations/*.gb` for annotated features
-2. Builds a local BLAST database from those features (stored in `annotations/.blast_db/`)
-3. Rebuilds only when the source files change (MD5 manifest cache)
+2. Builds a local BLAST database (stored in `annotations/.blast_db/`)
+3. Rebuilds only when source files change (MD5 manifest cache)
 
-When you call `extract_insert_from_plasmid` or `extract_inserts_from_plasmid`, results from your custom database are merged with pLannotate's output. Custom annotations take priority when they cover the same region at equal or higher identity.
+When you call `extract_insert_from_plasmid` or `extract_inserts_from_plasmid`, custom annotation results are merged with pLannotate output. Custom annotations take priority when they cover the same region.
 
-### Privacy
+All sequences stay local — the BLAST database is built and queried via local subprocesses. BLAST+ is installed automatically with the conda environment.
 
-All annotation sequences stay on your local machine. The BLAST database is built and queried entirely via local subprocesses — no sequences are transmitted to any external service.
-
-### Requirements
-
-BLAST+ must be available (it is installed automatically with the conda environment):
-
-```bash
-conda activate claude-plasmids
-which makeblastdb   # should resolve to the conda env bin
-```
-
-If BLAST is not found, custom annotations are silently disabled and pLannotate-only behaviour is preserved.
-
-### Example
-
-Given a GenBank file `annotations/mCerulean3.gb` with a CDS feature labelled `mCerulean3`, the agent can then extract it by name from any plasmid that contains it:
-
-```
-"Extract mCerulean3 from the sequence I uploaded"
-```
-
-The feature will be found even if pLannotate's built-in databases don't include it.
+---
 
 ## Batch Design
 
@@ -324,25 +467,19 @@ Design multiple plasmids at once by uploading a CSV of descriptions.
 
 ### Web UI
 
-Drag and drop your design CSV (see below for expected format) into the chat pane to upload your file. Each row runs through the full agent loop independently. A live progress panel shows the status of every row and provides per-file download buttons as results come in.
+Drag and drop your design CSV into the chat pane. A live progress panel shows the status of every row and provides per-file download buttons as results arrive.
 
-### CLI
+### CSV format
 
-```bash
-python app/batch.py designs.csv
-python app/batch.py designs.csv --output ./outputs/
-python app/batch.py designs.csv --output ./outputs/ --model claude-sonnet-4-6
-```
+The CSV must have a `description` column:
 
-The CSV must have a `description` column. Two optional columns control output:
-
-| column | required | description |
+| Column | Required | Description |
 |---|---|---|
-| `description` | yes | free-text design prompt |
-| `name` | no | output filename prefix (default: `plasmid_001`, `plasmid_002`, …) |
+| `description` | yes | Free-text design prompt |
+| `name` | no | Output filename prefix (default: `plasmid_001`, `plasmid_002`, …) |
 | `output_format` | no | `genbank` / `fasta` / `both` (default: `genbank`) |
 
-Example CSV:
+Example:
 
 ```csv
 description,name,output_format
@@ -351,4 +488,94 @@ description,name,output_format
 "Tag GAPDH with FLAG at the C-terminus",gapdh_flag,fasta
 ```
 
-Rows run sequentially to avoid API rate limits. Output files are saved to the output directory; if no export is produced the agent's text response is saved as `<name>_output.txt` for inspection.
+---
+
+## Tests and Evals
+
+### Running tests
+
+```bash
+# All tests (unit + integration + pipeline), excluding slow pLannotate BLAST tests
+pytest tests/ -v -m "not slow"
+
+# Include slow tests (requires plannotate setupdb)
+pytest tests/ -v
+
+# Pipeline tests only (rubric-scored assembly cases)
+pytest tests/test_pipeline.py -v
+
+# Single pipeline case
+pytest tests/test_pipeline.py -v -k "T1_001"
+
+# By tier
+pytest tests/test_pipeline.py -v -k "tier1"
+pytest tests/test_pipeline.py -v -k "tier2"
+```
+
+### Pipeline test tiers
+
+Pipeline tests (`tests/test_pipeline.py`) run the assembly engine directly against 27 benchmark cases:
+
+| Tier | Cases | Description |
+|---|---|---|
+| 1 | 16 | Library sequences provided directly (baseline correctness) |
+| 2 | 7 | Backbone/insert resolved by alias (name resolution) |
+| 3 | 4 | Addgene ground truth comparison (end-to-end) |
+
+### Running agent evals
+
+Agent evals send natural language prompts through the full Claude agent loop and score output with the Allen Institute rubric. Requires `ANTHROPIC_API_KEY`.
+
+```bash
+python -m evals.run_agent_evals
+python -m evals.run_agent_evals --case AS-001 -v
+python -m evals.run_agent_evals --model sonnet
+```
+
+68 cases across 18 series:
+
+| Series | Prefix | Description |
+|---|---|---|
+| Explicit Assembly | AS | Both components named directly — baseline correctness |
+| Name / Alias Resolution | NR | Common aliases and variant spellings |
+| Natural Language | NL | Underspecified requests; agent must infer components |
+| Insert Types | IT | Luciferase, epitope tags, large inserts |
+| Workflow | WF | Full pipeline: retrieve, assemble, validate, export |
+| Gene Retrieval | GR | NCBI retrieval, species disambiguation, alt gene names |
+| Fusion Design | FU | N/C-terminal tags, NCBI + fusion, custom linkers |
+| Negative / Balanced | NE | Verifies agent does NOT over-trigger tools |
+| Disambiguation | DI | Species, gene family, variant selection, conflict detection, FPbase routing |
+| Confidence Score | CS | Design confidence scoring, cryptic signal detection |
+| Bespoke Promoter | BP | Non-standard promoter detection, user-paste, upstream fetch |
+| Intelligent Fusion | IF | Disorder-based internal fusion site prediction |
+| Mutation Design | MU | Curated GoF/LoF lookup, deterministic codon editing |
+| Troubleshooting | TR | Diagnose lab failures, propose remediation |
+| Golden Gate | GG | GG assembly, compound construct name parsing |
+| Extract / Download | EX | Addgene download, CDS extraction, GenBank export |
+| Parts Swap | SW | Annotation-driven cassette swap, linker swap, terminator swap |
+| Bulk Design | BK | Multi-construct routing to submit_bulk_designs |
+
+### Verification rubric
+
+The rubric implements a weighted scoring system across 6 sections:
+
+| Section | What it validates |
+|---|---|
+| Input Validation | Backbone/insert valid DNA, start/stop codons, reading frame |
+| Construct Assembly | Insert found, correct position/orientation, backbone preserved |
+| Construct Integrity | Full-length output, total size, key features present |
+| Biological Sanity | Promoter upstream, polyA downstream, markers intact, origins intact, Kozak context |
+| Output Verification | GenBank format, parseable, sequence match, LOCUS size, annotations |
+| Output Quality | Ground truth comparison (Addgene) |
+
+Severity weights: Critical = 2 pts, Major = 1 pt, Minor = 0.5 pts, Info = 0 pts. A case passes if there are no Critical failures and weighted score ≥ 90%.
+
+---
+
+## Development Roadmap
+
+| Phase | Scope | Status |
+|---|---|---|
+| **Phase 1** | Single plasmid design for mammalian cells: assembly engine, validation rubric, Addgene + NCBI + FPbase integration, protein tagging/fusions, Golden Gate, smart mutations, web UI, evals | In progress |
+| **Phase 2** | Multi-plasmid systems, lentiviral packaging vectors, CRISPR guide RNA design | Planned |
+| **Phase 3** | Advanced workflows: gateway cloning, Gibson assembly simulation, primer design, codon optimization | Planned |

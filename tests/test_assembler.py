@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from assembler import (
+from src.assembler import (
     assemble_construct,
     fuse_sequences,
     clean_sequence,
@@ -19,7 +19,7 @@ from assembler import (
     DEFAULT_FUSION_LINKER,
     KOZAK,
 )
-from library import get_backbone_by_id, get_insert_by_id
+from src.library import get_backbone_by_id, get_insert_by_id
 
 
 # ── Unit tests ──────────────────────────────────────────────────────────

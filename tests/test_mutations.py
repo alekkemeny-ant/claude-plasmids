@@ -4,10 +4,10 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
-from mutations import (
+from src.analysis.mutations import (
     lookup_known_mutations,
     apply_point_mutation,
     design_premature_stop,

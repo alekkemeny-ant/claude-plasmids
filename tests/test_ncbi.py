@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from library import is_known_promoter, KNOWN_PROMOTERS
+from src.library import is_known_promoter, KNOWN_PROMOTERS
 
 
 class TestKnownPromoters:
@@ -38,7 +38,7 @@ class TestKnownPromoters:
 # ── Network-dependent tests (marked slow) ────────────────────────────────
 
 try:
-    from ncbi_integration import fetch_genomic_upstream, BIOPYTHON_AVAILABLE
+    from src.integrations.ncbi_integration import fetch_genomic_upstream, BIOPYTHON_AVAILABLE
 except ImportError:
     BIOPYTHON_AVAILABLE = False
 

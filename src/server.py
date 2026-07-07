@@ -25,7 +25,7 @@ from mcp.server.stdio import stdio_server
 
 # Import Addgene integration (optional - gracefully degrades if not available)
 try:
-    from .addgene_integration import (
+    from src.integrations.addgene_integration import (
         AddgeneLibraryIntegration,
         search_addgene as _search_addgene,
         fetch_addgene_sequence_with_metadata as _fetch_addgene_sequence_with_metadata,
@@ -34,18 +34,17 @@ try:
 except ImportError:
     ADDGENE_AVAILABLE = False
 
-from .assembler import (
+from src.assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
     find_mcs_insertion_point,
-    export_construct as _export_construct,
     clean_sequence,
     DEFAULT_FUSION_LINKER,
 )
 
 # NCBI integration (optional)
 try:
-    from .ncbi_integration import (
+    from src.integrations.ncbi_integration import (
         search_gene as _search_gene,
         fetch_gene_sequence as _fetch_gene,
     )
@@ -53,7 +52,7 @@ try:
 except ImportError:
     NCBI_AVAILABLE = False
 
-from .library import (
+from src.library import (
     load_backbones,
     load_inserts,
     search_backbones,
@@ -950,10 +949,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=output)]
 
     elif name == "export_construct":
-        from .assembler import (
-            format_as_fasta,
-            format_as_genbank,
-        )
+        from src.assembler import format_as_fasta
+        from src.utils.genbank_utils import format_as_genbank
 
         sequence = clean_sequence(arguments["sequence"])
         fmt = arguments["output_format"]
@@ -1019,7 +1016,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         critical_fail = False
 
         # 1. Valid DNA
-        from .assembler import validate_dna
+        from src.assembler import validate_dna
         dna_ok, dna_errs = validate_dna(construct_seq)
         checks.append(("Construct is valid DNA", "Critical", dna_ok, "; ".join(dna_errs) if dna_errs else ""))
         if not dna_ok:

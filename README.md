@@ -570,12 +570,3 @@ The rubric implements a weighted scoring system across 6 sections:
 
 Severity weights: Critical = 2 pts, Major = 1 pt, Minor = 0.5 pts, Info = 0 pts. A case passes if there are no Critical failures and weighted score ≥ 90%.
 
----
-
-## Development Roadmap
-
-| Phase | Scope | Status |
-|---|---|---|
-| **Phase 1** | Single plasmid design for mammalian cells: assembly engine, validation rubric, Addgene + NCBI + FPbase integration, protein tagging/fusions, Golden Gate, smart mutations, web UI, evals | In progress |
-| **Phase 2** | Multi-plasmid systems, lentiviral packaging vectors, CRISPR guide RNA design | Planned |
-| **Phase 3** | Advanced workflows: gateway cloning, Gibson assembly simulation, primer design, codon optimization | Planned |

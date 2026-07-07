@@ -38,7 +38,7 @@ class TestKnownPromoters:
 # ── Network-dependent tests (marked slow) ────────────────────────────────
 
 try:
-    from src.ncbi_integration import fetch_genomic_upstream, BIOPYTHON_AVAILABLE
+    from src.integrations.ncbi_integration import fetch_genomic_upstream, BIOPYTHON_AVAILABLE
 except ImportError:
     BIOPYTHON_AVAILABLE = False
 

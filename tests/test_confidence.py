@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.confidence import (
+from src.analysis.confidence import (
     check_cai,
     check_cryptic_polya,
     check_cryptic_splice,
@@ -19,7 +19,7 @@ from src.confidence import (
     compute_confidence,
     format_confidence_report,
 )
-from src.codon_tables import HUMAN_CODON_W, HUMAN_OPTIMAL_CODONS
+from src.utils.codon_tables import HUMAN_CODON_W, HUMAN_OPTIMAL_CODONS
 
 
 # ── Helper: build a "clean" CDS of given length using optimal codons ───

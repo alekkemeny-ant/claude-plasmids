@@ -84,7 +84,7 @@ def run_plannotate_annotate(sequence: str, linear: bool = False):
 
 # Optional custom annotation DB (BYOA — bring your own annotations)
 try:
-    from src.custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
+    from src.analysis.custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
     _CUSTOM_ANNOTATIONS_AVAILABLE = True
 except ImportError:
     _CUSTOM_ANNOTATIONS_AVAILABLE = False
@@ -313,7 +313,7 @@ def export_plasmid_genbank(
 
     # Annotate enzyme recognition sites
     if enzyme_name:
-        from src.assembler import GG_ENZYMES
+        from src.golden_gate.assembly import GG_ENZYMES
         if enzyme_name in GG_ENZYMES:
             rec_site = GG_ENZYMES[enzyme_name]["recognition"]
             for site, strand in [(rec_site, 1), (_rc(rec_site), -1)]:

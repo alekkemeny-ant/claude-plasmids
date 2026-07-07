@@ -12,13 +12,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.assembler import (
+from src.assembler import reverse_complement
+from src.golden_gate.assembly import (
     GG_ENZYMES,
     GoldenGateResult,
     find_gg_sites,
     _excise_insert,
     assemble_golden_gate,
-    reverse_complement,
 )
 
 

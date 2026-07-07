@@ -16,9 +16,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-# Dual-import: src/tools.py imports this as a package (`src.confidence`),
+# Dual-import: src/tools.py imports this as a package (`src.analysis.confidence`),
 # tests/ and app/app.py import it flat (`confidence`) via sys.path hack.
-from src.codon_tables import HUMAN_CODON_W
+from src.utils.codon_tables import HUMAN_CODON_W
 
 
 @dataclass

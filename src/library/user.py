@@ -40,10 +40,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-try:
-    from .genbank_utils import parse_genbank, is_circular, GENBANK_EXTENSIONS
-except ImportError:
-    from genbank_utils import parse_genbank, is_circular, GENBANK_EXTENSIONS
+from src.utils.genbank_utils import parse_genbank, is_circular, GENBANK_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 

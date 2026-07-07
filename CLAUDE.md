@@ -9,17 +9,34 @@ is a package). No bare `from X import` and `src/` is not on `sys.path`.
 
 ```
 src/                        # Core modules (a package — src/__init__.py)
-├── assembler.py            # Deterministic sequence assembly engine
-├── library/                # Library package (facade re-exports its public API)
-│   ├── __init__.py         # Public API: from src.library import load_backbones, ...
-│   ├── core.py             # Built-in library search/get + Addgene/NCBI/FPbase fallback
-│   ├── user.py             # BYOL — user GenBank files ($PLASMID_USER_LIBRARY)
-│   └── vendor.py           # Vendor backbones (Ansa, Twist, ...) -> vendor_backbones.json
-├── ncbi_integration.py     # NCBI Entrez gene search + CDS retrieval
-├── literature.py           # Unpaywall open-access full-text lookup
+├── assembler.py            # Deterministic assembly: insertion, fusion, MCS, export
+├── references.py           # Reference tracker (source provenance)
 ├── server.py               # MCP server (imports from src.library)
 ├── tools.py                # Tool definitions + build_mcp_servers() for Agent SDK
-└── addgene_integration.py  # Addgene web scraping, GenBank parsing, API client
+├── golden_gate/            # Golden Gate (Type IIS) assembly
+│   ├── assembly.py         # GG_ENZYMES, find_gg_sites, assemble_golden_gate (split from assembler.py)
+│   └── denovo.py           # De novo overhang/primer/oligo/gBlock design
+├── integrations/           # Third-party API connectors
+│   ├── addgene_integration.py  # Addgene web scraping, GenBank parsing, API client
+│   ├── ncbi_integration.py     # NCBI Entrez gene search + CDS retrieval
+│   ├── fpbase_integration.py   # FPbase fluorescent-protein sequence lookup
+│   └── literature.py           # Unpaywall open-access full-text lookup
+├── utils/                  # Shared helpers
+│   ├── genbank_utils.py    # GenBank parse/format/export + annotation
+│   ├── restriction_utils.py    # Type IIS site checks + silent-mutation design
+│   └── codon_tables.py     # Human codon-usage tables (CAI)
+├── analysis/               # Sequence/protein analysis + intake
+│   ├── confidence.py       # Design confidence scoring
+│   ├── mutations.py        # GoF/LoF mutation design
+│   ├── protein_analysis.py # Translation, disorder prediction
+│   ├── fusion_designer.py  # Fusion protein design advisor
+│   ├── plasmid_intake.py   # User upload parser (GenBank/FASTA)
+│   └── custom_annotations.py   # BYOA custom BLAST annotation DB
+└── library/                # Library package (facade re-exports its public API)
+    ├── __init__.py         # Public API: from src.library import load_backbones, ...
+    ├── core.py             # Built-in library search/get + Addgene/NCBI/FPbase fallback
+    ├── user.py             # BYOL — user GenBank files ($PLASMID_USER_LIBRARY)
+    └── vendor.py           # Vendor backbones (Ansa, Twist, ...) -> vendor_backbones.json
 
 app/                        # Web UI + agent
 ├── app.py                  # Web UI + SSE streaming server + agent loop

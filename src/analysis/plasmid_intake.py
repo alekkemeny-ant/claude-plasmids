@@ -50,7 +50,7 @@ def parse_upload(content: str, filename: str) -> dict:
 
 
 def _parse_genbank(content: str, filename: str) -> dict:
-    from src.genbank_utils import parse_genbank, is_circular
+    from src.utils.genbank_utils import parse_genbank, is_circular
 
     parsed = parse_genbank(content)
     if not parsed:
@@ -170,7 +170,7 @@ def run_plannotate(sequence: str, min_pident: float = 90.0) -> list[dict]:
     Each feature: {name, description, type, start, end, strand, match_pct}
     """
     try:
-        from src.genbank_utils import run_plannotate_annotate
+        from src.utils.genbank_utils import run_plannotate_annotate
         df = run_plannotate_annotate(sequence, linear=False)
 
         if df is None or df.empty:

@@ -25,7 +25,7 @@ from mcp.server.stdio import stdio_server
 
 # Import Addgene integration (optional - gracefully degrades if not available)
 try:
-    from src.addgene_integration import (
+    from src.integrations.addgene_integration import (
         AddgeneLibraryIntegration,
         search_addgene as _search_addgene,
         fetch_addgene_sequence_with_metadata as _fetch_addgene_sequence_with_metadata,
@@ -44,7 +44,7 @@ from src.assembler import (
 
 # NCBI integration (optional)
 try:
-    from src.ncbi_integration import (
+    from src.integrations.ncbi_integration import (
         search_gene as _search_gene,
         fetch_gene_sequence as _fetch_gene,
     )
@@ -950,7 +950,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "export_construct":
         from src.assembler import format_as_fasta
-        from src.genbank_utils import format_as_genbank
+        from src.utils.genbank_utils import format_as_genbank
 
         sequence = clean_sequence(arguments["sequence"])
         fmt = arguments["output_format"]

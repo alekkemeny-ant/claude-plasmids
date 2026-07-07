@@ -11,8 +11,9 @@ import re
 from functools import lru_cache
 from typing import Optional
 
-from src.assembler import find_gg_sites, reverse_complement, clean_sequence, GG_ENZYMES
-from src.codon_tables import HUMAN_CODON_W
+from src.assembler import reverse_complement, clean_sequence
+from src.golden_gate.assembly import find_gg_sites, GG_ENZYMES
+from src.utils.codon_tables import HUMAN_CODON_W
 
 
 # Standard genetic code (AA → codon, local copy to avoid circular imports)

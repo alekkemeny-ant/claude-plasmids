@@ -35,7 +35,7 @@ from src.assembler import (
     clean_sequence,
 )
 from src.library import get_backbone_by_id, get_insert_by_id
-from src.addgene_integration import fetch_addgene_sequence
+from src.integrations.addgene_integration import fetch_addgene_sequence
 from evals.rubric import score_construct, RubricResult
 from evals.test_cases import (
     TIER_1_CASES,

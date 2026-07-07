@@ -47,7 +47,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # ── Project src/ imports ──────────────────────────────────────────────────────
 from src.library import load_backbones, load_inserts
-from src.plasmid_intake import parse_upload, run_plannotate, build_intake_message
+from src.analysis.plasmid_intake import parse_upload, run_plannotate, build_intake_message
 
 # ── App-level imports ─────────────────────────────────────────────────────────
 STATIC_DIR = Path(__file__).parent / "static"

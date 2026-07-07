@@ -65,7 +65,7 @@ def save_vendor_backbone(
     backbone_id = f"vendor:{company_slug}-{name_slug}"
 
     # Auto-detect placeholder region (N-runs or gap annotations)
-    from src.plasmid_intake import find_placeholder_region
+    from src.analysis.plasmid_intake import find_placeholder_region
 
     placeholder = find_placeholder_region(clean_seq, [])
 

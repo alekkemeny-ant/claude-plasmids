@@ -22,14 +22,14 @@ logger = logging.getLogger(__name__)
 
 # Optional Addgene integration (gracefully degrades if not available)
 try:
-    from src.addgene_integration import AddgeneClient
+    from src.integrations.addgene_integration import AddgeneClient
     ADDGENE_AVAILABLE = True
 except ImportError:
     ADDGENE_AVAILABLE = False
 
 # Optional NCBI integration
 try:
-    from src.ncbi_integration import (
+    from src.integrations.ncbi_integration import (
         fetch_gene_sequence as _ncbi_fetch_gene,
         search_gene as _ncbi_search_gene,
     )
@@ -53,7 +53,7 @@ except ImportError:
 
 # Optional custom annotation DB (BYOA — bring your own annotations)
 try:
-    from src.custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
+    from src.analysis.custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
     _CUSTOM_ANNOTATIONS_AVAILABLE = True
 except ImportError:
     _CUSTOM_ANNOTATIONS_AVAILABLE = False
@@ -63,7 +63,7 @@ if _CUSTOM_ANNOTATIONS_AVAILABLE:
 
 # Optional FPbase integration (fluorescent proteins — engineered, not in NCBI Gene)
 try:
-    from src.fpbase_integration import (
+    from src.integrations.fpbase_integration import (
         fetch_fpbase_sequence as _fpbase_fetch,
         looks_like_fp_name as _looks_like_fp,
     )
@@ -981,7 +981,7 @@ def annotate_plasmid(plasmid_sequence: str) -> list[dict]:
     import re as _re
     plasmid_sequence = _re.sub(r'\s', '', plasmid_sequence.upper())
 
-    from src.genbank_utils import run_plannotate_annotate
+    from src.utils.genbank_utils import run_plannotate_annotate
 
     try:
         df = run_plannotate_annotate(plasmid_sequence, linear=False)
@@ -1124,7 +1124,7 @@ def swap_feature(
     plasmid_sequence = _re.sub(r'\s', '', plasmid_sequence.upper())
     replacement_sequence = _re.sub(r'\s', '', replacement_sequence.upper())
 
-    from src.genbank_utils import run_plannotate_annotate
+    from src.utils.genbank_utils import run_plannotate_annotate
 
     try:
         df = run_plannotate_annotate(plasmid_sequence, linear=False)
@@ -1235,7 +1235,7 @@ def extract_inserts_from_plasmid(plasmid_sequence: str, insert_names: list) -> l
             f"If you passed a cache key, resolve it to a sequence first."
         )
 
-    from src.genbank_utils import run_plannotate_annotate
+    from src.utils.genbank_utils import run_plannotate_annotate
 
     try:
         df = run_plannotate_annotate(plasmid_sequence, linear=False)
@@ -1370,7 +1370,7 @@ def extract_insert_from_plasmid(
         }
 
     # ── pLannotate annotation: find feature by name ───────────────────────
-    from src.genbank_utils import run_plannotate_annotate
+    from src.utils.genbank_utils import run_plannotate_annotate
 
     try:
         df = run_plannotate_annotate(plasmid_sequence, linear=False)

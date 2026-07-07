@@ -257,7 +257,7 @@ def assemble_golden_gate(
     # correct backbone cut sites.  Search ALL sites (both strands) because the
     # recognition-site orientation varies by vector design:
     #   • Standard (Scenario A): FWD site on left, REV site on right
-    #   • Allen Institute backbones (Scenario B): REV site on left, FWD on right
+    #   • Reverse backbones (Scenario B): REV site on left, FWD on right
     #     — recognition sequences end up on the dropout, overhangs on the scaffold
 
     first_part_left_oh = excised[0][1] if excised else None

@@ -50,11 +50,11 @@ from src.assembler import (
     format_as_fasta,
     DEFAULT_FUSION_LINKER as _DEFAULT_FUSION_LINKER,
 )
-from src.golden_gate.assembly import (
+from src.cloning.golden_gate.assembly import (
     assemble_golden_gate as _assemble_golden_gate,
     GG_ENZYMES,
 )
-from src.golden_gate.denovo import design_golden_gate_oligos as _design_gg_denovo
+from src.cloning.golden_gate.denovo import design_golden_gate_oligos as _design_gg_denovo
 from src.library import (
     save_vendor_backbone as _save_vendor_backbone,
     update_vendor_backbone_mcs as _update_vendor_backbone_mcs,

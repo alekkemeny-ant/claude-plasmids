@@ -13,9 +13,10 @@ src/                        # Core modules (a package — src/__init__.py)
 ├── references.py           # Reference tracker (source provenance)
 ├── server.py               # MCP server (imports from src.library)
 ├── tools.py                # Tool definitions + build_mcp_servers() for Agent SDK
-├── golden_gate/            # Golden Gate (Type IIS) assembly
-│   ├── assembly.py         # GG_ENZYMES, find_gg_sites, assemble_golden_gate (split from assembler.py)
-│   └── denovo.py           # De novo overhang/primer/oligo/gBlock design
+├── cloning/                # Cloning strategies
+│   └── golden_gate/        # Golden Gate (Type IIS) assembly
+│       ├── assembly.py     # GG_ENZYMES, find_gg_sites, assemble_golden_gate (split from assembler.py)
+│       └── denovo.py       # De novo overhang/primer/oligo/gBlock design
 ├── integrations/           # Third-party API connectors
 │   ├── addgene_integration.py  # Addgene web scraping, GenBank parsing, API client
 │   ├── ncbi_integration.py     # NCBI Entrez gene search + CDS retrieval

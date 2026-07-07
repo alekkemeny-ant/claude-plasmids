@@ -313,7 +313,7 @@ def export_plasmid_genbank(
 
     # Annotate enzyme recognition sites
     if enzyme_name:
-        from src.golden_gate.assembly import GG_ENZYMES
+        from src.cloning.golden_gate.assembly import GG_ENZYMES
         if enzyme_name in GG_ENZYMES:
             rec_site = GG_ENZYMES[enzyme_name]["recognition"]
             for site, strand in [(rec_site, 1), (_rc(rec_site), -1)]:

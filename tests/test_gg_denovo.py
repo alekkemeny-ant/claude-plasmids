@@ -4,7 +4,7 @@ Tests for src/gg_denovo.py — Golden Gate de novo oligo design.
 """
 
 import pytest
-from src.golden_gate.denovo import (
+from src.cloning.golden_gate.denovo import (
     BASE_POOL,
     _rc,
     _oh_conflicts_enzyme,
@@ -16,7 +16,7 @@ from src.golden_gate.denovo import (
     design_golden_gate_oligos,
 )
 from src.assembler import reverse_complement
-from src.golden_gate.assembly import GG_ENZYMES
+from src.cloning.golden_gate.assembly import GG_ENZYMES
 from src.library import get_backbone_by_id
 
 
@@ -470,7 +470,7 @@ class TestDesignGoldenGateOligos:
         # Forward site: GGTCTCN + AACC ... → leaves AACC overhang
         # Reverse site (on bottom strand): must leave TTGG overhang
         #   → on top strand: ...[RC(TTGG)] + N + [RC(GGTCTC)] = CCAA + N + GAGACC
-        from src.golden_gate.assembly import find_gg_sites
+        from src.cloning.golden_gate.assembly import find_gg_sites
         backbone = "NNNN" + "GGTCTCNAACC" + "N" * 100 + "CCAANGAGACC" + "NNNN"
         sites = find_gg_sites(backbone, "BsaI")
         if len(sites) >= 2:

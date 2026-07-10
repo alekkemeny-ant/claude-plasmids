@@ -342,28 +342,43 @@ Scores below 70 are flagged with a recommendation; scores below 50 prompt a rede
 ## Architecture
 
 ```
-src/                          # Core modules
-├── assembler.py              # Deterministic sequence assembly engine
-├── library.py                # Library search + Addgene/NCBI auto-fallback
-├── user_library.py           # BYOL — load user-provided GenBank files
-├── ncbi_integration.py       # NCBI Entrez gene search + CDS retrieval
-├── addgene_integration.py    # Addgene API client + GenBank parsing
-├── fpbase_integration.py     # FPbase fluorescent protein database
+src/                          # Core modules (a package)
 ├── tools.py                  # All tool definitions + build_mcp_servers()
 ├── server.py                 # MCP server (wraps tools.py)
-├── fusion_designer.py        # Combinatorial FP fusion ranking
-├── protein_analysis.py       # Disorder prediction, topology analysis
-├── confidence.py             # Design Confidence Score engine
-├── mutations.py              # Curated GoF/LoF DB + codon-swap engine
-├── restriction_utils.py      # Enzyme site checking + silent mutations
-├── gg_denovo.py              # Golden Gate oligo design (de novo)
-├── vendor_backbone.py        # Vendor backbone import + library saving
-├── genbank_utils.py          # GenBank parsing, formatting, export & annotation plot
-├── custom_annotations.py     # BYOL custom annotation BLAST integration
-├── literature.py             # Unpaywall open-access full-text lookup
-├── plasmid_intake.py         # File upload parsing + pLannotate intake
 ├── references.py             # Provenance tracking for export
-└── codon_tables.py           # Kazusa human codon-usage table
+├── export.py                 # Construct export helpers
+├── config.py                 # Shared constants (Kozak, linkers, ...)
+├── cloning/                  # Cloning strategies
+│   ├── assembler.py          # Deterministic sequence assembly engine
+│   ├── multiple_cloning_site_handler.py  # MCS insertion-point logic
+│   └── golden_gate/          # Golden Gate (Type IIS) assembly
+│       ├── assembly.py       # GG enzymes, site finding, assembly
+│       └── denovo.py         # De novo overhang/primer/oligo/gBlock design
+├── integrations/             # Third-party API connectors
+│   ├── addgene_integration.py  # Addgene API client + GenBank parsing
+│   ├── ncbi_integration.py     # NCBI Entrez gene search + CDS retrieval
+│   ├── fpbase_integration.py   # FPbase fluorescent protein database
+│   └── literature.py           # Unpaywall open-access full-text lookup
+├── annotation/               # Sequence identification/annotation of user input
+│   ├── plasmid_intake.py     # File upload parsing + pLannotate intake
+│   └── custom_annotations.py   # BYOA custom annotation BLAST integration
+├── design_tools/             # Construct design advisors + scoring
+│   ├── confidence.py         # Design Confidence Score engine
+│   ├── mutations.py          # Curated GoF/LoF DB + codon-swap engine
+│   ├── protein_analysis.py   # Disorder prediction, topology analysis
+│   └── fusion_designer.py    # Combinatorial FP fusion ranking
+├── utils/                    # Shared helpers
+│   ├── genbank_utils.py      # GenBank parsing, formatting, export & annotation plot
+│   ├── restriction_utils.py  # Enzyme site checking + silent mutations
+│   ├── sequence_utils.py     # DNA cleaning/validation/reverse-complement
+│   ├── fasta_utils.py        # FASTA formatting helpers
+│   └── codon_utils.py        # Human codon-usage weights (CAI)
+├── data/                     # Static reference data
+│   └── codon_tables.py       # Kazusa human codon-usage table
+└── library/                  # Library package (facade re-exports public API)
+    ├── core.py               # Library search + Addgene/NCBI auto-fallback
+    ├── user.py               # BYOL — load user-provided GenBank files
+    └── vendor.py             # Vendor backbone import + library saving
 
 app/                          # Web UI + agent
 ├── app.py                    # HTTP server (SSE streaming, file upload)

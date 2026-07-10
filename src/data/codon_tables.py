@@ -6,7 +6,7 @@ AA has relative adaptiveness w_i = 1.0.
 """
 
 # Per-1000 frequencies from Kazusa (used to derive w_i below)
-_HUMAN_FREQ: dict[str, float] = {
+HUMAN_FREQ: dict[str, float] = {
     "TTT": 17.6, "TTC": 20.3,                                                      # Phe
     "TTA": 7.7,  "TTG": 12.9, "CTT": 13.2, "CTC": 19.6, "CTA": 7.2, "CTG": 39.6, # Leu
     "ATT": 16.0, "ATC": 20.8, "ATA": 7.5,                                          # Ile
@@ -32,7 +32,7 @@ _HUMAN_FREQ: dict[str, float] = {
 }
 
 # Amino acid → list of synonymous codons (genetic code)
-_CODON_TO_AA: dict[str, str] = {
+CODON_TO_AA: dict[str, str] = {
     "TTT": "F", "TTC": "F",
     "TTA": "L", "TTG": "L", "CTT": "L", "CTC": "L", "CTA": "L", "CTG": "L",
     "ATT": "I", "ATC": "I", "ATA": "I",
@@ -54,26 +54,6 @@ _CODON_TO_AA: dict[str, str] = {
     "CGT": "R", "CGC": "R", "CGA": "R", "CGG": "R", "AGA": "R", "AGG": "R",
     "GGT": "G", "GGC": "G", "GGA": "G", "GGG": "G",
 }
-
-
-def _compute_w() -> dict[str, float]:
-    """Derive relative adaptiveness w_i = freq / max(freq for same AA)."""
-    # Group by AA
-    aa_groups: dict[str, list[tuple[str, float]]] = {}
-    for codon, freq in _HUMAN_FREQ.items():
-        aa = _CODON_TO_AA[codon]
-        aa_groups.setdefault(aa, []).append((codon, freq))
-    w: dict[str, float] = {}
-    for aa, pairs in aa_groups.items():
-        max_freq = max(f for _, f in pairs)
-        for codon, freq in pairs:
-            w[codon] = round(freq / max_freq, 3)
-    return w
-
-
-# Relative adaptiveness w_i = freq(codon) / max(freq(synonym) for that AA)
-# This is what CAI uses directly.
-HUMAN_CODON_W: dict[str, float] = _compute_w()
 
 # Convenience: the most-used codon per AA (w_i = 1.0 codons)
 HUMAN_OPTIMAL_CODONS: dict[str, str] = {

@@ -8,14 +8,14 @@ ligates them into the final construct. Like the core assembler, every operation
 is deterministic string math on verified sequences — no LLM involvement.
 
 The basic sequence utilities (clean_sequence, reverse_complement, validate_dna)
-live in src.assembler and are imported here.
+live in src.cloning.assembler and are imported here.
 """
 
 import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from src.assembler import clean_sequence, reverse_complement, validate_dna
+from src.cloning.assembler import clean_sequence, reverse_complement, validate_dna
 
 
 GG_ENZYMES = {

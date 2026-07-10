@@ -17,7 +17,8 @@ import itertools
 from dataclasses import dataclass, field
 from typing import Optional
 
-from src.assembler import reverse_complement, clean_sequence, find_mcs_insertion_point
+from src.utils.sequence_utils import reverse_complement, clean_sequence
+from src.cloning.multiple_cloning_site_handler import MCSHandler
 from src.cloning.golden_gate.assembly import GG_ENZYMES, find_gg_sites
 
 
@@ -421,7 +422,7 @@ def _design_part_in_vector(
         return carrier_seq[:p_start] + cassette + carrier_seq[p_end:]
 
     # Strategy 2: insert at MCS position
-    insertion_point = find_mcs_insertion_point(carrier_backbone)
+    insertion_point = MCSHandler.find_mcs_insertion_point(carrier_backbone)
     if insertion_point is None:
         raise ValueError(
             f"Carrier backbone {carrier_backbone.get('id', '?')!r} has no insertion point defined. "

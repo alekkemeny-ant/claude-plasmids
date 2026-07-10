@@ -329,7 +329,7 @@ class TestAnnotationIntegration:
     def test_egfp_in_pcdna31_genbank_has_features(self):
         """A real plasmid assembly should produce a GenBank file with pLannotate features."""
         from src.library import get_backbone_by_id, get_insert_by_id
-        from src.assembler import assemble_construct, find_mcs_insertion_point
+        from src.cloning.assembler import assemble_construct, find_mcs_insertion_point
 
         backbone = get_backbone_by_id("pcDNA3.1(+)")
         insert = get_insert_by_id("EGFP")

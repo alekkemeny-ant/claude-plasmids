@@ -15,7 +15,7 @@ from src.cloning.golden_gate.denovo import (
     select_overhangs,
     design_golden_gate_oligos,
 )
-from src.assembler import reverse_complement
+from src.cloning.assembler import reverse_complement
 from src.cloning.golden_gate.assembly import GG_ENZYMES
 from src.library import get_backbone_by_id
 

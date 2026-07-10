@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
-from src.assembler import validate_dna
+from src.cloning.assembler import validate_dna
 
 # Library path (src/library/ -> src/ -> repo root -> library/ data dir)
 LIBRARY_PATH = Path(__file__).parent.parent.parent / "library"
@@ -53,7 +53,7 @@ except ImportError:
 
 # Optional custom annotation DB (BYOA — bring your own annotations)
 try:
-    from src.analysis.custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
+    from src.annotation.custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
     _CUSTOM_ANNOTATIONS_AVAILABLE = True
 except ImportError:
     _CUSTOM_ANNOTATIONS_AVAILABLE = False

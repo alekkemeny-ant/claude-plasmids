@@ -34,7 +34,7 @@ try:
 except ImportError:
     ADDGENE_AVAILABLE = False
 
-from src.assembler import (
+from src.cloning.assembler import (
     assemble_construct as _assemble_construct,
     fuse_sequences as _fuse_sequences,
     find_mcs_insertion_point,
@@ -949,7 +949,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=output)]
 
     elif name == "export_construct":
-        from src.assembler import format_as_fasta
+        from src.cloning.assembler import format_as_fasta
         from src.utils.genbank_utils import format_as_genbank
 
         sequence = clean_sequence(arguments["sequence"])
@@ -1016,7 +1016,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         critical_fail = False
 
         # 1. Valid DNA
-        from src.assembler import validate_dna
+        from src.cloning.assembler import validate_dna
         dna_ok, dna_errs = validate_dna(construct_seq)
         checks.append(("Construct is valid DNA", "Critical", dna_ok, "; ".join(dna_errs) if dna_errs else ""))
         if not dna_ok:

@@ -12,7 +12,7 @@ from src.utils.restriction_utils import (
     design_silent_mutation,
     find_extra_sites_in_sequence,
 )
-from src.assembler import reverse_complement
+from src.cloning.assembler import reverse_complement
 
 # Esp3I recognition: CGTCTC (forward), GAGACG (RC)
 ESP3I_REC = "CGTCTC"

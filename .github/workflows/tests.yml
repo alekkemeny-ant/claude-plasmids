@@ -21,7 +21,13 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest-cov
+        run: pip install -e ".[dev]"
+
+      # Non-blocking for now: the codebase has a lint baseline to burn down.
+      # Flip to a hard gate (remove continue-on-error) once findings are cleared.
+      - name: Lint (ruff)
+        continue-on-error: true
+        run: ruff check .
 
       - name: Run tests
         run: pytest tests/ -v -m "not slow"

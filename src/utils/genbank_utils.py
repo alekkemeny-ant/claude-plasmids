@@ -84,7 +84,7 @@ def run_plannotate_annotate(sequence: str, linear: bool = False):
 
 # Optional custom annotation DB (BYOA — bring your own annotations)
 try:
-    from src.analysis.custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
+    from src.annotation.custom_annotations import setup_custom_annotations, query_custom_db, merge_annotation_results
     _CUSTOM_ANNOTATIONS_AVAILABLE = True
 except ImportError:
     _CUSTOM_ANNOTATIONS_AVAILABLE = False

@@ -54,7 +54,7 @@ def save_vendor_backbone(
     If an entry with the same ID already exists it is updated in place.
     Returns the saved entry (including its `vendor:` ID).
     """
-    from src.assembler import clean_sequence
+    from src.cloning.assembler import clean_sequence
 
     clean_seq = clean_sequence(sequence)
     if not clean_seq:
@@ -65,7 +65,7 @@ def save_vendor_backbone(
     backbone_id = f"vendor:{company_slug}-{name_slug}"
 
     # Auto-detect placeholder region (N-runs or gap annotations)
-    from src.analysis.plasmid_intake import find_placeholder_region
+    from src.annotation.plasmid_intake import find_placeholder_region
 
     placeholder = find_placeholder_region(clean_seq, [])
 

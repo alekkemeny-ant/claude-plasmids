@@ -7,7 +7,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.analysis.protein_analysis import (
+from src.design_tools.protein_analysis import (
     translate,
     predict_disorder,
     find_fusion_sites,

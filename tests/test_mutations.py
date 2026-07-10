@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
-from src.analysis.mutations import (
+from src.design_tools.mutations import (
     lookup_known_mutations,
     apply_point_mutation,
     design_premature_stop,

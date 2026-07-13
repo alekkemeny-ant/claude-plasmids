@@ -26,7 +26,7 @@ except ImportError:
     _BIOPYTHON = False
 
 try:
-    from src.assembler import clean_sequence, validate_dna
+    from src.cloning.assembler import clean_sequence, validate_dna
     _ASSEMBLER_OK = True
 except Exception:
     _ASSEMBLER_OK = False

@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-plasmids"
+version = "0.1.0"
+description = "Claude-powered plasmid designer (Anthropic × Allen Institute collaboration)"
+readme = "README.md"
+# The <3.13 ceiling only applies to the full conda env (pLannotate); the
+# pip-installable core runs on 3.13+, so no upper bound here.
+requires-python = ">=3.9"
+dependencies = [
+    "anthropic>=0.40.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "biopython>=1.83",
+]
+
+# NOTE: pLannotate is NOT on PyPI. Install it (and its bioinformatics deps)
+# via conda using environment.yml:
+#   conda env create -f environment.yml && conda activate claude-plasmids
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.6.0",
+]
+
+# `src`, `app`, and `evals` are all first-party import roots (imports use the
+# `from src.X import ...` convention). Discover them so `pip install -e .` makes
+# them importable without the conftest.py sys.path shim.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "app*", "evals*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: requires pLannotate BLAST databases (run with -m slow)",
+]
+addopts = "--cov=src --cov=app --cov-report=term-missing"
+# Silence numpy-deprecation noise from third-party libs we don't control
+# (bokeh/pandas trigger deprecated np.bool8 / np.find_common_type aliases).
+# pLannotate's leaked-temp-file ResourceWarning is suppressed narrowly at the
+# call site (see src/utils/genbank_utils.py: run_plannotate_annotate) so
+# ResourceWarning stays meaningful for our own code.
+filterwarnings = [
+    "ignore:.*np.bool8.*:DeprecationWarning",
+    "ignore:np.find_common_type is deprecated:DeprecationWarning",
+]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+# Start conservative: pyflakes (F), pycodestyle errors (E), imports (I),
+# common bugbears (B), pyupgrade (UP). Widen over time.
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E501",  # line length is enforced by the formatter, not the linter
+]
+
+[tool.ruff.format]
+quote-style = "double"

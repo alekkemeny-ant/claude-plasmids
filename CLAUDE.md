@@ -9,29 +9,38 @@ is a package). No bare `from X import` and `src/` is not on `sys.path`.
 
 ```
 src/                        # Core modules (a package — src/__init__.py)
-├── assembler.py            # Deterministic assembly: insertion, fusion, MCS, export
 ├── references.py           # Reference tracker (source provenance)
+├── config.py               # Shared constants (default fusion linker, Kozak)
+├── export.py               # Construct export entrypoint (export_construct)
 ├── server.py               # MCP server (imports from src.library)
 ├── tools.py                # Tool definitions + build_mcp_servers() for Agent SDK
-├── golden_gate/            # Golden Gate (Type IIS) assembly
-│   ├── assembly.py         # GG_ENZYMES, find_gg_sites, assemble_golden_gate (split from assembler.py)
-│   └── denovo.py           # De novo overhang/primer/oligo/gBlock design
+├── cloning/                # Cloning strategies
+│   ├── assembler.py        # Deterministic assembly: insertion, fusion, MCS, export
+│   ├── multiple_cloning_site_handler.py  # MCS detection/handling
+│   └── golden_gate/        # Golden Gate (Type IIS) assembly
+│       ├── assembly.py     # GG_ENZYMES, find_gg_sites, assemble_golden_gate (split from cloning/assembler.py)
+│       └── denovo.py       # De novo overhang/primer/oligo/gBlock design
 ├── integrations/           # Third-party API connectors
 │   ├── addgene_integration.py  # Addgene web scraping, GenBank parsing, API client
 │   ├── ncbi_integration.py     # NCBI Entrez gene search + CDS retrieval
 │   ├── fpbase_integration.py   # FPbase fluorescent-protein sequence lookup
 │   └── literature.py           # Unpaywall open-access full-text lookup
+├── data/                   # Static reference data
+│   └── codon_tables.py     # Human codon-usage tables (CAI)
 ├── utils/                  # Shared helpers
 │   ├── genbank_utils.py    # GenBank parse/format/export + annotation
 │   ├── restriction_utils.py    # Type IIS site checks + silent-mutation design
-│   └── codon_tables.py     # Human codon-usage tables (CAI)
-├── analysis/               # Sequence/protein analysis + intake
+│   ├── sequence_utils.py   # Generic DNA sequence helpers
+│   ├── fasta_utils.py      # FASTA parse/format helpers
+│   └── codon_utils.py      # Codon-optimization helpers (uses data/codon_tables)
+├── annotation/             # Sequence identification/annotation of user input
+│   ├── plasmid_intake.py   # User upload parser (GenBank/FASTA) + plannotate
+│   └── custom_annotations.py   # BYOA custom BLAST annotation DB
+├── design_tools/           # Construct design advisors + scoring
 │   ├── confidence.py       # Design confidence scoring
 │   ├── mutations.py        # GoF/LoF mutation design
 │   ├── protein_analysis.py # Translation, disorder prediction
-│   ├── fusion_designer.py  # Fusion protein design advisor
-│   ├── plasmid_intake.py   # User upload parser (GenBank/FASTA)
-│   └── custom_annotations.py   # BYOA custom BLAST annotation DB
+│   └── fusion_designer.py  # Fusion protein design advisor
 └── library/                # Library package (facade re-exports its public API)
     ├── __init__.py         # Public API: from src.library import load_backbones, ...
     ├── core.py             # Built-in library search/get + Addgene/NCBI/FPbase fallback
@@ -41,12 +50,18 @@ src/                        # Core modules (a package — src/__init__.py)
 app/                        # Web UI + agent
 ├── app.py                  # Web UI + SSE streaming server + agent loop
 ├── agent.py                # Claude Agent SDK agent loop
+├── streaming.py            # SSE streaming helpers
+├── sessions.py             # Session state persistence
+├── database.py             # Saved-construct SQLite store (app/constructs.db)
+├── batch_worker.py         # Background batch-job worker
+├── bulk_planner.py         # Bulk/combinatorial design planning
+├── static/                 # Front-end assets (JS/CSS/HTML)
 └── system_prompt.md        # Agent system prompt (5-step workflow)
 
 library/                    # JSON DATA (distinct from the src/library/ code package)
-├── backbones.json          # Curated backbones + auto-cached Addgene fetches
-├── inserts.json            # Inserts: fluorescent proteins, reporters, epitope tags, NCBI genes
-└── vendor_backbones.json   # Vendor-supplied backbones saved via save_vendor_backbone
+├── backbones.json          # Auto-cached Addgene fetches — gitignored, regenerated at runtime
+├── inserts.json            # Inserts: fluorescent proteins, reporters, epitope tags, NCBI genes (tracked)
+└── vendor_backbones.json   # Vendor-supplied backbones saved via save_vendor_backbone (tracked)
 
 evals/                      # Evaluation infrastructure
 ├── rubric.py               # Allen Institute verification rubric (~32 weighted checks)
@@ -66,11 +81,20 @@ tests/                      # Test suite
 ## How to Run
 
 ```bash
+# One-time dev setup: editable install with dev extras (pytest, ruff).
+# pLannotate is conda-only — see environment.yml for the full env.
+pip install -e ".[dev]"
+cp .env.example .env   # then fill in ANTHROPIC_API_KEY etc.
+
 # Web UI (with auto-reload on file changes)
 python app/app.py --reload
 
 # Tests
 pytest tests/ -v
+
+# Lint / format
+ruff check .
+ruff format .
 
 # Agent evals (requires ANTHROPIC_API_KEY)
 python -m evals.run_agent_evals
@@ -86,11 +110,14 @@ Every nucleotide in the output comes from a verified source (library JSON, Addge
 
 ## Dependencies
 
+Declared in `pyproject.toml` (`requirements.txt` mirrors runtime deps for the
+plain `pip install -r` workflow). pLannotate is conda-only (`environment.yml`).
+
 - `anthropic` — Claude API client
 - `python-dotenv` — environment variable loading
 - `requests` — HTTP client for Addgene/NCBI
-- `pytest` — test runner
 - `biopython` — NCBI Entrez gene retrieval
+- dev extras: `pytest`, `pytest-cov`, `ruff`
 
 ## Testing Conventions
 

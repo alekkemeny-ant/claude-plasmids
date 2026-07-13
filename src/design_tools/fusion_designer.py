@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from src.analysis.protein_analysis import translate, find_fusion_sites
+from src.design_tools.protein_analysis import translate, find_fusion_sites
 
 # ── Kyte–Doolittle hydrophobicity (normalized 0→1, 1 = most hydrophobic) ──
 _KD_RAW: dict[str, float] = {

@@ -7,18 +7,18 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.assembler import (
+from src.cloning.assembler import (
     assemble_construct,
     fuse_sequences,
     clean_sequence,
     validate_dna,
     reverse_complement,
     find_mcs_insertion_point,
-    export_construct,
     AssemblyResult,
     DEFAULT_FUSION_LINKER,
     KOZAK,
 )
+from src.export import export_construct
 from src.library import get_backbone_by_id, get_insert_by_id
 
 

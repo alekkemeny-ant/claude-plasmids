@@ -27,7 +27,7 @@ from pathlib import Path
 # Allow importing the `src` package from the repo root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.assembler import clean_sequence, validate_dna, reverse_complement
+from src.cloning.assembler import clean_sequence, validate_dna, reverse_complement
 
 
 # ── Severity weights ───────────────────────────────────────────────────

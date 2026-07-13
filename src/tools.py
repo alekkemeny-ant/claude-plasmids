@@ -3,7 +3,7 @@
 Plasmid Library SDK MCP Tools
 
 Defines all plasmid tools using claude_agent_sdk's create_sdk_mcp_server.
-Each tool wraps existing functions from library.py, assembler.py, and
+Each tool wraps existing functions from library.py, cloning/assembler.py, and
 addgene_integration.py.
 
 Usage:
@@ -40,21 +40,16 @@ from src.library import (
     extract_inserts_from_plasmid as _extract_inserts_from_plasmid,
     infer_species_from_cell_line,
 )
-from src.assembler import (
+from src.cloning.multiple_cloning_site_handler import MCSHandler
+from src.cloning.assembler import (
     assemble_construct as _assemble_construct,
-    fuse_sequences as _fuse_sequences,
-    resolve_insertion_point,
-    clean_sequence,
-    validate_dna,
-    reverse_complement,
-    format_as_fasta,
-    DEFAULT_FUSION_LINKER as _DEFAULT_FUSION_LINKER,
+    fuse_sequences,
 )
-from src.golden_gate.assembly import (
+from src.cloning.golden_gate.assembly import (
     assemble_golden_gate as _assemble_golden_gate,
     GG_ENZYMES,
 )
-from src.golden_gate.denovo import design_golden_gate_oligos as _design_gg_denovo
+from src.cloning.golden_gate.denovo import design_golden_gate_oligos as _design_gg_denovo
 from src.library import (
     save_vendor_backbone as _save_vendor_backbone,
     update_vendor_backbone_mcs as _update_vendor_backbone_mcs,
@@ -64,6 +59,9 @@ from src.utils.genbank_utils import (
     BIOPYTHON_AVAILABLE as _BIOPYTHON_AVAILABLE,
     format_as_genbank,
 )
+from src.utils.fasta_utils import format_as_fasta
+from src.utils.sequence_utils import (clean_sequence, validate_dna, reverse_complement)
+from src.config import DEFAULT_FUSION_LINKER
 
 # NCBI integration (optional)
 try:
@@ -85,14 +83,14 @@ except ImportError:
 # ── Phase-2 advanced design modules ──
 # Design Confidence Score
 try:
-    from src.analysis.confidence import compute_confidence, format_confidence_report
+    from src.design_tools.confidence import compute_confidence, format_confidence_report
     CONFIDENCE_AVAILABLE = True
 except ImportError:
     CONFIDENCE_AVAILABLE = False
 
 # Protein analysis (disorder-based fusion sites)
 try:
-    from src.analysis.protein_analysis import (
+    from src.design_tools.protein_analysis import (
         translate as _translate_dna,
         find_fusion_sites as _find_fusion_sites,
     )
@@ -102,14 +100,14 @@ except ImportError:
 
 # Fusion design advisor (combinatorial variant generation + ranking)
 try:
-    from src.analysis.fusion_designer import design_fusion_variants as _design_fusion_variants
+    from src.design_tools.fusion_designer import design_fusion_variants
     FUSION_DESIGNER_AVAILABLE = True
 except ImportError:
     FUSION_DESIGNER_AVAILABLE = False
 
 # Smart mutations (curated GoF/LoF + deterministic edits)
 try:
-    from src.analysis.mutations import (
+    from src.design_tools.mutations import (
         lookup_known_mutations as _lookup_known_mutations,
         apply_point_mutation as _apply_point_mutation,
         design_premature_stop as _design_premature_stop,
@@ -745,7 +743,7 @@ async def assemble_construct(args):
     pos = args.get("insertion_position")
     auto_rc = False
     if pos is None and backbone_data:
-        pos, auto_rc = resolve_insertion_point(backbone_data, backbone_seq)
+        pos, auto_rc = MCSHandler.resolve_insertion_point(backbone_data, backbone_seq)
     if pos is None:
         return _error("Error: No insertion position. Provide insertion_position or use a backbone with MCS data.")
 
@@ -1348,15 +1346,15 @@ async def fuse_inserts_tool(args):
         sequences.append({"sequence": seq, "name": name, "type": seq_type})
         # Track which non-first protein sequences have an ATG to be removed
         if i > 0 and seq_type == "protein":
-            from src.assembler import clean_sequence as _clean_seq
+            from src.cloning.assembler import clean_sequence as _clean_seq
             if _clean_seq(seq)[:3] == "ATG":
                 atg_removals.append(name or f"sequence_{i}")
 
     try:
         linker = args.get("linker")
         if linker is None:
-            linker = _DEFAULT_FUSION_LINKER
-        fused = _fuse_sequences(sequences, linker)
+            linker = DEFAULT_FUSION_LINKER
+        fused = fuse_sequences(sequences, linker)
     except ValueError as e:
         return _error(f"Fusion error: {e}")
 
@@ -1556,7 +1554,7 @@ async def design_fusion_variants_tool(args):
         )
 
     try:
-        result = _design_fusion_variants(
+        result = design_fusion_variants(
             fp_name=fp_name,
             target_gene_name=target_name,
             target_aa_sequence=target_aa,

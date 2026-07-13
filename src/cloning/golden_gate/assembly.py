@@ -8,14 +8,14 @@ ligates them into the final construct. Like the core assembler, every operation
 is deterministic string math on verified sequences — no LLM involvement.
 
 The basic sequence utilities (clean_sequence, reverse_complement, validate_dna)
-live in src.assembler and are imported here.
+live in src.cloning.assembler and are imported here.
 """
 
 import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from src.assembler import clean_sequence, reverse_complement, validate_dna
+from src.cloning.assembler import clean_sequence, reverse_complement, validate_dna
 
 
 GG_ENZYMES = {
@@ -257,7 +257,7 @@ def assemble_golden_gate(
     # correct backbone cut sites.  Search ALL sites (both strands) because the
     # recognition-site orientation varies by vector design:
     #   • Standard (Scenario A): FWD site on left, REV site on right
-    #   • Allen Institute backbones (Scenario B): REV site on left, FWD on right
+    #   • Reverse backbones (Scenario B): REV site on left, FWD on right
     #     — recognition sequences end up on the dropout, overhangs on the scaffold
 
     first_part_left_oh = excised[0][1] if excised else None

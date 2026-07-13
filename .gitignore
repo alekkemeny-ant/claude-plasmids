@@ -18,6 +18,8 @@ env/
 
 # Session state
 .sessions.json
+.batch_jobs.json
+*.bak
 
 # User construct database (per-deployment, not shared)
 app/constructs.db

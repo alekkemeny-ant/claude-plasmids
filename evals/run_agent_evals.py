@@ -58,7 +58,7 @@ from src.library import (
     register_test_fixtures,
     clear_test_fixtures,
 )
-from src.assembler import find_mcs_insertion_point
+from src.cloning.assembler import find_mcs_insertion_point
 from evals.rubric import score_construct, RubricResult, Check
 from evals.simulated_user import SimulatedUser
 from evals.llm_judge import LLMJudge, JudgeResult
